@@ -1,0 +1,13 @@
+[package]
+name = "cosmic-bg"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+image = "*"
+sctk = { package = "smithay-client-toolkit", git = "https://github.com/wash2/client-toolkit", branch = "get_popup" }
+wayland-protocols-wlr = { git="https://github.com/smithay/wayland-rs", features = ["client"], rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
+cosmic-bg-config = { path = "./cosmic-bg-config" }
+anyhow = "1.0"
