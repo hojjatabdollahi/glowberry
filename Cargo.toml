@@ -11,3 +11,4 @@ sctk = { package = "smithay-client-toolkit", git = "https://github.com/wash2/cli
 wayland-protocols-wlr = { git="https://github.com/smithay/wayland-rs", features = ["client"], rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
 cosmic-bg-config = { path = "./cosmic-bg-config" }
 anyhow = "1.0"
+notify = "5.0.0"

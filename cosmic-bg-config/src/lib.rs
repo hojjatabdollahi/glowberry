@@ -37,8 +37,8 @@ pub struct CosmicBgEntry {
     pub source: CosmicBgImgSource,
     /// whether the images should be filtered by the active theme
     pub filter_by_theme: bool,
-    /// frequency at which the wallpaper is rotated in minutes
-    pub rotation_frequency: u32,
+    /// frequency at which the wallpaper is rotated in seconds
+    pub rotation_frequency: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -55,7 +55,7 @@ impl Default for CosmicBgConfig {
                 output: CosmicBgOuput::All,
                 source: CosmicBgImgSource::Wallpapers,
                 filter_by_theme: true,
-                rotation_frequency: 60,
+                rotation_frequency: 3600,
             }]
         }
     }

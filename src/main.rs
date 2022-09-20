@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
-use std::{collections::VecDeque, convert::TryInto, path::PathBuf, time::Duration};
+use std::{collections::VecDeque, convert::TryInto, path::PathBuf, time::{Duration, self}};
 
 use cosmic_bg_config::{CosmicBgConfig, CosmicBgOuput};
 use image::{io::Reader as ImageReader, DynamicImage};
@@ -9,7 +9,7 @@ use sctk::{
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
     output::{OutputHandler, OutputInfo, OutputState},
     reexports::{
-        calloop,
+        calloop::{self, timer::{Timer, TimeoutAction}},
         client::{
             protocol::{
                 wl_output::{self, WlOutput},
@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     let mut event_loop = calloop::EventLoop::try_new()?;
     let event_queue: EventQueue<CosmicBg> = conn.new_event_queue();
     let qh = event_queue.handle();
-    let mut config = CosmicBgConfig::load().unwrap_or_default();
+    let config = CosmicBgConfig::load().unwrap_or_default();
 
     // initial setup with all imagesf
     let wallpapers = config
@@ -40,6 +40,7 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|bg| {
             let mut image_queue = VecDeque::new();
+            // TODO init the image paths
             let cur_image = image_queue.pop_front().and_then(|cur_image_path| {
                 let img = match ImageReader::open(&cur_image_path) {
                     Ok(img) => match img.decode() {
@@ -51,6 +52,50 @@ fn main() -> anyhow::Result<()> {
                 image_queue.push_back(cur_image_path);
                 img
             });
+
+            let rotation_freq = bg.rotation_frequency;
+            let cosmic_bg_clone = bg.output.clone();
+
+            // set timer for rotation
+            if rotation_freq > 0 {
+                let _ = event_loop.handle().insert_source(Timer::from_duration(Duration::from_secs(rotation_freq)), move |_, _, state: &mut CosmicBg| {
+                    let item = match state
+                    .wallpapers
+                    .iter_mut()
+                    .find(|w| w.configured_output == cosmic_bg_clone) {
+                        Some(item) => item,
+                        None => return TimeoutAction::Drop, // Drop if no item found for this timer
+                    };
+
+                    let mut img = None;
+
+                    while img.is_none() && item.image_queue.front().is_some() {
+                        let next = item.image_queue.pop_front().unwrap();                            
+    
+                        img = match ImageReader::open(&next) {
+                            Ok(img) => match img.decode() {
+                                Ok(img) => Some(img),
+                                Err(_) => None,
+                            },
+                            Err(_) => None,
+                        };
+
+                        if let Some(image) = img.take() {
+                            item.image_queue.push_back(next.clone());
+                            for layer in item.layers.iter_mut().filter(|l| !l.first_configure ) {
+                                layer.layer.set_size(image.width(), image.height());
+                                layer.layer.wl_surface().commit();
+                            }
+                            item.cur_image.replace(image);
+
+                            return TimeoutAction::ToDuration(Duration::from_secs(rotation_freq));
+                        }
+                    }
+
+                    TimeoutAction::Drop
+                });
+            }
+            
             CosmicBgWallpaper {
                 configured_output: bg.output.clone(),
                 layers: Vec::new(),
@@ -70,6 +115,7 @@ fn main() -> anyhow::Result<()> {
         compositor_state: CompositorState::new(),
         shm_state: ShmState::new(),
         layer_state: LayerState::new(),
+        qh,
 
         exit: false,
         wallpapers,
@@ -100,7 +146,7 @@ struct CosmicBgWallpaper {
     cur_image: Option<DynamicImage>,
     image_queue: VecDeque<PathBuf>,
     filter_by_theme: bool,
-    rotation_frequency: u32,
+    rotation_frequency: u64,
     pool: Option<SlotPool>,
 }
 
@@ -121,6 +167,7 @@ struct CosmicBg {
     compositor_state: CompositorState,
     shm_state: ShmState,
     layer_state: LayerState,
+    qh: QueueHandle<CosmicBg>,
 
     exit: bool,
     wallpapers: Vec<CosmicBgWallpaper>,
@@ -186,8 +233,8 @@ impl OutputHandler for CosmicBg {
 
         let (width, height) = match item.cur_image.as_ref() {
             Some(img) => (
-                img.width().min(output_info.physical_size.0 as u32),
-                img.height().min(output_info.physical_size.1 as u32),
+                img.width(),//.min(output_info.physical_size.0 as u32),
+                img.height()//.min(output_info.physical_size.1 as u32),
             ),
             None => (1, 1),
         };
@@ -308,6 +355,10 @@ impl ShmHandler for CosmicBg {
 impl CosmicBgWallpaper {
     pub fn draw(&mut self, qh: &QueueHandle<CosmicBg>) {
         for layer in &self.layers {
+            if layer.first_configure {
+                continue;
+            }
+
             let width = layer.width;
             let height = layer.height;
             let stride = layer.width as i32 * 4;
