@@ -61,7 +61,7 @@ pub struct CosmicBgEntry {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgConfig {
-    /// the configured wallpapers
+    /// the configured wallpapers8
     pub backgrounds: Vec<CosmicBgEntry>
 }
 

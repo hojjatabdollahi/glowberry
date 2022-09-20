@@ -111,10 +111,6 @@ fn main() -> anyhow::Result<()> {
 
                             if let Some(image) = img.take() {
                                 item.image_queue.push_back(next);
-                                for layer in item.layers.iter_mut().filter(|l| !l.first_configure) {
-                                    layer.layer.set_size(image.width(), image.height());
-                                    layer.layer.wl_surface().commit();
-                                }
                                 item.cur_image.replace(image.into_rgb8());
                                 item.new_image = true;
                                 item.draw(&state.qh);
@@ -176,7 +172,6 @@ fn main() -> anyhow::Result<()> {
         event_loop.dispatch(Duration::from_millis(16), &mut bg_state)?;
 
         if bg_state.exit {
-            println!("exiting example");
             break;
         }
     }
@@ -411,8 +406,6 @@ impl CosmicBgWallpaper {
         }
 
         for layer in self.layers.iter_mut().filter(|l| !l.first_configure) {
-            // println!("drawing {:?}", self.cur_image.as_ref().map(|img| img.as_raw()));
-
             let img = match self.cur_image.as_ref().map(|img| {
                 image::imageops::resize(
                     img,
