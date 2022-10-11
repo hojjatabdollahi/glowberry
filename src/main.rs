@@ -3,7 +3,7 @@ mod img_source;
 
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
-use cosmic_bg_config::{CosmicBgConfig, CosmicBgOuput};
+use cosmic_bg_config::{CosmicBgConfig, CosmicBgOutput};
 use image::{io::Reader as ImageReader, RgbImage};
 use itertools::Itertools;
 use sctk::{
@@ -182,7 +182,7 @@ fn main() -> anyhow::Result<()> {
 #[derive(Debug)]
 pub struct CosmicBgWallpaper {
     id: usize,
-    configured_output: CosmicBgOuput,
+    configured_output: CosmicBgOutput,
     layers: Vec<CosmicBgLayer>,
     cur_image: Option<RgbImage>,
     image_queue: VecDeque<PathBuf>,
@@ -264,8 +264,8 @@ impl OutputHandler for CosmicBg {
             .wallpapers
             .iter_mut()
             .find(|w| match &w.configured_output {
-                CosmicBgOuput::All => !w.layers.iter().any(|l| l.wl_output == wl_output),
-                CosmicBgOuput::MakeModel { make, model } => {
+                CosmicBgOutput::All => !w.layers.iter().any(|l| l.wl_output == wl_output),
+                CosmicBgOutput::MakeModel { make, model } => {
                     make == &output_info.make
                         && model == &output_info.model
                         && !w.layers.iter().any(|l| l.wl_output == wl_output)
@@ -325,8 +325,8 @@ impl OutputHandler for CosmicBg {
             .wallpapers
             .iter_mut()
             .find(|w| match &w.configured_output {
-                CosmicBgOuput::All => true,
-                CosmicBgOuput::MakeModel { make, model } => {
+                CosmicBgOutput::All => true,
+                CosmicBgOutput::MakeModel { make, model } => {
                     make == &output_info.make && model == &output_info.model
                 }
             }) {

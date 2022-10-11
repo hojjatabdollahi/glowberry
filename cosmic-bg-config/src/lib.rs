@@ -8,7 +8,7 @@ use xdg::BaseDirectories;
 /// Configuration for the panel's ouput
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub enum CosmicBgOuput {
+pub enum CosmicBgOutput {
     /// show panel on all outputs
     All,
     /// show panel on a specific output
@@ -33,7 +33,7 @@ pub enum CosmicBgImgSource {
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgEntry {
     /// the configured output
-    pub output: CosmicBgOuput,
+    pub output: CosmicBgOutput,
     /// the configured image source
     pub source: CosmicBgImgSource,
     /// whether the images should be filtered by the active theme
@@ -70,7 +70,7 @@ impl Default for CosmicBgConfig {
     fn default() -> Self {
         CosmicBgConfig {
             backgrounds: vec![CosmicBgEntry {
-                output: CosmicBgOuput::All,
+                output: CosmicBgOutput::All,
                 source: CosmicBgImgSource::Wallpapers,
                 filter_by_theme: true,
                 rotation_frequency: 10,
