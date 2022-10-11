@@ -1,6 +1,5 @@
 use std::{fs, path::PathBuf};
 
-use cosmic_bg_config::CosmicBgImgSource;
 use notify::{
     event::{ModifyKind, RenameMode},
     RecommendedWatcher, RecursiveMode, Watcher,
@@ -13,27 +12,22 @@ use sctk::reexports::calloop::{
 use crate::CosmicBg;
 
 pub fn img_source(
-    bg_sources: Vec<CosmicBgImgSource>,
+    sources: Vec<(usize, PathBuf)>,
     handle: LoopHandle<CosmicBg>,
 ) -> (
-    channel::Sender<(CosmicBgImgSource, notify::Event)>,
+    channel::Sender<(usize, notify::Event)>,
     Vec<RecommendedWatcher>,
 ) {
-    let sources: Vec<PathBuf> = bg_sources
-        .iter()
-        .cloned()
-        .filter_map(|source| source.try_into().ok())
-        .collect();
     let (notify_tx, notify_rx) = channel();
     let _ = handle
         .insert_source(
             notify_rx,
-            |e: channel::Event<(CosmicBgImgSource, notify::Event)>, _, state| {
+            |e: channel::Event<(usize, notify::Event)>, _, state| {
                 match e {
                     channel::Event::Msg((source, event)) => match event.kind {
                         notify::EventKind::Create(_)
                         | notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-                            for w in state.wallpapers.iter_mut().filter(|w| w.source == source) {
+                            for w in state.wallpapers.iter_mut().filter(|w| w.id == source) {
                                 for p in &event.paths {
                                     if !w.image_queue.contains(p) {
                                         w.image_queue.push_front(p.into());
@@ -44,11 +38,11 @@ pub fn img_source(
                         }
                         notify::EventKind::Remove(_)
                         | notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                            for w in state.wallpapers.iter_mut().filter(|w| w.source == source) {
+                            for w in state.wallpapers.iter_mut().filter(|w| w.id == source) {
                                 w.image_queue.retain(|p| !event.paths.contains(p));
                             }
                         }
-                        e => {}
+                        _ => {}
                     },
                     channel::Event::Closed => {
                         // TODO log drop
@@ -62,16 +56,14 @@ pub fn img_source(
     let notify_tx_clone = notify_tx.clone();
     (
         notify_tx,
-        bg_sources
-            .iter()
-            .zip(sources)
-            .filter_map(|(cosmic_source, path_source)| {
-                let cosmic_source_clone = cosmic_source.clone();
+        sources
+            .into_iter()
+            .filter_map(|(id, path_source)| {
                 let tx_clone = notify_tx_clone.clone();
                 let mut watcher = match RecommendedWatcher::new(
                     move |res| {
                         if let Ok(e) = res {
-                            let _ = tx_clone.send((cosmic_source_clone.clone(), e));
+                            let _ = tx_clone.send((id, e));
                         }
                     },
                     notify::Config::default(),

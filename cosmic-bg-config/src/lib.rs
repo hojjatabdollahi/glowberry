@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
-use std::{path::PathBuf, fs::File, str::FromStr};
+use std::{path::{PathBuf}, fs::File, str::FromStr, env};
 
-use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use xdg::BaseDirectories;
 
@@ -29,22 +28,7 @@ pub enum CosmicBgImgSource {
     Path(String),
 }
 
-impl TryInto<PathBuf> for CosmicBgImgSource {
-    type Error= anyhow::Error;
 
-    fn try_into(self) -> Result<PathBuf, Self::Error> {
-        match (dirs::home_dir(), self) {
-            (Some(mut home), CosmicBgImgSource::Wallpapers) => {
-                home.push("Pictures/Wallpapers");
-                Ok(home)
-            },
-            (_, CosmicBgImgSource::Path(p)) => {
-                PathBuf::from_str(&p).map_err(|err| err.into())
-            },
-            _ => bail!("Failed to convert to path"),
-        }
-    }
-}
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgEntry {
@@ -56,6 +40,23 @@ pub struct CosmicBgEntry {
     pub filter_by_theme: bool,
     /// frequency at which the wallpaper is rotated in seconds
     pub rotation_frequency: u64,
+}
+
+impl CosmicBgEntry {
+    /// defaults to /usr/share/backgrounds/pop/ if it fails to find configured path
+    pub fn source_path(&self) -> PathBuf {
+        match &self.source {
+            CosmicBgImgSource::Wallpapers => {
+                env::var("XDG_PICTURES_DIR").ok().map(|s| PathBuf::from(s)).or_else(|| xdg_user::pictures().unwrap_or(None)).map(|mut pics_dir| {
+                    pics_dir.push("Wallpapers");
+                    pics_dir
+                })      
+            },
+            CosmicBgImgSource::Path(p) => {
+                PathBuf::from_str(&p).ok()
+            },
+        }.unwrap_or_else(|| "/usr/share/backgrounds/pop/".into())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -72,7 +73,7 @@ impl Default for CosmicBgConfig {
                 output: CosmicBgOuput::All,
                 source: CosmicBgImgSource::Wallpapers,
                 filter_by_theme: true,
-                rotation_frequency: 3600,
+                rotation_frequency: 10,
             }]
         }
     }

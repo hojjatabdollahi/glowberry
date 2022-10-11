@@ -95,6 +95,7 @@ dependencies = [
  "cosmic-bg-config",
  "dirs",
  "image",
+ "itertools",
  "notify",
  "smithay-client-toolkit",
  "walkdir",
@@ -112,6 +113,7 @@ dependencies = [
  "slog",
  "wayland-protocols-wlr",
  "xdg",
+ "xdg-user",
 ]
 
 [[package]]
@@ -328,6 +330,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "home"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "747309b4b440c06d57b0b25f2aee03ee9b5e5397d288c60e21fc709bb98a7408"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "image"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,6 +375,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
 ]
 
 [[package]]
@@ -1133,6 +1153,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4583db5cbd4c4c0303df2d15af80f0539db703fa1c68802d4cbbd2dd0f88f6"
 dependencies = [
  "dirs",
+]
+
+[[package]]
+name = "xdg-user"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d5cd803f28ce5a488c8b129858222998c0a06bbec81f9d1b71faed1f9f9f0e"
+dependencies = [
+ "home",
+ "libc",
 ]
 
 [[package]]

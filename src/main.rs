@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0-only
 mod img_source;
 
-use std::{collections::VecDeque, convert::TryInto, path::PathBuf, time::Duration};
+use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
-use cosmic_bg_config::{CosmicBgConfig, CosmicBgImgSource, CosmicBgOuput};
+use cosmic_bg_config::{CosmicBgConfig, CosmicBgOuput};
 use image::{io::Reader as ImageReader, RgbImage};
+use itertools::Itertools;
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
@@ -50,22 +51,21 @@ fn main() -> anyhow::Result<()> {
     let wallpapers = config
         .backgrounds
         .iter()
-        .map(|bg| {
+        .enumerate()
+        .map(|(id, bg)| {
             let mut image_queue = VecDeque::new();
-            let res: Result<PathBuf, _> = bg.source.clone().try_into();
-            if let Ok(path_source) = res {
-                if path_source.is_dir() {
-                    for img_path in WalkDir::new(&path_source)
-                        .follow_links(true)
-                        .into_iter()
-                        .filter_map(|e| e.ok())
-                        .filter(|p| p.path().is_file())
-                    {
-                        image_queue.push_front(img_path.path().into());
-                    }
-                } else if path_source.is_file() {
-                    image_queue.push_front(path_source);
+            let path_source = bg.source_path();
+            if path_source.is_dir() {
+                for img_path in WalkDir::new(&path_source)
+                    .follow_links(true)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|p| p.path().is_file())
+                {
+                    image_queue.push_front(img_path.path().into());
                 }
+            } else if path_source.is_file() {
+                image_queue.push_front(path_source);
             }
 
             let cur_image = image_queue.pop_front().and_then(|cur_image_path| {
@@ -128,23 +128,23 @@ fn main() -> anyhow::Result<()> {
             let new_image = cur_image.is_some();
 
             CosmicBgWallpaper {
+                id,
                 configured_output: bg.output.clone(),
                 layers: Vec::new(),
                 cur_image,
                 image_queue,
-                source: bg.source.clone(),
+                source: bg.source_path(),
                 _filter_by_theme: bg.filter_by_theme,
                 _rotation_frequency: bg.rotation_frequency,
                 new_image,
             }
         })
-        .collect();
+        .collect_vec();
 
     let _source_txs = img_source::img_source(
-        config
-            .backgrounds
+        wallpapers
             .iter()
-            .map(|c| c.source.clone())
+            .map(|w| (w.id, w.source.clone()))
             .collect(),
         event_loop.handle(),
     );
@@ -181,11 +181,12 @@ fn main() -> anyhow::Result<()> {
 
 #[derive(Debug)]
 pub struct CosmicBgWallpaper {
+    id: usize,
     configured_output: CosmicBgOuput,
     layers: Vec<CosmicBgLayer>,
     cur_image: Option<RgbImage>,
     image_queue: VecDeque<PathBuf>,
-    source: CosmicBgImgSource,
+    source: PathBuf,
     // TODO filter images by whether they seem to match dark / light mode
     // Alternatively only load from light / dark subdirectories given a directory source when this is active
     _filter_by_theme: bool,
@@ -236,7 +237,7 @@ impl CompositorHandler for CosmicBg {
     fn frame(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
@@ -364,7 +365,6 @@ impl LayerHandler for CosmicBg {
     ) {
         for wallpaper in &mut self.wallpapers {
             let (w, h) = configure.new_size;
-            let mut draw = false;
             if let Some(w_layer) = wallpaper.layers.iter_mut().find(|l| &l.layer == layer) {
                 w_layer.width = w;
                 w_layer.height = h;

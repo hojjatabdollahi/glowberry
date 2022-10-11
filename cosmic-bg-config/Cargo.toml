@@ -14,6 +14,7 @@ gtk4 = { git = "https://github.com/gtk-rs/gtk4-rs", features = ["v4_4"], optiona
 slog = { version = "2.7.0", features = ["max_level_trace", "release_max_level_warn"] }
 wayland-protocols-wlr = { git = "https://github.com/smithay/wayland-rs", features = ["client"], rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
 dirs = "4.0"
+xdg-user = "0.2.1"
 
 [workspace]
 members = [
