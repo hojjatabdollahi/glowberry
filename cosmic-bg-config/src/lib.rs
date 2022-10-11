@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
-use std::{path::{PathBuf}, fs::File, str::FromStr, env};
+use std::{env, fs::File, path::PathBuf, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use xdg::BaseDirectories;
@@ -12,10 +12,7 @@ pub enum CosmicBgOutput {
     /// show panel on all outputs
     All,
     /// show panel on a specific output
-    MakeModel {
-        make: String,
-        model: String,
-    },
+    MakeModel { make: String, model: String },
 }
 
 /// Configuration for the panel's ouput
@@ -27,7 +24,6 @@ pub enum CosmicBgImgSource {
     /// pull images from a specific directory or file
     Path(String),
 }
-
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -66,16 +62,17 @@ impl CosmicBgEntry {
     /// defaults to /usr/share/backgrounds/pop/ if it fails to find configured path
     pub fn source_path(&self) -> PathBuf {
         match &self.source {
-            CosmicBgImgSource::Wallpapers => {
-                env::var("XDG_PICTURES_DIR").ok().map(|s| PathBuf::from(s)).or_else(|| xdg_user::pictures().unwrap_or(None)).map(|mut pics_dir| {
+            CosmicBgImgSource::Wallpapers => env::var("XDG_PICTURES_DIR")
+                .ok()
+                .map(|s| PathBuf::from(s))
+                .or_else(|| xdg_user::pictures().unwrap_or(None))
+                .map(|mut pics_dir| {
                     pics_dir.push("Wallpapers");
                     pics_dir
-                })      
-            },
-            CosmicBgImgSource::Path(p) => {
-                PathBuf::from_str(&p).ok()
-            },
-        }.unwrap_or_else(|| "/usr/share/backgrounds/pop/".into())
+                }),
+            CosmicBgImgSource::Path(p) => PathBuf::from_str(&p).ok(),
+        }
+        .unwrap_or_else(|| "/usr/share/backgrounds/pop/".into())
     }
 }
 
@@ -83,7 +80,7 @@ impl CosmicBgEntry {
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgConfig {
     /// the configured wallpapers8
-    pub backgrounds: Vec<CosmicBgEntry>
+    pub backgrounds: Vec<CosmicBgEntry>,
 }
 
 impl Default for CosmicBgConfig {
@@ -102,7 +99,6 @@ impl Default for CosmicBgConfig {
 
 static NAME: &str = "com.system76.CosmicBg";
 static CONFIG: &str = "config.ron";
-
 
 impl CosmicBgConfig {
     /// load config with the provided name
