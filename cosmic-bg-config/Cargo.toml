@@ -10,26 +10,5 @@ anyhow = "1.0.63"
 ron = "0.8.0"
 serde = { version = "1.0.144", features = ["derive"] }
 xdg = "2.4.1"
-gtk4 = { git = "https://github.com/gtk-rs/gtk4-rs", features = ["v4_4"], optional = true }
-slog = { version = "2.7.0", features = ["max_level_trace", "release_max_level_warn"] }
-wayland-protocols-wlr = { git = "https://github.com/smithay/wayland-rs", features = ["client"], rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
 dirs = "4.0"
 xdg-user = "0.2.1"
-
-[workspace]
-members = [
-    "cosmic-bg-config"
-]
-
-
-[patch.crates-io]
-wayland-protocols-wlr = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-protocols-misc = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-egl = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-protocols = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-server = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-sys = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-backend = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-scanner = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-cursor = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
-wayland-client = { git = "https://github.com/smithay/wayland-rs", rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }

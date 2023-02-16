@@ -67,9 +67,7 @@ pub enum SamplingMethod {
     // Rotate through images in Random order
     Random,
     // TODO GnomeWallpapers
-
 }
-
 
 /// Image scaling mode
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]

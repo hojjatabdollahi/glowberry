@@ -1,6 +1,0 @@
-data/com.system76.CosmicBackground.desktop.in.in
-data/com.system76.CosmicBackground.gschema.xml.in
-data/com.system76.CosmicBackground.metainfo.xml.in.in
-data/resources/ui/shortcuts.ui
-data/resources/ui/window.ui
-src/application.rs

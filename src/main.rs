@@ -3,14 +3,13 @@ mod img_source;
 
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
-use cosmic_bg_config::{CosmicBgConfig, CosmicBgOutput, FilterMethod, ScalingMode, SamplingMethod};
+use cosmic_bg_config::{CosmicBgConfig, CosmicBgOutput, FilterMethod, SamplingMethod, ScalingMode};
 use image::{io::Reader as ImageReader, Pixel, RgbImage};
 use itertools::Itertools;
 use rand::{seq::SliceRandom, thread_rng};
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
-    event_loop::WaylandSource,
     output::{OutputHandler, OutputInfo, OutputState},
     reexports::{
         calloop::{
@@ -18,17 +17,18 @@ use sctk::{
             timer::{TimeoutAction, Timer},
         },
         client::{
+            globals::registry_queue_init,
             protocol::{
                 wl_output::{self, WlOutput},
                 wl_shm, wl_surface,
             },
-            Connection, EventQueue, QueueHandle,
+            Connection, QueueHandle, WaylandSource,
         },
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     shell::layer::{
-        Anchor, KeyboardInteractivity, Layer, LayerHandler, LayerState, LayerSurface,
+        Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
         LayerSurfaceConfigure,
     },
     shm::{slot::SlotPool, ShmHandler, ShmState},
@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut event_loop = calloop::EventLoop::try_new()?;
 
-    let event_queue: EventQueue<CosmicBg> = conn.new_event_queue();
+    let (globals, event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
     WaylandSource::new(event_queue)
         .unwrap()
@@ -79,7 +79,9 @@ fn main() -> anyhow::Result<()> {
             {
                 let image_slice = image_queue.make_contiguous();
                 match bg.sampling_method {
-                    SamplingMethod::Alphanumeric => image_slice.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy())),
+                    SamplingMethod::Alphanumeric => {
+                        image_slice.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()))
+                    }
                     SamplingMethod::Random => image_slice.shuffle(&mut thread_rng()),
                 };
             }
@@ -175,23 +177,17 @@ fn main() -> anyhow::Result<()> {
 
     // XXX All entry if it exists, should be placed last in the list of wallpapers
     let mut bg_state = CosmicBg {
-        registry_state: RegistryState::new(&conn, &qh),
-        output_state: OutputState::new(),
-        compositor_state: CompositorState::new(),
-        shm_state: ShmState::new(),
-        layer_state: LayerState::new(),
+        registry_state: RegistryState::new(&globals),
+        output_state: OutputState::new(&globals, &qh),
+        compositor_state: CompositorState::bind(&globals, &qh).unwrap(),
+        shm_state: ShmState::bind(&globals, &qh).unwrap(),
+        layer_state: LayerShell::bind(&globals, &qh).unwrap(),
         qh,
 
         exit: false,
         wallpapers,
         _config: config,
     };
-
-    while !bg_state.registry_state.ready() {
-        event_loop
-            .dispatch(None, &mut bg_state)
-            .unwrap();
-    }
 
     loop {
         event_loop.dispatch(None, &mut bg_state)?;
@@ -237,7 +233,7 @@ pub struct CosmicBg {
     output_state: OutputState,
     compositor_state: CompositorState,
     shm_state: ShmState,
-    layer_state: LayerState,
+    layer_state: LayerShell,
     qh: QueueHandle<CosmicBg>,
 
     exit: bool,
@@ -246,10 +242,6 @@ pub struct CosmicBg {
 }
 
 impl CompositorHandler for CosmicBg {
-    fn compositor_state(&mut self) -> &mut CompositorState {
-        &mut self.compositor_state
-    }
-
     fn scale_factor_changed(
         &mut self,
         _conn: &Connection,
@@ -301,10 +293,10 @@ impl OutputHandler for CosmicBg {
             None => return,
         };
 
-        let (width, height) = output_info.logical_size;
+        let (width, height) = output_info.logical_size.unwrap_or((0, 0));
         let (width, height) = (width as u32, height as u32);
 
-        let surface = self.compositor_state.create_surface(qh).unwrap();
+        let surface = self.compositor_state.create_surface(qh);
 
         let layer = LayerSurface::builder()
             .size((0, 0))
@@ -372,11 +364,7 @@ impl OutputHandler for CosmicBg {
     }
 }
 
-impl LayerHandler for CosmicBg {
-    fn layer_state(&mut self) -> &mut LayerState {
-        &mut self.layer_state
-    }
-
+impl LayerShellHandler for CosmicBg {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
         self.exit = true;
     }
@@ -536,5 +524,5 @@ impl ProvidesRegistryState for CosmicBg {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
-    registry_handlers![CompositorState, OutputState, ShmState, LayerState,];
+    registry_handlers![OutputState];
 }

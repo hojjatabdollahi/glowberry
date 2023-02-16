@@ -7,8 +7,7 @@ edition = "2021"
 
 [dependencies]
 image = "0.24"
-sctk = { package = "smithay-client-toolkit", git = "https://github.com/wash2/client-toolkit", branch = "get_popup" }
-wayland-protocols-wlr = { git="https://github.com/smithay/wayland-rs", features = ["client"], rev = "f4740097ba42b1ec5d439c82eff4e748e38178d2" }
+sctk = { package = "smithay-client-toolkit", git = "https://github.com/Smithay/client-toolkit", rev = "a3d1af8" }
 cosmic-bg-config = { path = "./cosmic-bg-config" }
 anyhow = "1.0"
 notify = "5.0"
@@ -16,3 +15,8 @@ dirs = "4.0"
 walkdir = "2.3"
 itertools = "0.10"
 rand = "0.8"
+
+[workspace]
+members = [
+    "cosmic-bg-config"
+]
