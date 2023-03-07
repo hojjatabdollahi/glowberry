@@ -126,7 +126,7 @@ impl Default for CosmicBgConfig {
     }
 }
 
-pub const NAME: &str = "com.system76.CosmicBg";
+pub const NAME: &str = "com.system76.CosmicBackground";
 pub const BG_KEY: &str = "backgrounds";
 
 impl CosmicBgConfig {

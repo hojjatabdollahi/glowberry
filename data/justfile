@@ -7,9 +7,11 @@ desktop-dst := install-dir / 'applications' / desktop-src
 metainfo-src := appid + '.metainfo.xml'
 metainfo-dst := install-dir / 'metainfo' / metainfo-src
 
+default-schema-target := install-dir / appid
+
 install:
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
-
+    find v1 -exec install -Dm0644 {} {{default-schema-target}}/{} \;
 uninstall:
     rm {{desktop-dst}} {{metainfo-dst}}

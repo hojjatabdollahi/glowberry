@@ -7,7 +7,7 @@
             rotation_frequency: 3600,
             filter_method: Lanczos,
             scaling_mode: Zoom,
-            sampling_method: Alphanumeric,
+            sampling_method: Random,
         ),
     ],
 )
