@@ -15,7 +15,7 @@ dirs = "4.0"
 walkdir = "2.3"
 itertools = "0.10"
 rand = "0.8"
-cosmic-config = { path = "../cosmic-config" }
+cosmic-config = { git = "https://github.com/pop-os/libcosmic", branch = "config"}
 ron = "0.8"
 [workspace]
 members = [

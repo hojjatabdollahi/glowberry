@@ -128,6 +128,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config"
 version = "0.1.0"
+source = "git+https://github.com/pop-os/libcosmic?branch=config#4df83eada23f2f8395ed149085786558f62f22bb"
 dependencies = [
  "atomicwrites",
  "dirs",
