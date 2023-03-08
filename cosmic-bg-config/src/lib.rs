@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
-use std::{
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
 use cosmic_config::{Config, ConfigGet};
 use serde::{Deserialize, Serialize};
@@ -132,7 +130,11 @@ impl CosmicBgConfig {
         } else {
             if backgrounds.iter().all(|e| e.output != CosmicBgOutput::All) {
                 // add the default all wallpaper if all is not already present
-                if let Some(def_all) = def.backgrounds.iter().find(|e| e.output == CosmicBgOutput::All) {
+                if let Some(def_all) = def
+                    .backgrounds
+                    .iter()
+                    .find(|e| e.output == CosmicBgOutput::All)
+                {
                     backgrounds.push(def_all.clone());
                 }
             }
