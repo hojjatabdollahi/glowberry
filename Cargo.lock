@@ -120,6 +120,7 @@ name = "cosmic-bg-config"
 version = "0.1.0"
 dependencies = [
  "cosmic-config",
+ "image",
  "ron",
  "serde",
  "xdg-user",

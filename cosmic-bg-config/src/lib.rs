@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
-use std::{env, path::PathBuf, str::FromStr};
+use std::{env, path::{Path, PathBuf}, str::FromStr, borrow::Cow};
 
 use cosmic_config::{Config, ConfigGet};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,26 @@ pub enum CosmicBgImgSource {
     Path(String),
 }
 
+impl CosmicBgImgSource {
+    pub fn as_path<'a>(&'a self) -> Cow<'a, Path> {
+        match &self {
+            CosmicBgImgSource::Wallpapers => if let Some(path) = env::var("XDG_PICTURES_DIR")
+                .ok()
+                .map(|s| PathBuf::from(s))
+                .or_else(|| xdg_user::pictures().unwrap_or(None))
+                .map(|mut pics_dir| {
+                    pics_dir.push("Wallpapers");
+                    pics_dir
+                }) {
+                    Cow::Owned(path)
+                } else {
+                    Cow::Borrowed(Path::new("/usr/share/backgrounds/pop/"))
+                },
+            CosmicBgImgSource::Path(p) => Cow::Borrowed(Path::new(p)),
+        }
+    }
+}
+
 impl Into<PathBuf> for CosmicBgImgSource {
     fn into(self) -> PathBuf {
         match self {
@@ -51,7 +71,7 @@ impl Into<PathBuf> for CosmicBgImgSource {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgEntry {
     /// the configured output
@@ -73,7 +93,7 @@ pub struct CosmicBgEntry {
 }
 
 /// Image filtering method
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 pub enum FilterMethod {
     // nearest neighbor filtering
     Nearest,
@@ -84,8 +104,18 @@ pub enum FilterMethod {
     Lanczos,
 }
 
+impl Into<image::imageops::FilterType> for FilterMethod {
+    fn into(self) -> image::imageops::FilterType {
+        match self {
+            FilterMethod::Nearest => image::imageops::FilterType::Nearest,
+            FilterMethod::Linear => image::imageops::FilterType::Triangle,
+            FilterMethod::Lanczos => image::imageops::FilterType::Lanczos3,
+        }
+    }
+}
+
 /// Image filtering method
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SamplingMethod {
     // Rotate through images in Aplhanumeeric order
     #[default]
@@ -96,7 +126,7 @@ pub enum SamplingMethod {
 }
 
 /// Image scaling mode
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 pub enum ScalingMode {
     // Fit the image and fill the rest of the area with the given RGB color
     Fit([f32; 3]),
@@ -113,7 +143,7 @@ impl CosmicBgEntry {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgConfig {
     /// the configured wallpapers

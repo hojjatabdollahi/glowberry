@@ -4,7 +4,7 @@ mod img_source;
 use std::{collections::VecDeque, fs, path::PathBuf, time::Duration};
 
 use cosmic_bg_config::{
-    CosmicBgConfig, CosmicBgEntry, CosmicBgImgSource, CosmicBgOutput, FilterMethod, SamplingMethod,
+    CosmicBgConfig, CosmicBgEntry, CosmicBgOutput, SamplingMethod,
     ScalingMode,
 };
 use cosmic_config::ConfigGet;
@@ -71,13 +71,15 @@ fn main() -> anyhow::Result<()> {
         .insert_source(cfg_rx, |e, _, state| {
             match e {
                 calloop::channel::Event::Msg(BgConfigUpdate::NewConfig(config)) => {
-                    state.apply_config(config);
+                    if state.config != config {
+                        state.apply_config(config);
+                    }
                 }
                 calloop::channel::Event::Msg(BgConfigUpdate::NewEntry(entry)) => {
                     if let Some(wallpaper) = state
                         .wallpapers
                         .iter_mut()
-                        .find(|w| w.configured_output == entry.output)
+                        .find(|w| w.entry.output == entry.output )
                     {
                         wallpaper.apply_entry(entry, state.source_tx.clone());
                     }
@@ -128,8 +130,8 @@ fn main() -> anyhow::Result<()> {
     // initial setup with all images
     let wallpapers = config
         .backgrounds
-        .into_iter()
-        .map(|bg| CosmicBgWallpaper::new(bg, qh.clone(), event_loop.handle(), source_tx.clone()))
+        .iter()
+        .map(|bg| CosmicBgWallpaper::new(bg.clone(), qh.clone(), event_loop.handle(), source_tx.clone()))
         .collect_vec();
 
     // XXX All entry if it exists, should be placed last in the list of wallpapers
@@ -144,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         loop_handle: event_loop.handle(),
         exit: false,
         wallpapers,
+        config
     };
 
     loop {
@@ -179,6 +182,7 @@ pub struct CosmicBg {
     loop_handle: calloop::LoopHandle<'static, CosmicBg>,
     exit: bool,
     wallpapers: Vec<CosmicBgWallpaper>,
+    config: CosmicBgConfig,
 }
 
 impl CosmicBg {
@@ -187,7 +191,7 @@ impl CosmicBg {
             if let Some(pos) = config
                 .backgrounds
                 .iter_mut()
-                .position(|new_w| new_w.output == w.configured_output)
+                .position(|new_w| new_w.output == w.entry.output)
             {
                 let _not_new = config.backgrounds.remove(pos);
                 true
@@ -247,7 +251,7 @@ impl OutputHandler for CosmicBg {
         match self
             .wallpapers
             .iter_mut()
-            .find(|w| match &w.configured_output {
+            .find(|w| match &w.entry.output {
                 CosmicBgOutput::All => !w.layers.iter().any(|l| l.wl_output == wl_output),
                 CosmicBgOutput::Name(name) => {
                     Some(name) == output_info.name.as_ref()
@@ -309,7 +313,7 @@ impl OutputHandler for CosmicBg {
         let item = match self
             .wallpapers
             .iter_mut()
-            .find(|w| match &w.configured_output {
+            .find(|w| match &w.entry.output {
                 CosmicBgOutput::All => true,
                 CosmicBgOutput::Name(name) => Some(name) == output_info.name.as_ref(),
             }) {
@@ -337,7 +341,7 @@ impl LayerShellHandler for CosmicBg {
     fn configure(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
@@ -376,18 +380,12 @@ impl ShmHandler for CosmicBg {
 
 #[derive(Debug)]
 pub struct CosmicBgWallpaper {
-    configured_output: CosmicBgOutput,
     layers: Vec<CosmicBgLayer>,
     cur_image: Option<RgbImage>,
     image_queue: VecDeque<PathBuf>,
-    source: CosmicBgImgSource,
-    sampling_method: SamplingMethod,
+    entry: CosmicBgEntry,
     // TODO filter images by whether they seem to match dark / light mode
     // Alternatively only load from light / dark subdirectories given a directory source when this is active
-    _filter_by_theme: bool,
-    rotation_frequency: u64,
-    filter: image::imageops::FilterType,
-    scaling: ScalingMode,
     new_image: bool,
     _watcher: Option<RecommendedWatcher>,
     timer_token: Option<RegistrationToken>,
@@ -410,24 +408,12 @@ impl CosmicBgWallpaper {
         loop_handle: calloop::LoopHandle<'static, CosmicBg>,
         source_tx: calloop::channel::SyncSender<(CosmicBgOutput, notify::Event)>,
     ) -> Self {
-        let filter = match entry.filter_method {
-            FilterMethod::Nearest => image::imageops::Nearest,
-            FilterMethod::Linear => image::imageops::Triangle,
-            FilterMethod::Lanczos => image::imageops::Lanczos3,
-        };
-
         let mut wallpaper = CosmicBgWallpaper {
-            configured_output: entry.output.clone(),
+            entry: entry.clone(),
             layers: Vec::new(),
             cur_image: None,
             image_queue: Default::default(),
-            source: entry.source,
-            _filter_by_theme: entry.filter_by_theme,
-            rotation_frequency: entry.rotation_frequency,
-            sampling_method: entry.sampling_method,
             new_image: false,
-            filter,
-            scaling: entry.scaling_mode.clone(),
             _watcher: None,
             timer_token: None,
             loop_handle,
@@ -442,7 +428,7 @@ impl CosmicBgWallpaper {
     pub fn draw(&mut self) {
         for layer in self.layers.iter_mut().filter(|l| !l.first_configure) {
             let img = match self.cur_image.as_ref() {
-                Some(img) => match self.scaling {
+                Some(img) => match self.entry.scaling_mode {
                     ScalingMode::Fit(color) => {
                         let u8_color = [
                             (u8::MAX as f32 * color[0]).round() as u8,
@@ -462,7 +448,7 @@ impl CosmicBgWallpaper {
                             (img.height() as f64 * ratio).round() as u32,
                         );
                         let new_image =
-                            image::imageops::resize(img, new_width, new_height, self.filter);
+                            image::imageops::resize(img, new_width, new_height, self.entry.filter_method.clone().into());
                         image::imageops::replace(
                             &mut final_image,
                             &new_image,
@@ -480,7 +466,7 @@ impl CosmicBgWallpaper {
                             (img.height() as f64 * ratio).round() as u32,
                         );
                         let mut new_image =
-                            image::imageops::resize(img, new_width, new_height, self.filter);
+                            image::imageops::resize(img, new_width, new_height, self.entry.filter_method.clone().into());
                         image::imageops::crop(
                             &mut new_image,
                             (new_width - layer.width) / 2,
@@ -491,7 +477,7 @@ impl CosmicBgWallpaper {
                         .to_image()
                     }
                     ScalingMode::Stretch => {
-                        image::imageops::resize(img, layer.width, layer.height, self.filter)
+                        image::imageops::resize(img, layer.width, layer.height, self.entry.filter_method.clone().into())
                     }
                 },
                 None => continue,
@@ -542,9 +528,9 @@ impl CosmicBgWallpaper {
 
     fn load_images(&mut self) {
         let mut image_queue = VecDeque::new();
-        let path_source: PathBuf = self.source.clone().into();
+        let path_source = self.entry.source.as_path();
         if path_source.is_dir() {
-            for img_path in WalkDir::new(&path_source)
+            for img_path in WalkDir::new(path_source)
                 .follow_links(true)
                 .into_iter()
                 .filter_map(|e| e.ok())
@@ -553,11 +539,11 @@ impl CosmicBgWallpaper {
                 image_queue.push_front(img_path.path().into());
             }
         } else if path_source.is_file() {
-            image_queue.push_front(path_source);
+            image_queue.push_front(path_source.into_owned());
         }
         {
             let image_slice = image_queue.make_contiguous();
-            match self.sampling_method {
+            match self.entry.sampling_method {
                 SamplingMethod::Alphanumeric => {
                     image_slice.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()))
                 }
@@ -583,7 +569,7 @@ impl CosmicBgWallpaper {
     }
 
     fn watch_source(&self, tx: calloop::channel::SyncSender<(CosmicBgOutput, notify::Event)>) {
-        let output = self.configured_output.clone();
+        let output = self.entry.output.clone();
         let mut watcher = match RecommendedWatcher::new(
             move |res| {
                 if let Ok(e) = res {
@@ -596,7 +582,7 @@ impl CosmicBgWallpaper {
             Err(_) => return,
         };
 
-        let source: PathBuf = self.source.clone().into();
+        let source = self.entry.source.as_path();
         if let Ok(m) = fs::metadata(&source) {
             if m.is_dir() {
                 let _ = watcher.watch(&source, RecursiveMode::Recursive);
@@ -611,17 +597,10 @@ impl CosmicBgWallpaper {
         config: CosmicBgEntry,
         tx: calloop::channel::SyncSender<(CosmicBgOutput, notify::Event)>,
     ) {
-        if config.output == self.configured_output {
-            self._filter_by_theme = config.filter_by_theme;
-            self.rotation_frequency = config.rotation_frequency;
-            self.filter = match config.filter_method {
-                FilterMethod::Nearest => image::imageops::Nearest,
-                FilterMethod::Linear => image::imageops::Triangle,
-                FilterMethod::Lanczos => image::imageops::Lanczos3,
-            };
-            self.scaling = config.scaling_mode.clone();
-            if config.source != self.source {
-                self.source = config.source.clone().into();
+        if config.output == self.entry.output && self.entry != config {
+            let src_changed = config.source != self.entry.source;
+            self.entry = config;
+            if src_changed {
                 self.load_images();
                 self.watch_source(tx);
             }
@@ -630,8 +609,8 @@ impl CosmicBgWallpaper {
     }
 
     fn register_timer(&mut self) {
-        let rotation_freq = self.rotation_frequency;
-        let cosmic_bg_clone = self.configured_output.clone();
+        let rotation_freq = self.entry.rotation_frequency;
+        let cosmic_bg_clone = self.entry.output.clone();
         // set timer for rotation
         if rotation_freq > 0 {
             self.timer_token = self
@@ -642,7 +621,7 @@ impl CosmicBgWallpaper {
                         let item = match state
                             .wallpapers
                             .iter_mut()
-                            .find(|w| w.configured_output == cosmic_bg_clone)
+                            .find(|w| w.entry.output == cosmic_bg_clone)
                         {
                             Some(item) => item,
                             None => return TimeoutAction::Drop, // Drop if no item found for this timer

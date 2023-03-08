@@ -19,7 +19,7 @@ pub fn img_source(
                             for w in state
                                 .wallpapers
                                 .iter_mut()
-                                .filter(|w| w.configured_output == source)
+                                .filter(|w| w.entry.output == source)
                             {
                                 for p in &event.paths {
                                     if !w.image_queue.contains(p) {
@@ -35,7 +35,7 @@ pub fn img_source(
                             for w in state
                                 .wallpapers
                                 .iter_mut()
-                                .filter(|w| w.configured_output == source)
+                                .filter(|w| w.entry.output == source)
                             {
                                 w.image_queue.retain(|p| !event.paths.contains(p));
                             }
