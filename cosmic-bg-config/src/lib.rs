@@ -34,6 +34,23 @@ pub enum CosmicBgImgSource {
     Path(String),
 }
 
+impl Into<PathBuf> for CosmicBgImgSource {
+    fn into(self) -> PathBuf {
+        match self {
+            CosmicBgImgSource::Wallpapers => env::var("XDG_PICTURES_DIR")
+                .ok()
+                .map(|s| PathBuf::from(s))
+                .or_else(|| xdg_user::pictures().unwrap_or(None))
+                .map(|mut pics_dir| {
+                    pics_dir.push("Wallpapers");
+                    pics_dir
+                }),
+            CosmicBgImgSource::Path(p) => PathBuf::from_str(&p).ok(),
+        }
+        .unwrap_or_else(|| "/usr/share/backgrounds/pop/".into())
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgEntry {
@@ -91,22 +108,6 @@ pub enum ScalingMode {
 }
 
 impl CosmicBgEntry {
-    /// defaults to /usr/share/backgrounds/pop/ if it fails to find configured path
-    pub fn source_path(&self) -> PathBuf {
-        match &self.source {
-            CosmicBgImgSource::Wallpapers => env::var("XDG_PICTURES_DIR")
-                .ok()
-                .map(|s| PathBuf::from(s))
-                .or_else(|| xdg_user::pictures().unwrap_or(None))
-                .map(|mut pics_dir| {
-                    pics_dir.push("Wallpapers");
-                    pics_dir
-                }),
-            CosmicBgImgSource::Path(p) => PathBuf::from_str(&p).ok(),
-        }
-        .unwrap_or_else(|| "/usr/share/backgrounds/pop/".into())
-    }
-
     pub fn key(&self) -> String {
         self.output.to_string()
     }
@@ -133,9 +134,10 @@ impl CosmicBgConfig {
     /// load config with the provided name
     pub fn load(config: &Config) -> Result<Self, cosmic_config::Error> {
         let entry_keys = config.get::<Vec<CosmicBgOutput>>(BG_KEY)?;
-        let backgrounds: Vec<_> = entry_keys.into_iter().filter_map(|c| {
-            config.get::<CosmicBgEntry>(&c.to_string()).ok()
-        }).collect();
+        let backgrounds: Vec<_> = entry_keys
+            .into_iter()
+            .filter_map(|c| config.get::<CosmicBgEntry>(&c.to_string()).ok())
+            .collect();
 
         if backgrounds.is_empty() {
             eprintln!("No wallpapers configured. Using defaults.");
