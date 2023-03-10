@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 image = "0.24"
-sctk = { package = "smithay-client-toolkit", git = "https://github.com/Smithay/client-toolkit", rev = "a3d1af8" }
+sctk = { package = "smithay-client-toolkit", git = "https://github.com/Smithay/client-toolkit", rev = "bb3b73e" }
 cosmic-bg-config = { path = "./cosmic-bg-config" }
 anyhow = "1.0"
 notify = "5.0"
@@ -15,7 +15,8 @@ dirs = "4.0"
 walkdir = "2.3"
 itertools = "0.10"
 rand = "0.8"
-
+cosmic-config = { git = "https://github.com/pop-os/libcosmic" }
+ron = "0.8"
 [workspace]
 members = [
     "cosmic-bg-config"

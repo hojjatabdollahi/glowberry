@@ -1,37 +1,36 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
-use std::{env, fs::File, path::PathBuf, str::FromStr};
+use std::path::PathBuf;
 
+use cosmic_config::{Config, ConfigGet};
 use serde::{Deserialize, Serialize};
-use xdg::BaseDirectories;
 
 /// Configuration for the panel's ouput
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub enum CosmicBgOutput {
+    /// show panel on a specific output
+    Name(String),
     /// show panel on all outputs
     All,
-    /// show panel on a specific output
-    MakeModel { make: String, model: String },
 }
 
-/// Configuration for the panel's ouput
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub enum CosmicBgImgSource {
-    /// pull images from the $HOME/Pictures/Wallpapers directory
-    Wallpapers,
-    /// pull images from a specific directory or file
-    Path(String),
+impl ToString for CosmicBgOutput {
+    fn to_string(&self) -> String {
+        match self {
+            CosmicBgOutput::All => "all".into(),
+            CosmicBgOutput::Name(name) => format!("output.{}", name.clone()),
+        }
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgEntry {
     /// the configured output
     pub output: CosmicBgOutput,
     /// the configured image source
-    pub source: CosmicBgImgSource,
+    pub source: PathBuf,
     /// whether the images should be filtered by the active theme
     pub filter_by_theme: bool,
     /// frequency at which the wallpaper is rotated in seconds
@@ -47,7 +46,7 @@ pub struct CosmicBgEntry {
 }
 
 /// Image filtering method
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 pub enum FilterMethod {
     // nearest neighbor filtering
     Nearest,
@@ -58,8 +57,18 @@ pub enum FilterMethod {
     Lanczos,
 }
 
+impl Into<image::imageops::FilterType> for FilterMethod {
+    fn into(self) -> image::imageops::FilterType {
+        match self {
+            FilterMethod::Nearest => image::imageops::FilterType::Nearest,
+            FilterMethod::Linear => image::imageops::FilterType::Triangle,
+            FilterMethod::Lanczos => image::imageops::FilterType::Lanczos3,
+        }
+    }
+}
+
 /// Image filtering method
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SamplingMethod {
     // Rotate through images in Aplhanumeeric order
     #[default]
@@ -70,7 +79,7 @@ pub enum SamplingMethod {
 }
 
 /// Image scaling mode
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 pub enum ScalingMode {
     // Fit the image and fill the rest of the area with the given RGB color
     Fit([f32; 3]),
@@ -82,71 +91,57 @@ pub enum ScalingMode {
 }
 
 impl CosmicBgEntry {
-    /// defaults to /usr/share/backgrounds/pop/ if it fails to find configured path
-    pub fn source_path(&self) -> PathBuf {
-        match &self.source {
-            CosmicBgImgSource::Wallpapers => env::var("XDG_PICTURES_DIR")
-                .ok()
-                .map(|s| PathBuf::from(s))
-                .or_else(|| xdg_user::pictures().unwrap_or(None))
-                .map(|mut pics_dir| {
-                    pics_dir.push("Wallpapers");
-                    pics_dir
-                }),
-            CosmicBgImgSource::Path(p) => PathBuf::from_str(&p).ok(),
-        }
-        .unwrap_or_else(|| "/usr/share/backgrounds/pop/".into())
+    pub fn key(&self) -> String {
+        self.output.to_string()
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CosmicBgConfig {
-    /// the configured wallpapers8
+    /// the configured wallpapers
     pub backgrounds: Vec<CosmicBgEntry>,
 }
 
+// Fallback in case config and default schema can't be loaded
 impl Default for CosmicBgConfig {
     fn default() -> Self {
         ron::de::from_str(include_str!("../config.ron")).unwrap()
     }
 }
 
-static NAME: &str = "com.system76.CosmicBg";
-static CONFIG: &str = "config.ron";
+pub const NAME: &str = "com.system76.CosmicBackground";
+pub const BG_KEY: &str = "backgrounds";
 
 impl CosmicBgConfig {
     /// load config with the provided name
-    pub fn load() -> anyhow::Result<Self> {
-        let config_path: PathBuf = vec![NAME, CONFIG].iter().collect();
-        let config_path =
-            match BaseDirectories::new().map(|dirs| dirs.find_config_file(&config_path)) {
-                Ok(Some(path)) => path,
-                _ => anyhow::bail!("Failed to get find config file"),
-            };
+    pub fn load(config: &Config) -> Result<Self, cosmic_config::Error> {
+        let entry_keys = config.get::<Vec<CosmicBgOutput>>(BG_KEY)?;
+        let mut backgrounds: Vec<_> = entry_keys
+            .into_iter()
+            .filter_map(|c| config.get::<CosmicBgEntry>(&c.to_string()).ok())
+            .collect();
 
-        let file = match File::open(&config_path) {
-            Ok(file) => file,
-            Err(err) => {
-                anyhow::bail!("Failed to open '{}': {}", config_path.display(), err);
+        let def = Self::default();
+        if backgrounds.is_empty() {
+            eprintln!("No wallpapers configured. Using defaults.");
+            // TODO try to use the default schema before falling back
+            Ok(def)
+        } else {
+            if backgrounds.iter().all(|e| e.output != CosmicBgOutput::All) {
+                // add the default all wallpaper if all is not already present
+                if let Some(def_all) = def
+                    .backgrounds
+                    .iter()
+                    .find(|e| e.output == CosmicBgOutput::All)
+                {
+                    backgrounds.push(def_all.clone());
+                }
             }
-        };
-
-        match ron::de::from_reader::<_, Self>(file) {
-            Ok(config) => Ok(config),
-            Err(err) => {
-                anyhow::bail!("Failed to parse '{}': {}", config_path.display(), err);
-            }
+            Ok(Self { backgrounds })
         }
     }
-
-    /// write config to config file
-    pub fn write(&self) -> anyhow::Result<()> {
-        let config_path: PathBuf = vec![NAME, CONFIG].iter().collect();
-        let xdg = BaseDirectories::new()?;
-        let f = xdg.place_config_file(&config_path).unwrap();
-        let f = File::create(f)?;
-        ron::ser::to_writer_pretty(&f, self, ron::ser::PrettyConfig::default())?;
-        Ok(())
+    pub fn helper() -> Result<Config, cosmic_config::Error> {
+        Config::new(NAME, 1)
     }
 }
