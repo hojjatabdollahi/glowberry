@@ -23,8 +23,8 @@ flatpak-builder --run flatpak_app build-aux/<application_id>.Devel.json <project
 
 ## Community
 
-Join the  Pop_OS! community!
-- [Pop_OS! Mattermost](https://chat.pop-os.org/)
+Join the  Pop!\_OS community!
+- [Pop!\_OS Mattermost](https://chat.pop-os.org/)
 
 ## Credits
 
