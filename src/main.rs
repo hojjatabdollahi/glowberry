@@ -431,7 +431,7 @@ impl ShmHandler for CosmicBg {
 #[derive(Debug)]
 pub struct CosmicBgWallpaper {
     layers: Vec<CosmicBgLayer>,
-    cur_image: Option<fr::Image<'static>>,
+    cur_image: Option<RgbImage>,
     image_queue: VecDeque<PathBuf>,
     entry: CosmicBgEntry,
     // TODO filter images by whether they seem to match dark / light mode
@@ -476,12 +476,15 @@ impl CosmicBgWallpaper {
     }
 
     pub fn draw(&mut self) {
-        let mut cur_img: Option<RgbImage> = None;
-        let hash = self.cur_image.as_ref().map(|img| {
+        let mut cur_resized_img: Option<RgbImage> = None;
+        let (hash, original) = match self.cur_image.as_ref().map(|img| {
             let mut hasher = DefaultHasher::new();
-            img.buffer().hash(&mut hasher);
-            hasher.finish()
-        });
+            img.hash(&mut hasher);
+            (hasher.finish(), img)
+        }) {
+            Some((hash, img)) => (hash, img),
+            None => return,
+        };
         let mut resizer = fr::Resizer::new(match self.entry.filter_method {
             FilterMethod::Nearest => fr::ResizeAlg::Nearest,
             FilterMethod::Linear => fr::ResizeAlg::Convolution(fr::FilterType::Bilinear),
@@ -490,115 +493,154 @@ impl CosmicBgWallpaper {
         for layer in self
             .layers
             .iter_mut()
-            .filter(|l| !l.first_configure && l.last_draw != hash)
+            .filter(|l| !l.first_configure && l.last_draw != Some(hash))
         {
             let pool = match layer.pool.as_mut() {
                 Some(p) => p,
                 None => continue,
             };
-            if cur_img
-                .as_ref()
-                .map(|img| img.width() != layer.width as u32 || img.height() != layer.height as u32)
-                .unwrap_or(true)
-            {
-                cur_img = match self.cur_image.as_ref() {
-                    Some(img) => match self.entry.scaling_mode {
-                        ScalingMode::Fit(color) => {
-                            let u8_color = [
-                                (u8::MAX as f32 * color[0]).round() as u8,
-                                (u8::MAX as f32 * color[1]).round() as u8,
-                                (u8::MAX as f32 * color[2]).round() as u8,
-                            ];
-                            let mut final_image = image::ImageBuffer::from_pixel(
-                                layer.width,
-                                layer.height,
-                                *image::Rgb::from_slice(&u8_color),
-                            );
-                            let (w, h) = (img.width().get(), img.height().get());
-
-                            let ratio =
-                                (layer.width as f64 / w as f64).min(layer.height as f64 / h as f64);
-                            let (new_width, new_height) = (
-                                (w as f64 * ratio).round() as u32,
-                                (h as f64 * ratio).round() as u32,
-                            );
-
-                            let mut dst_image = fr::Image::new(
-                                NonZeroU32::new(new_width).unwrap(),
-                                NonZeroU32::new(new_width).unwrap(),
-                                fr::PixelType::U8x3,
-                            );
-
-                            let mut dst_view = dst_image.view_mut();
-                            resizer.resize(&img.view(), &mut dst_view).unwrap();
-
-                            let dst_image =
-                                RgbImage::from_raw(layer.width, layer.height, dst_image.into_vec())
-                                    .unwrap();
-                            image::imageops::replace(
-                                &mut final_image,
-                                &dst_image,
-                                ((layer.width - new_width) / 2).into(),
-                                ((layer.height - new_height) / 2).into(),
-                            );
-
-                            Some(final_image)
-                        }
-                        ScalingMode::Zoom => {
-                            let (w, h) = (img.width().get(), img.height().get());
-                            let ratio =
-                                (layer.width as f64 / w as f64).max(layer.height as f64 / h as f64);
-                            let (new_width, new_height) = (
-                                (w as f64 * ratio).round() as u32,
-                                (h as f64 * ratio).round() as u32,
-                            );
-                            let mut dst_image = fr::Image::new(
-                                NonZeroU32::new(new_width).unwrap(),
-                                NonZeroU32::new(new_height).unwrap(),
-                                fr::PixelType::U8x3,
-                            );
-                            let mut dst_view = dst_image.view_mut();
-                            resizer.resize(&img.view(), &mut dst_view).unwrap();
-
-                            let mut dst_image =
-                                RgbImage::from_raw(new_width, new_height, dst_image.into_vec())
-                                    .unwrap();
-
-                            Some(
-                                image::imageops::crop(
-                                    &mut dst_image,
-                                    (new_width - layer.width) / 2,
-                                    (new_height - layer.height) / 2,
+            let pixels = if original.width() == layer.width && original.height() == layer.height {
+                original.pixels()
+            } else {
+                if cur_resized_img
+                    .as_ref()
+                    .map(|img| {
+                        img.width() != layer.width as u32 || img.height() != layer.height as u32
+                    })
+                    .unwrap_or(true)
+                {
+                    cur_resized_img = match self.cur_image.clone() {
+                        Some(img) => match self.entry.scaling_mode {
+                            ScalingMode::Fit(color) => {
+                                let img = match fr::Image::from_vec_u8(
+                                    NonZeroU32::new(img.width()).unwrap(),
+                                    NonZeroU32::new(img.height()).unwrap(),
+                                    img.into_vec(),
+                                    fr::PixelType::U8x3,
+                                ) {
+                                    Ok(img) => img,
+                                    Err(_) => continue,
+                                };
+                                let u8_color = [
+                                    (u8::MAX as f32 * color[0]).round() as u8,
+                                    (u8::MAX as f32 * color[1]).round() as u8,
+                                    (u8::MAX as f32 * color[2]).round() as u8,
+                                ];
+                                let mut final_image = image::ImageBuffer::from_pixel(
                                     layer.width,
                                     layer.height,
+                                    *image::Rgb::from_slice(&u8_color),
+                                );
+                                let (w, h) = (img.width().get(), img.height().get());
+
+                                let ratio = (layer.width as f64 / w as f64)
+                                    .min(layer.height as f64 / h as f64);
+                                let (new_width, new_height) = (
+                                    (w as f64 * ratio).round() as u32,
+                                    (h as f64 * ratio).round() as u32,
+                                );
+
+                                let mut dst_image = fr::Image::new(
+                                    NonZeroU32::new(new_width).unwrap(),
+                                    NonZeroU32::new(new_width).unwrap(),
+                                    fr::PixelType::U8x3,
+                                );
+
+                                let mut dst_view = dst_image.view_mut();
+                                resizer.resize(&img.view(), &mut dst_view).unwrap();
+
+                                let dst_image = RgbImage::from_raw(
+                                    layer.width,
+                                    layer.height,
+                                    dst_image.into_vec(),
                                 )
-                                .to_image(),
-                            )
-                        }
-                        ScalingMode::Stretch => {
-                            let mut dst_image = fr::Image::new(
-                                NonZeroU32::new(layer.width).unwrap(),
-                                NonZeroU32::new(layer.height).unwrap(),
-                                fr::PixelType::U8x3,
-                            );
-                            let mut dst_view = dst_image.view_mut();
-                            resizer.resize(&img.view(), &mut dst_view).unwrap();
+                                .unwrap();
+                                image::imageops::replace(
+                                    &mut final_image,
+                                    &dst_image,
+                                    ((layer.width - new_width) / 2).into(),
+                                    ((layer.height - new_height) / 2).into(),
+                                );
 
-                            let dst_image =
-                                RgbImage::from_raw(layer.width, layer.height, dst_image.into_vec())
-                                    .unwrap();
-                            Some(dst_image)
-                        }
-                    },
-                    None => continue,
-                };
-            }
+                                Some(final_image)
+                            }
+                            ScalingMode::Zoom => {
+                                let img = match fr::Image::from_vec_u8(
+                                    NonZeroU32::new(img.width()).unwrap(),
+                                    NonZeroU32::new(img.height()).unwrap(),
+                                    img.into_vec(),
+                                    fr::PixelType::U8x3,
+                                ) {
+                                    Ok(img) => img,
+                                    Err(_) => continue,
+                                };
+                                let (w, h) = (img.width().get(), img.height().get());
+                                let ratio = (layer.width as f64 / w as f64)
+                                    .max(layer.height as f64 / h as f64);
+                                let (new_width, new_height) = (
+                                    (w as f64 * ratio).round() as u32,
+                                    (h as f64 * ratio).round() as u32,
+                                );
+                                let mut dst_image = fr::Image::new(
+                                    NonZeroU32::new(new_width).unwrap(),
+                                    NonZeroU32::new(new_height).unwrap(),
+                                    fr::PixelType::U8x3,
+                                );
+                                let mut dst_view = dst_image.view_mut();
+                                resizer.resize(&img.view(), &mut dst_view).unwrap();
 
-            let img = cur_img.as_ref().unwrap();
+                                let mut dst_image =
+                                    RgbImage::from_raw(new_width, new_height, dst_image.into_vec())
+                                        .unwrap();
+
+                                Some(
+                                    image::imageops::crop(
+                                        &mut dst_image,
+                                        (new_width - layer.width) / 2,
+                                        (new_height - layer.height) / 2,
+                                        layer.width,
+                                        layer.height,
+                                    )
+                                    .to_image(),
+                                )
+                            }
+                            ScalingMode::Stretch => {
+                                let img = match fr::Image::from_vec_u8(
+                                    NonZeroU32::new(img.width()).unwrap(),
+                                    NonZeroU32::new(img.height()).unwrap(),
+                                    img.into_vec(),
+                                    fr::PixelType::U8x3,
+                                ) {
+                                    Ok(img) => img,
+                                    Err(_) => continue,
+                                };
+                                let mut dst_image = fr::Image::new(
+                                    NonZeroU32::new(layer.width).unwrap(),
+                                    NonZeroU32::new(layer.height).unwrap(),
+                                    fr::PixelType::U8x3,
+                                );
+                                let mut dst_view = dst_image.view_mut();
+                                resizer.resize(&img.view(), &mut dst_view).unwrap();
+
+                                let dst_image = RgbImage::from_raw(
+                                    layer.width,
+                                    layer.height,
+                                    dst_image.into_vec(),
+                                )
+                                .unwrap();
+                                Some(dst_image)
+                            }
+                        },
+                        None => continue,
+                    };
+                }
+                cur_resized_img.as_ref().unwrap().pixels()
+            };
+
             let width = layer.width;
             let height = layer.height;
             let stride = layer.width as i32 * 4;
-            layer.last_draw = hash;
+            layer.last_draw = Some(hash);
 
             let (buffer, canvas) = pool
                 .create_buffer(
@@ -612,7 +654,7 @@ impl CosmicBgWallpaper {
             {
                 canvas
                     .chunks_exact_mut(4)
-                    .zip(img.pixels())
+                    .zip(pixels)
                     .for_each(|(dest, source)| {
                         dest[2] = source.0[0].to_le();
                         dest[1] = source.0[1].to_le();
@@ -667,15 +709,7 @@ impl CosmicBgWallpaper {
                 Err(_) => return None,
             };
             image_queue.push_back(cur_image_path);
-            img.map(|img| img.into_rgb8()).and_then(|img| {
-                fr::Image::from_vec_u8(
-                    NonZeroU32::new(img.width()).unwrap(),
-                    NonZeroU32::new(img.height()).unwrap(),
-                    img.into_vec(),
-                    fr::PixelType::U8x3,
-                )
-                .ok()
-            })
+            img.map(|img| img.into_rgb8())
         });
 
         self.new_image = cur_image.is_some();
@@ -754,17 +788,7 @@ impl CosmicBgWallpaper {
                                 },
                                 Err(_) => None,
                             };
-                            if let Some(image) =
-                                img.take().map(|img| img.into_rgb8()).and_then(|img| {
-                                    fr::Image::from_vec_u8(
-                                        NonZeroU32::new(img.width()).unwrap(),
-                                        NonZeroU32::new(img.height()).unwrap(),
-                                        img.into_vec(),
-                                        fr::PixelType::U8x3,
-                                    )
-                                    .ok()
-                                })
-                            {
+                            if let Some(image) = img.take().map(|img| img.into_rgb8()) {
                                 item.image_queue.push_back(next);
                                 item.cur_image.replace(image);
                                 item.new_image = true;
