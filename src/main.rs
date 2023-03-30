@@ -12,9 +12,10 @@ use std::{
 };
 
 use cosmic_bg_config::{
-    CosmicBgConfig, CosmicBgEntry, CosmicBgOutput, SamplingMethod, ScalingMode,
+    CosmicBgConfig, CosmicBgEntry, CosmicBgOutput, FilterMethod, SamplingMethod, ScalingMode,
 };
 use cosmic_config::ConfigGet;
+use fast_image_resize as fr;
 use image::{io::Reader as ImageReader, Pixel, RgbImage};
 use itertools::Itertools;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -430,7 +431,7 @@ impl ShmHandler for CosmicBg {
 #[derive(Debug)]
 pub struct CosmicBgWallpaper {
     layers: Vec<CosmicBgLayer>,
-    cur_image: Option<RgbImage>,
+    cur_image: Option<fr::Image<'static>>,
     image_queue: VecDeque<PathBuf>,
     entry: CosmicBgEntry,
     // TODO filter images by whether they seem to match dark / light mode
@@ -475,11 +476,16 @@ impl CosmicBgWallpaper {
     }
 
     pub fn draw(&mut self) {
-        let mut cur_img: Option<RgbImage> = self.cur_image.clone();
+        let mut cur_img: Option<RgbImage> = None;
         let hash = self.cur_image.as_ref().map(|img| {
             let mut hasher = DefaultHasher::new();
-            img.hash(&mut hasher);
+            img.buffer().hash(&mut hasher);
             hasher.finish()
+        });
+        let mut resizer = fr::Resizer::new(match self.entry.filter_method {
+            FilterMethod::Nearest => fr::ResizeAlg::Nearest,
+            FilterMethod::Linear => fr::ResizeAlg::Convolution(fr::FilterType::Bilinear),
+            FilterMethod::Lanczos => fr::ResizeAlg::Convolution(fr::FilterType::Lanczos3),
         });
         for layer in self
             .layers
@@ -495,7 +501,7 @@ impl CosmicBgWallpaper {
                 .map(|img| img.width() != layer.width as u32 || img.height() != layer.height as u32)
                 .unwrap_or(true)
             {
-                cur_img = match cur_img.take() {
+                cur_img = match self.cur_image.as_ref() {
                     Some(img) => match self.entry.scaling_mode {
                         ScalingMode::Fit(color) => {
                             let u8_color = [
@@ -508,23 +514,30 @@ impl CosmicBgWallpaper {
                                 layer.height,
                                 *image::Rgb::from_slice(&u8_color),
                             );
+                            let (w, h) = (img.width().get(), img.height().get());
 
-                            let ratio = (layer.width as f64 / img.width() as f64)
-                                .min(layer.height as f64 / img.height() as f64);
+                            let ratio =
+                                (layer.width as f64 / w as f64).min(layer.height as f64 / h as f64);
                             let (new_width, new_height) = (
-                                (img.width() as f64 * ratio).round() as u32,
-                                (img.height() as f64 * ratio).round() as u32,
+                                (w as f64 * ratio).round() as u32,
+                                (h as f64 * ratio).round() as u32,
                             );
-                            
-                            let new_image = image::imageops::resize(
-                                &img,
-                                new_width,
-                                new_height,
-                                self.entry.filter_method.clone().into(),
+
+                            let mut dst_image = fr::Image::new(
+                                NonZeroU32::new(new_width).unwrap(),
+                                NonZeroU32::new(new_width).unwrap(),
+                                fr::PixelType::U8x3,
                             );
+
+                            let mut dst_view = dst_image.view_mut();
+                            resizer.resize(&img.view(), &mut dst_view).unwrap();
+
+                            let dst_image =
+                                RgbImage::from_raw(layer.width, layer.height, dst_image.into_vec())
+                                    .unwrap();
                             image::imageops::replace(
                                 &mut final_image,
-                                &new_image,
+                                &dst_image,
                                 ((layer.width - new_width) / 2).into(),
                                 ((layer.height - new_height) / 2).into(),
                             );
@@ -532,21 +545,28 @@ impl CosmicBgWallpaper {
                             Some(final_image)
                         }
                         ScalingMode::Zoom => {
-                            let ratio = (layer.width as f64 / img.width() as f64)
-                                .max(layer.height as f64 / img.height() as f64);
+                            let (w, h) = (img.width().get(), img.height().get());
+                            let ratio =
+                                (layer.width as f64 / w as f64).max(layer.height as f64 / h as f64);
                             let (new_width, new_height) = (
-                                (img.width() as f64 * ratio).round() as u32,
-                                (img.height() as f64 * ratio).round() as u32,
+                                (w as f64 * ratio).round() as u32,
+                                (h as f64 * ratio).round() as u32,
                             );
-                            let mut new_image = image::imageops::resize(
-                                &img,
-                                new_width,
-                                new_height,
-                                self.entry.filter_method.clone().into(),
+                            let mut dst_image = fr::Image::new(
+                                NonZeroU32::new(new_width).unwrap(),
+                                NonZeroU32::new(new_height).unwrap(),
+                                fr::PixelType::U8x3,
                             );
+                            let mut dst_view = dst_image.view_mut();
+                            resizer.resize(&img.view(), &mut dst_view).unwrap();
+
+                            let mut dst_image =
+                                RgbImage::from_raw(new_width, new_height, dst_image.into_vec())
+                                    .unwrap();
+
                             Some(
                                 image::imageops::crop(
-                                    &mut new_image,
+                                    &mut dst_image,
                                     (new_width - layer.width) / 2,
                                     (new_height - layer.height) / 2,
                                     layer.width,
@@ -555,12 +575,20 @@ impl CosmicBgWallpaper {
                                 .to_image(),
                             )
                         }
-                        ScalingMode::Stretch => Some(image::imageops::resize(
-                            &img,
-                            layer.width,
-                            layer.height,
-                            self.entry.filter_method.clone().into(),
-                        )),
+                        ScalingMode::Stretch => {
+                            let mut dst_image = fr::Image::new(
+                                NonZeroU32::new(layer.width).unwrap(),
+                                NonZeroU32::new(layer.height).unwrap(),
+                                fr::PixelType::U8x3,
+                            );
+                            let mut dst_view = dst_image.view_mut();
+                            resizer.resize(&img.view(), &mut dst_view).unwrap();
+
+                            let dst_image =
+                                RgbImage::from_raw(layer.width, layer.height, dst_image.into_vec())
+                                    .unwrap();
+                            Some(dst_image)
+                        }
                     },
                     None => continue,
                 };
@@ -639,7 +667,15 @@ impl CosmicBgWallpaper {
                 Err(_) => return None,
             };
             image_queue.push_back(cur_image_path);
-            img.map(|img| img.into_rgb8())
+            img.map(|img| img.into_rgb8()).and_then(|img| {
+                fr::Image::from_vec_u8(
+                    NonZeroU32::new(img.width()).unwrap(),
+                    NonZeroU32::new(img.height()).unwrap(),
+                    img.into_vec(),
+                    fr::PixelType::U8x3,
+                )
+                .ok()
+            })
         });
 
         self.new_image = cur_image.is_some();
@@ -718,10 +754,19 @@ impl CosmicBgWallpaper {
                                 },
                                 Err(_) => None,
                             };
-
-                            if let Some(image) = img.take() {
+                            if let Some(image) =
+                                img.take().map(|img| img.into_rgb8()).and_then(|img| {
+                                    fr::Image::from_vec_u8(
+                                        NonZeroU32::new(img.width()).unwrap(),
+                                        NonZeroU32::new(img.height()).unwrap(),
+                                        img.into_vec(),
+                                        fr::PixelType::U8x3,
+                                    )
+                                    .ok()
+                                })
+                            {
                                 item.image_queue.push_back(next);
-                                item.cur_image.replace(image.into_rgb8());
+                                item.cur_image.replace(image);
                                 item.new_image = true;
                                 item.draw();
                                 return TimeoutAction::ToDuration(Duration::from_secs(

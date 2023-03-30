@@ -17,6 +17,7 @@ itertools = "0.10"
 rand = "0.8"
 cosmic-config = { git = "https://github.com/pop-os/libcosmic" }
 ron = "0.8"
+fast_image_resize = "2.7.0"
 [workspace]
 members = [
     "cosmic-bg-config"
