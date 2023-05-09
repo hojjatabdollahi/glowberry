@@ -129,9 +129,10 @@ dependencies = [
 [[package]]
 name = "cosmic-config"
 version = "0.1.0"
-source = "git+https://github.com/pop-os/libcosmic#035ec88c1b10ae68918adac0cdf2c4e7e8c0317f"
+source = "git+https://github.com/pop-os/libcosmic#355e5a97157fd8b13ff8d688daf5a5de4f8d882e"
 dependencies = [
  "atomicwrites",
+ "calloop",
  "dirs",
  "notify",
  "ron",

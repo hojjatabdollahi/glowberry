@@ -14,7 +14,7 @@ use std::{
 use cosmic_bg_config::{
     CosmicBgConfig, CosmicBgEntry, CosmicBgOutput, FilterMethod, SamplingMethod, ScalingMode,
 };
-use cosmic_config::ConfigGet;
+use cosmic_config::{calloop::ConfigWatchSource, ConfigGet};
 use fast_image_resize as fr;
 use image::{io::Reader as ImageReader, Pixel, RgbImage};
 use itertools::Itertools;
@@ -52,12 +52,6 @@ use sctk::{
 };
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone)]
-pub enum BgConfigUpdate {
-    NewConfig(CosmicBgConfig),
-    NewEntry(CosmicBgEntry),
-}
-
 fn main() -> anyhow::Result<()> {
     let conn = Connection::connect_to_env().unwrap();
 
@@ -72,63 +66,43 @@ fn main() -> anyhow::Result<()> {
 
     let config_helper = CosmicBgConfig::helper();
 
-    let (cfg_tx, cfg_rx) = calloop::channel::sync_channel(20);
-
-    event_loop
-        .handle()
-        .insert_source(cfg_rx, |e, _, state| {
-            match e {
-                calloop::channel::Event::Msg(BgConfigUpdate::NewConfig(config)) => {
-                    if state.config != config {
-                        state.apply_config(config);
-                    }
-                }
-                calloop::channel::Event::Msg(BgConfigUpdate::NewEntry(entry)) => {
-                    if let Some(wallpaper) = state
-                        .wallpapers
-                        .iter_mut()
-                        .find(|w| w.entry.output == entry.output)
-                    {
-                        wallpaper.apply_entry(entry, state.source_tx.clone());
-                    }
-                }
-                calloop::channel::Event::Closed => {
-                    // TODO log drop
-                }
-            }
-        })
-        .unwrap();
-
     // TODO: this could be so nice with `inspect_err`, but that is behind the unstable feature `result_option_inspect` right now
-    let (config, _watcher) = match config_helper.as_ref() {
+    let config = match config_helper.as_ref() {
         Ok(helper) => {
-            let watcher = helper
-                .watch(move |config_helper, keys| {
+            let source = ConfigWatchSource::new(&helper).unwrap();
+            event_loop
+                .handle()
+                .insert_source(source, |(config_helper, keys), (), state| {
                     for key in keys.iter() {
                         if key == cosmic_bg_config::BG_KEY {
-                            let new_config = CosmicBgConfig::load(config_helper).unwrap();
-                            cfg_tx.send(BgConfigUpdate::NewConfig(new_config)).unwrap();
+                            let new_config = CosmicBgConfig::load(&config_helper).unwrap();
+                            if state.config != new_config {
+                                state.apply_config(new_config);
+                            }
                         } else if let Ok(entry) = config_helper.get::<CosmicBgEntry>(key) {
-                            cfg_tx.send(BgConfigUpdate::NewEntry(entry)).unwrap();
+                            if let Some(wallpaper) = state
+                                .wallpapers
+                                .iter_mut()
+                                .find(|w| w.entry.output == entry.output)
+                            {
+                                wallpaper.apply_entry(entry, state.source_tx.clone());
+                            }
                         }
                     }
                 })
                 .unwrap();
 
-            (
-                match CosmicBgConfig::load(helper) {
-                    Ok(conf) => conf,
-                    Err(err) => {
-                        eprintln!("Config file error, falling back to defaults: {err:?}");
-                        CosmicBgConfig::default()
-                    }
-                },
-                Some(watcher),
-            )
+            match CosmicBgConfig::load(helper) {
+                Ok(conf) => conf,
+                Err(err) => {
+                    eprintln!("Config file error, falling back to defaults: {err:?}");
+                    CosmicBgConfig::default()
+                }
+            }
         }
         Err(err) => {
             eprintln!("Config file error, falling back to defaults: {err:?}");
-            (CosmicBgConfig::default(), None)
+            CosmicBgConfig::default()
         }
     };
 
@@ -437,7 +411,6 @@ pub struct CosmicBgWallpaper {
     // TODO filter images by whether they seem to match dark / light mode
     // Alternatively only load from light / dark subdirectories given a directory source when this is active
     new_image: bool,
-    _watcher: Option<RecommendedWatcher>,
     timer_token: Option<RegistrationToken>,
     loop_handle: calloop::LoopHandle<'static, CosmicBg>,
     qh: QueueHandle<CosmicBg>,
@@ -464,7 +437,6 @@ impl CosmicBgWallpaper {
             cur_image: None,
             image_queue: Default::default(),
             new_image: false,
-            _watcher: None,
             timer_token: None,
             loop_handle,
             qh,
