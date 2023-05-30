@@ -222,10 +222,11 @@ impl Config {
     ) -> Result<(), cosmic_config::Error> {
         config.set(&entry.output.to_string(), entry.clone())?;
 
+        self.outputs.insert(entry.output.clone());
+
         if let Some(old) = self.entry_mut(&entry.output) {
             *old = entry;
         } else {
-            self.outputs.insert(entry.output.clone());
             self.backgrounds.push(entry);
         }
 
