@@ -1,17 +1,15 @@
-use cosmic_bg_config::CosmicBgOutput;
+use cosmic_bg_config::Output;
 use notify::event::{ModifyKind, RenameMode};
 use sctk::reexports::calloop::{channel, LoopHandle};
 
 use crate::CosmicBg;
 
-pub fn img_source(
-    handle: LoopHandle<CosmicBg>,
-) -> channel::SyncSender<(CosmicBgOutput, notify::Event)> {
+pub fn img_source(handle: LoopHandle<CosmicBg>) -> channel::SyncSender<(Output, notify::Event)> {
     let (notify_tx, notify_rx) = channel::sync_channel(20);
     let _ = handle
         .insert_source(
             notify_rx,
-            |e: channel::Event<(CosmicBgOutput, notify::Event)>, _, state| {
+            |e: channel::Event<(Output, notify::Event)>, _, state| {
                 match e {
                     channel::Event::Msg((source, event)) => match event.kind {
                         notify::EventKind::Create(_)

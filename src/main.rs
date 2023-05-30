@@ -11,9 +11,7 @@ use std::{
     time::Duration,
 };
 
-use cosmic_bg_config::{
-    CosmicBgConfig, CosmicBgEntry, CosmicBgOutput, FilterMethod, SamplingMethod, ScalingMode,
-};
+use cosmic_bg_config::{Config, Entry, FilterMethod, Output, SamplingMethod, ScalingMode};
 use cosmic_config::{calloop::ConfigWatchSource, ConfigGet};
 use fast_image_resize as fr;
 use image::{io::Reader as ImageReader, Pixel, RgbImage};
@@ -64,7 +62,7 @@ fn main() -> anyhow::Result<()> {
         .insert(event_loop.handle())
         .unwrap();
 
-    let config_helper = CosmicBgConfig::helper();
+    let config_helper = Config::helper();
 
     // TODO: this could be so nice with `inspect_err`, but that is behind the unstable feature `result_option_inspect` right now
     let config = match config_helper.as_ref() {
@@ -75,11 +73,11 @@ fn main() -> anyhow::Result<()> {
                 .insert_source(source, |(config_helper, keys), (), state| {
                     for key in keys.iter() {
                         if key == cosmic_bg_config::BG_KEY {
-                            let new_config = CosmicBgConfig::load(&config_helper).unwrap();
+                            let new_config = Config::load(&config_helper).unwrap();
                             if state.config != new_config {
                                 state.apply_config(new_config);
                             }
-                        } else if let Ok(entry) = config_helper.get::<CosmicBgEntry>(key) {
+                        } else if let Ok(entry) = config_helper.get::<Entry>(key) {
                             if let Some(wallpaper) = state
                                 .wallpapers
                                 .iter_mut()
@@ -92,17 +90,17 @@ fn main() -> anyhow::Result<()> {
                 })
                 .unwrap();
 
-            match CosmicBgConfig::load(helper) {
+            match Config::load(helper) {
                 Ok(conf) => conf,
                 Err(err) => {
                     eprintln!("Config file error, falling back to defaults: {err:?}");
-                    CosmicBgConfig::fallback()
+                    Config::fallback()
                 }
             }
         }
         Err(err) => {
             eprintln!("Config file error, falling back to defaults: {err:?}");
-            CosmicBgConfig::fallback()
+            Config::fallback()
         }
     };
 
@@ -168,16 +166,16 @@ pub struct CosmicBg {
     shm_state: Shm,
     layer_state: LayerShell,
     qh: QueueHandle<CosmicBg>,
-    source_tx: calloop::channel::SyncSender<(CosmicBgOutput, notify::Event)>,
+    source_tx: calloop::channel::SyncSender<(Output, notify::Event)>,
     loop_handle: calloop::LoopHandle<'static, CosmicBg>,
     exit: bool,
     wallpapers: Vec<CosmicBgWallpaper>,
-    config: CosmicBgConfig,
+    config: Config,
     active_outputs: Vec<WlOutput>,
 }
 
 impl CosmicBg {
-    fn apply_config(&mut self, mut config: CosmicBgConfig) {
+    fn apply_config(&mut self, mut config: Config) {
         let mut existing_layers = Vec::new();
         self.wallpapers.retain_mut(|w| {
             if let Some(pos) = config
@@ -204,7 +202,7 @@ impl CosmicBg {
             if let Some(l) = self.wallpapers.last_mut().and_then(|w| {
                 if let Some(pos) = w.layers.iter().position(|l| {
                     let o_name = l.output_info.name.clone().unwrap_or_default();
-                    &new_wallpaper.entry.output == &CosmicBgOutput::Name(o_name)
+                    &new_wallpaper.entry.output == &Output::Name(o_name)
                 }) {
                     Some(w.layers.remove(pos))
                 } else {
@@ -219,7 +217,7 @@ impl CosmicBg {
                     None => return None,
                 };
                 let o_name = output_info.name.clone().unwrap_or_default();
-                if &new_wallpaper.entry.output == &CosmicBgOutput::Name(o_name) {
+                if &new_wallpaper.entry.output == &Output::Name(o_name) {
                     Some((o.clone(), output_info.clone()))
                 } else {
                     None
@@ -305,8 +303,8 @@ impl OutputHandler for CosmicBg {
         };
 
         if let Some(pos) = self.wallpapers.iter().position(|w| match &w.entry.output {
-            CosmicBgOutput::All => !w.layers.iter().any(|l| l.wl_output == wl_output),
-            CosmicBgOutput::Name(name) => {
+            Output::All => !w.layers.iter().any(|l| l.wl_output == wl_output),
+            Output::Name(name) => {
                 Some(name) == output_info.name.as_ref()
                     && !w.layers.iter().any(|l| l.wl_output == wl_output)
             }
@@ -338,8 +336,8 @@ impl OutputHandler for CosmicBg {
         };
 
         let item = match self.wallpapers.iter_mut().find(|w| match &w.entry.output {
-            CosmicBgOutput::All => true,
-            CosmicBgOutput::Name(name) => Some(name) == output_info.name.as_ref(),
+            Output::All => true,
+            Output::Name(name) => Some(name) == output_info.name.as_ref(),
         }) {
             Some(item) => item,
             None => return,
@@ -407,7 +405,7 @@ pub struct CosmicBgWallpaper {
     layers: Vec<CosmicBgLayer>,
     cur_image: Option<RgbImage>,
     image_queue: VecDeque<PathBuf>,
-    entry: CosmicBgEntry,
+    entry: Entry,
     // TODO filter images by whether they seem to match dark / light mode
     // Alternatively only load from light / dark subdirectories given a directory source when this is active
     new_image: bool,
@@ -426,10 +424,10 @@ impl Drop for CosmicBgWallpaper {
 
 impl CosmicBgWallpaper {
     pub fn new(
-        entry: CosmicBgEntry,
+        entry: Entry,
         qh: QueueHandle<CosmicBg>,
         loop_handle: calloop::LoopHandle<'static, CosmicBg>,
-        source_tx: calloop::channel::SyncSender<(CosmicBgOutput, notify::Event)>,
+        source_tx: calloop::channel::SyncSender<(Output, notify::Event)>,
     ) -> Self {
         let mut wallpaper = CosmicBgWallpaper {
             entry: entry.clone(),
@@ -689,7 +687,7 @@ impl CosmicBgWallpaper {
         self.image_queue = image_queue;
     }
 
-    fn watch_source(&self, tx: calloop::channel::SyncSender<(CosmicBgOutput, notify::Event)>) {
+    fn watch_source(&self, tx: calloop::channel::SyncSender<(Output, notify::Event)>) {
         let output = self.entry.output.clone();
         let mut watcher = match RecommendedWatcher::new(
             move |res| {
@@ -715,8 +713,8 @@ impl CosmicBgWallpaper {
 
     fn apply_entry(
         &mut self,
-        config: CosmicBgEntry,
-        tx: calloop::channel::SyncSender<(CosmicBgOutput, notify::Event)>,
+        config: Entry,
+        tx: calloop::channel::SyncSender<(Output, notify::Event)>,
     ) {
         if config.output == self.entry.output && self.entry != config {
             let src_changed = config.source != self.entry.source;
