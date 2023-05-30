@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
-use std::path::PathBuf;
-
-use cosmic_config::{Config, ConfigGet};
+use cosmic_config::{Config, ConfigGet, ConfigSet};
+use derive_setters::Setters;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuration for the panel's ouput
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -24,12 +24,15 @@ impl ToString for CosmicBgOutput {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Setters)]
 #[serde(deny_unknown_fields)]
+#[must_use]
 pub struct CosmicBgEntry {
     /// the configured output
+    #[setters(skip)]
     pub output: CosmicBgOutput,
     /// the configured image source
+    #[setters(skip)]
     pub source: PathBuf,
     /// whether the images should be filtered by the active theme
     pub filter_by_theme: bool,
@@ -45,6 +48,21 @@ pub struct CosmicBgEntry {
     pub sampling_method: SamplingMethod,
 }
 
+impl CosmicBgEntry {
+    /// Define a preferred background for a given output device.
+    pub fn new(output: CosmicBgOutput, source: PathBuf) -> Self {
+        CosmicBgEntry {
+            output,
+            source,
+            filter_by_theme: false,
+            rotation_frequency: 900,
+            filter_method: FilterMethod::default(),
+            scaling_mode: ScalingMode::default(),
+            sampling_method: SamplingMethod::default(),
+        }
+    }
+}
+
 /// Image filtering method
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 pub enum FilterMethod {
@@ -57,9 +75,9 @@ pub enum FilterMethod {
     Lanczos,
 }
 
-impl Into<image::imageops::FilterType> for FilterMethod {
-    fn into(self) -> image::imageops::FilterType {
-        match self {
+impl From<FilterMethod> for image::imageops::FilterType {
+    fn from(method: FilterMethod) -> Self {
+        match method {
             FilterMethod::Nearest => image::imageops::FilterType::Nearest,
             FilterMethod::Linear => image::imageops::FilterType::Triangle,
             FilterMethod::Lanczos => image::imageops::FilterType::Lanczos3,
@@ -91,6 +109,7 @@ pub enum ScalingMode {
 }
 
 impl CosmicBgEntry {
+    #[must_use]
     pub fn key(&self) -> String {
         self.output.to_string()
     }
@@ -115,6 +134,10 @@ pub const BG_KEY: &str = "backgrounds";
 
 impl CosmicBgConfig {
     /// load config with the provided name
+    ///
+    /// # Errors
+    ///
+    /// Will fail if invalid values are stored within cosmic-config at time of parsing them.
     pub fn load(config: &Config) -> Result<Self, cosmic_config::Error> {
         let entry_keys = config.get::<Vec<CosmicBgOutput>>(BG_KEY)?;
         let mut backgrounds: Vec<_> = entry_keys
@@ -141,6 +164,12 @@ impl CosmicBgConfig {
             Ok(Self { backgrounds })
         }
     }
+
+    /// Convenience function for cosmic-config
+    ///
+    /// # Errors
+    ///
+    /// Will fail if cosmic-config paths are missing or cannot be created.
     pub fn helper() -> Result<Config, cosmic_config::Error> {
         Config::new(NAME, 1)
     }
