@@ -24,5 +24,4 @@ members = ["config"]
 
 [workspace.dependencies.cosmic-config]
 git = "https://github.com/pop-os/libcosmic"
-branch="cosmic-advanced-text"
 features = ["calloop"]
