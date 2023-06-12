@@ -25,4 +25,3 @@ members = ["config"]
 [workspace.dependencies.cosmic-config]
 git = "https://github.com/pop-os/libcosmic"
 features = ["calloop"]
-rev = "a8a2e4a"
