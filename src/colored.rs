@@ -57,10 +57,10 @@ pub fn gradient(
     const SCALE: f64 = 0.015;
 
     let positioner: Box<dyn Fn(u32, u32) -> f64> = match gradient.radius as u16 {
-        0 => Box::new(|x, _y| 1.0 - (x as f64 / width as f64)),
-        90 => Box::new(|_x, y| 1.0 - (y as f64 / height as f64)),
-        180 => Box::new(|x, _y| x as f64 / width as f64),
-        270 => Box::new(|_x, y| y as f64 / height as f64),
+        0 => Box::new(|x, _y| 1.0 - (x as f64 / width)),
+        90 => Box::new(|_x, y| 1.0 - (y as f64 / height)),
+        180 => Box::new(|x, _y| x as f64 / width),
+        270 => Box::new(|_x, y| y as f64 / height),
         _ => Box::new(|x, y| {
             let (dmin, dmax) = grad.domain();
             let angle = f64::from(gradient.radius.to_radians());

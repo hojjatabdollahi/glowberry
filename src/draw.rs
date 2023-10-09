@@ -16,7 +16,7 @@ pub fn canvas(
     stride: i32,
 ) -> Result<Buffer, CreateBufferError> {
     // TODO: Check if we need 8-bit or 10-bit
-    let mut hdr_layer = false;
+    let hdr_layer = false;
 
     let (buffer, canvas) = pool.create_buffer(
         width,

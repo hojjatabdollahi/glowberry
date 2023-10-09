@@ -6,8 +6,8 @@ mod img_source;
 mod scaler;
 mod wallpaper;
 
-use cosmic_bg_config::{Config, Entry};
-use cosmic_config::{calloop::ConfigWatchSource, ConfigGet};
+use cosmic_bg_config::{state::State, Config, Entry};
+use cosmic_config::{calloop::ConfigWatchSource, ConfigGet, CosmicConfigEntry};
 use eyre::Context;
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
@@ -15,13 +15,14 @@ use sctk::{
     output::{OutputHandler, OutputInfo, OutputState},
     reexports::{
         calloop,
+        calloop_wayland_source::WaylandSource,
         client::{
             globals::registry_queue_init,
             protocol::{
                 wl_output::{self, WlOutput},
                 wl_surface,
             },
-            Connection, QueueHandle, WaylandSource,
+            Connection, QueueHandle,
         },
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -32,6 +33,7 @@ use sctk::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
+use tracing::error;
 use tracing_subscriber::prelude::*;
 use wallpaper::Wallpaper;
 
@@ -67,14 +69,12 @@ fn main() -> color_eyre::Result<()> {
 
     let qh = event_queue.handle();
 
-    WaylandSource::new(event_queue)
-        .wrap_err("WaylandSource::new failed")?
+    WaylandSource::new(conn, event_queue)
         .insert(event_loop.handle())
         .wrap_err("failed to insert main EventLoop into WaylandSource")?;
 
     let config_helper = Config::helper();
 
-    // TODO: this could be so nice with `inspect_err`, but that is behind the unstable feature `result_option_inspect` right now
     let config = match config_helper.as_ref() {
         Ok(helper) => {
             let source =
@@ -243,7 +243,7 @@ impl CosmicBg {
 
         'outer: for output in &self.active_outputs {
             let Some(output_info) = self.output_state.info(output) else {
-                continue
+                continue;
             };
 
             let o_name = output_info.name.clone().unwrap_or_default();
@@ -328,6 +328,16 @@ impl CompositorHandler for CosmicBg {
         _time: u32,
     ) {
     }
+
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_transform: wl_output::Transform,
+    ) {
+        // TODO
+    }
 }
 
 impl OutputHandler for CosmicBg {
@@ -343,7 +353,7 @@ impl OutputHandler for CosmicBg {
     ) {
         self.active_outputs.push(wl_output.clone());
         let Some(output_info) = self.output_state.info(&wl_output) else {
-            return
+            return;
         };
 
         if let Some(pos) = self
@@ -359,6 +369,9 @@ impl OutputHandler for CosmicBg {
         {
             let layer = self.new_layer(wl_output, output_info);
             self.wallpapers[pos].layers.push(layer);
+            if let Err(err) = self.wallpapers[pos].save_state() {
+                tracing::error!("{err}");
+            }
         }
     }
 
@@ -379,23 +392,38 @@ impl OutputHandler for CosmicBg {
     ) {
         self.active_outputs.retain(|o| o != &output);
         let Some(output_info) = self.output_state.info(&output) else {
-            return
+            return;
         };
 
-        let Some(output_wallpaper) = self.wallpapers.iter_mut()
-            .find(|w| match w.entry.output.as_str() {
-                "all" => true,
-                name => Some(name) == output_info.name.as_deref(),
-            }) else {
-                return;
-            };
+        // state cleanup
+        if let Ok(state_helper) = State::state() {
+            let mut state = State::get_entry(&state_helper).unwrap_or_default();
+            state
+                .wallpapers
+                .retain(|(o_name, _source)| Some(o_name) != output_info.name.as_ref());
+            if let Err(err) = state.write_entry(&state_helper) {
+                error!("{err}");
+            }
+        }
+
+        let Some(output_wallpaper) =
+            self.wallpapers
+                .iter_mut()
+                .find(|w| match w.entry.output.as_str() {
+                    "all" => true,
+                    name => Some(name) == output_info.name.as_deref(),
+                })
+        else {
+            return;
+        };
 
         let Some(layer_position) = output_wallpaper
             .layers
             .iter()
-            .position(|bg_layer| bg_layer.wl_output == output) else {
-                return
-            };
+            .position(|bg_layer| bg_layer.wl_output == output)
+        else {
+            return;
+        };
 
         output_wallpaper.layers.remove(layer_position);
     }

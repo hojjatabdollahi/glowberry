@@ -10,7 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cosmic_bg_config::{Color, Entry, SamplingMethod, ScalingMode, Source};
+use cosmic_bg_config::{state::State, Color, Entry, SamplingMethod, ScalingMode, Source};
+use cosmic_config::CosmicConfigEntry;
 use image::{io::Reader as ImageReader, DynamicImage};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rand::{seq::SliceRandom, thread_rng};
@@ -22,6 +23,7 @@ use sctk::reexports::{
     },
     client::QueueHandle,
 };
+use tracing::error;
 use walkdir::WalkDir;
 
 // TODO filter images by whether they seem to match dark / light mode
@@ -35,6 +37,7 @@ pub struct Wallpaper {
     loop_handle: calloop::LoopHandle<'static, CosmicBg>,
     queue_handle: QueueHandle<CosmicBg>,
     current_image: Option<DynamicImage>,
+    current_source: Option<Source>,
     timer_token: Option<RegistrationToken>,
     new_image: bool,
 }
@@ -58,6 +61,7 @@ impl Wallpaper {
             entry,
             layers: Vec::new(),
             current_image: None,
+            current_source: None,
             image_queue: VecDeque::default(),
             new_image: false,
             timer_token: None,
@@ -69,6 +73,27 @@ impl Wallpaper {
         wallpaper.register_timer();
         wallpaper.watch_source(source_tx);
         wallpaper
+    }
+
+    pub fn save_state(&self) -> Result<(), cosmic_config::Error> {
+        let Some(cur_source) = self.current_source.clone() else {
+            return Ok(());
+        };
+        let state_helper = State::state()?;
+        let mut state = State::get_entry(&state_helper).unwrap_or_default();
+        for l in &self.layers {
+            let name = l.output_info.name.clone().unwrap_or_default();
+            if let Some((_, source)) = state
+                .wallpapers
+                .iter_mut()
+                .find(|(output, _)| *output == name)
+            {
+                *source = cur_source.clone();
+            } else {
+                state.wallpapers.push((name, cur_source.clone()))
+            }
+        }
+        state.write_entry(&state_helper)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -88,7 +113,7 @@ impl Wallpaper {
             .filter(|layer| !layer.first_configure || layer.last_draw != hash)
         {
             let Some(pool) = layer.pool.as_mut() else {
-                continue
+                continue;
             };
 
             let original_image = self.current_image.as_ref().filter(|original| {
@@ -106,7 +131,7 @@ impl Wallpaper {
                     cur_resized_img = match self.entry.source {
                         Source::Path(_) => {
                             let Some(img) = self.current_image.as_ref() else {
-                                continue
+                                continue;
                             };
 
                             match self.entry.scaling_mode {
@@ -206,6 +231,7 @@ impl Wallpaper {
                 }
 
                 image_queue.pop_front().and_then(|current_image_path| {
+                    self.current_source = Some(Source::Path(current_image_path.clone()));
                     let img = match ImageReader::open(&current_image_path) {
                         Ok(img) => match img.decode() {
                             Ok(img) => Some(img),
@@ -218,9 +244,14 @@ impl Wallpaper {
                 })
             }
 
-            Source::Color(_) => None,
+            Source::Color(ref c) => {
+                self.current_source = Some(Source::Color(c.clone()));
+                None
+            }
         };
-
+        if let Err(err) = self.save_state() {
+            error!("{err}");
+        }
         self.new_image = current_image.is_some();
         self.current_image = current_image;
         self.image_queue = image_queue;
@@ -271,12 +302,17 @@ impl Wallpaper {
                         let Some(item) = state
                             .wallpapers
                             .iter_mut()
-                            .find(|w| w.entry.output == cosmic_bg_clone) else
-                        {
+                            .find(|w| w.entry.output == cosmic_bg_clone)
+                        else {
                             return TimeoutAction::Drop; // Drop if no item found for this timer
                         };
 
                         while let Some(next) = item.image_queue.pop_front() {
+                            item.current_source = Some(Source::Path(next.clone()));
+                            if let Err(err) = item.save_state() {
+                                error!("{err}");
+                            }
+
                             let image = match ImageReader::open(&next) {
                                 Ok(image) => match image.decode() {
                                     Ok(image) => image,

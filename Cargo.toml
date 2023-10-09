@@ -14,7 +14,7 @@ image = { version = "0.24", features = ["gif", "jpeg", "ico", "png", "pnm", "tga
 notify = "6.0.0"
 rand = "0.8"
 ron = { workspace = true }
-sctk = { package = "smithay-client-toolkit", git = "https://github.com/Smithay/client-toolkit", rev = "bb3b73e" }
+sctk = { package = "smithay-client-toolkit", git = "https://github.com/Smithay/client-toolkit", rev = "8c49516" }
 slab = "0.4.8"
 tracing = { workspace=true }
 tracing-subscriber = "0.3.17"
@@ -30,7 +30,7 @@ tracing = "0.1.37"
 
 [workspace.dependencies.cosmic-config]
 git = "https://github.com/pop-os/libcosmic"
-features = ["calloop"]
+features = ["calloop", "macro"]
 
 [profile.release]
 debug = true
