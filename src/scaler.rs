@@ -54,11 +54,15 @@ pub fn zoom(img: &image::DynamicImage, layer_width: u32, layer_height: u32) -> i
         (h as f64 * ratio).round() as u32,
     );
 
-    img.resize(new_width, new_height, FilterType::Lanczos3)
-        .crop(
-            (new_width - layer_width) / 2,
-            (new_height - layer_height) / 2,
-            layer_width,
-            layer_height,
-        )
+    let mut new_image = image::imageops::resize(img, new_width, new_height, FilterType::Lanczos3);
+
+    image::imageops::crop(
+        &mut new_image,
+        (new_width - layer_width) / 2,
+        (new_height - layer_height) / 2,
+        layer_width,
+        layer_height,
+    )
+    .to_image()
+    .into()
 }

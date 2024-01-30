@@ -9,7 +9,7 @@ edition = "2021"
 colorgrad = { workspace=true }
 cosmic-config = { workspace=true }
 derive_setters = "0.1.6"
-image = "0.24.6"
+image = "0.24.8"
 ron = { workspace=true }
-serde = { version = "1.0.163", features = ["derive"] }
+serde = { version = "1.0.196", features = ["derive"] }
 tracing = { workspace=true }
