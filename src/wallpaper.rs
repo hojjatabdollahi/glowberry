@@ -220,7 +220,8 @@ impl Wallpaper {
                 } else if source.is_file() {
                     image_queue.push_front(source.clone());
                 }
-                {
+
+                if image_queue.len() > 1 {
                     let image_slice = image_queue.make_contiguous();
                     match self.entry.sampling_method {
                         SamplingMethod::Alphanumeric => {
@@ -229,6 +230,22 @@ impl Wallpaper {
                         }
                         SamplingMethod::Random => image_slice.shuffle(&mut thread_rng()),
                     };
+
+                    // If a wallpaper from this slideshow was previously set, resume with that wallpaper.
+                    if let Ok(context) = cosmic_bg_config::context() {
+                        if let Ok(last_path) = context.current_image(&self.entry.output) {
+                            if image_queue.contains(&last_path) {
+                                while let Some(path) = image_queue.pop_front() {
+                                    if path == last_path {
+                                        image_queue.push_front(path);
+                                        break;
+                                    }
+
+                                    image_queue.push_back(path);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 image_queue.pop_front().and_then(|current_image_path| {
