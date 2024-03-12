@@ -14,7 +14,7 @@ image = { version = "0.25", features = ["hdr", "jpeg", "png", "rayon", "webp"], 
 notify = "6.1.1"
 rand = "0.8"
 ron = { workspace = true }
-sctk = { package = "smithay-client-toolkit", git = "https://github.com/Smithay/client-toolkit" }
+sctk = { package = "smithay-client-toolkit", git = "https://github.com/smithay/client-toolkit", rev = "2e9bf9f" }
 slab = "0.4.9"
 tracing = { workspace=true }
 tracing-subscriber = "0.3.18"
