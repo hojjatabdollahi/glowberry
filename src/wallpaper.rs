@@ -207,18 +207,32 @@ impl Wallpaper {
             Source::Path(ref source) => {
                 tracing::debug!(?source, "loading images");
 
-                if source.is_dir() {
-                    // Store paths of wallpapers to be used for the slideshow.
-                    for img_path in WalkDir::new(source)
-                        .follow_links(true)
-                        .into_iter()
-                        .filter_map(Result::ok)
-                        .filter(|p| p.path().is_file())
-                    {
-                        image_queue.push_front(img_path.path().into());
+                if let Ok(source) = source.canonicalize() {
+                    if source.is_dir() {
+                        if source.starts_with("/usr/share/backgrounds/") {
+                            // Store paths of wallpapers to be used for the slideshow.
+                            for img_path in WalkDir::new(source)
+                                .follow_links(true)
+                                .into_iter()
+                                .filter_map(Result::ok)
+                                .filter(|p| p.path().is_file())
+                            {
+                                image_queue.push_front(img_path.path().into());
+                            }
+                        } else if let Ok(dir) = source.read_dir() {
+                            for entry in dir.filter_map(Result::ok) {
+                                let Ok(path) = entry.path().canonicalize() else {
+                                    continue;
+                                };
+
+                                if path.is_file() {
+                                    image_queue.push_front(path);
+                                }
+                            }
+                        }
+                    } else if source.is_file() {
+                        image_queue.push_front(source);
                     }
-                } else if source.is_file() {
-                    image_queue.push_front(source.clone());
                 }
 
                 if image_queue.len() > 1 {
