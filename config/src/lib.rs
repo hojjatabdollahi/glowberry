@@ -138,7 +138,7 @@ impl Entry {
     pub fn fallback() -> Self {
         Self {
             output: String::from("all"),
-            source: Source::Path(PathBuf::from("/usr/share/backgrounds/pop/")),
+            source: Source::Path(PathBuf::from("/usr/share/backgrounds/pop/ng-32703.jpg")),
             filter_by_theme: true,
             rotation_frequency: 3600,
             filter_method: FilterMethod::default(),
