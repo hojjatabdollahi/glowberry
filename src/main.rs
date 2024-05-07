@@ -439,8 +439,17 @@ impl OutputHandler for CosmicBg {
 }
 
 impl LayerShellHandler for CosmicBg {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.exit = true;
+    fn closed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        dropped_layer: &LayerSurface,
+    ) {
+        for wallpaper in &mut self.wallpapers {
+            wallpaper
+                .layers
+                .retain(|layer| &layer.layer != dropped_layer);
+        }
     }
 
     fn configure(
