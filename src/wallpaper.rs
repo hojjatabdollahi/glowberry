@@ -265,10 +265,18 @@ impl Wallpaper {
                 image_queue.pop_front().and_then(|current_image_path| {
                     self.current_source = Some(Source::Path(current_image_path.clone()));
                     let img = match ImageReader::open(&current_image_path) {
-                        Ok(img) => match img.decode() {
-                            Ok(img) => Some(img),
-                            Err(_) => return None,
-                        },
+                        Ok(img) => {
+                            match img.with_guessed_format().ok().and_then(|f| f.decode().ok()) {
+                                Some(img) => Some(img),
+                                None => {
+                                    tracing::warn!(
+                                        "Could not decode image: {}",
+                                        current_image_path.display()
+                                    );
+                                    None
+                                }
+                            }
+                        }
                         Err(_) => return None,
                     };
                     image_queue.push_back(current_image_path);
