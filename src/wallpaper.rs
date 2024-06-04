@@ -3,9 +3,8 @@
 use crate::{CosmicBg, CosmicBgLayer};
 
 use std::{
-    collections::{hash_map::DefaultHasher, VecDeque},
+    collections::VecDeque,
     fs,
-    hash::{Hash, Hasher},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -36,7 +35,6 @@ pub struct Wallpaper {
     pub image_queue: VecDeque<PathBuf>,
     loop_handle: calloop::LoopHandle<'static, CosmicBg>,
     queue_handle: QueueHandle<CosmicBg>,
-    current_image: Option<DynamicImage>,
     current_source: Option<Source>,
     timer_token: Option<RegistrationToken>,
     new_image: bool,
@@ -60,7 +58,6 @@ impl Wallpaper {
         let mut wallpaper = Wallpaper {
             entry,
             layers: Vec::new(),
-            current_image: None,
             current_source: None,
             image_queue: VecDeque::default(),
             new_image: false,
@@ -101,80 +98,76 @@ impl Wallpaper {
         let start = Instant::now();
         let mut cur_resized_img: Option<DynamicImage> = None;
 
-        let hash = self.current_image.as_ref().map(|image| {
-            let mut hasher = DefaultHasher::new();
-            image.as_bytes().hash(&mut hasher);
-            hasher.finish()
-        });
-
         for layer in self
             .layers
             .iter_mut()
-            .filter(|layer| !layer.first_configure || layer.last_draw != hash)
+            .filter(|layer| !layer.first_configure)
         {
             let Some(pool) = layer.pool.as_mut() else {
                 continue;
             };
 
-            let original_image = self.current_image.as_ref().filter(|original| {
-                original.width() == layer.width && original.height() == layer.height
-            });
+            if cur_resized_img.as_ref().map_or(true, |img| {
+                img.width() != layer.width || img.height() != layer.height
+            }) {
+                let CosmicBgLayer { width, height, .. } = *layer;
 
-            let image = if let Some(original_image) = original_image {
-                original_image
-            } else {
-                if cur_resized_img.as_ref().map_or(true, |img| {
-                    img.width() != layer.width || img.height() != layer.height
-                }) {
-                    let CosmicBgLayer { width, height, .. } = *layer;
-
-                    cur_resized_img = match self.entry.source {
-                        Source::Path(_) => {
-                            let Some(img) = self.current_image.as_ref() else {
-                                continue;
-                            };
-
-                            match self.entry.scaling_mode {
-                                ScalingMode::Fit(color) => {
-                                    Some(crate::scaler::fit(img, &color, width, height))
-                                }
-
-                                ScalingMode::Zoom => Some(crate::scaler::zoom(img, width, height)),
-
-                                ScalingMode::Stretch => {
-                                    Some(crate::scaler::stretch(img, width, height))
+                cur_resized_img = match self.entry.source {
+                    Source::Path(ref path) => {
+                        let img = &match ImageReader::open(&path) {
+                            Ok(img) => {
+                                match img.with_guessed_format().ok().and_then(|f| f.decode().ok()) {
+                                    Some(img) => img,
+                                    None => {
+                                        tracing::warn!(
+                                            "Could not decode image: {}",
+                                            path.display()
+                                        );
+                                        continue;
+                                    }
                                 }
                             }
-                        }
+                            Err(_) => continue,
+                        };
 
-                        Source::Color(Color::Single([ref r, ref g, ref b])) => {
-                            Some(image::DynamicImage::from(crate::colored::single(
-                                [*r, *g, *b],
-                                width,
-                                height,
-                            )))
-                        }
+                        match self.entry.scaling_mode {
+                            ScalingMode::Fit(color) => {
+                                Some(crate::scaler::fit(img, &color, width, height))
+                            }
 
-                        Source::Color(Color::Gradient(ref gradient)) => {
-                            match crate::colored::gradient(gradient, width, height) {
-                                Ok(buffer) => Some(image::DynamicImage::from(buffer)),
-                                Err(why) => {
-                                    tracing::error!(
-                                        ?gradient,
-                                        ?why,
-                                        "color gradient in config is invalid"
-                                    );
-                                    None
-                                }
+                            ScalingMode::Zoom => Some(crate::scaler::zoom(img, width, height)),
+
+                            ScalingMode::Stretch => {
+                                Some(crate::scaler::stretch(img, width, height))
                             }
                         }
-                    };
-                }
+                    }
 
-                cur_resized_img.as_ref().unwrap()
-            };
+                    Source::Color(Color::Single([ref r, ref g, ref b])) => {
+                        Some(image::DynamicImage::from(crate::colored::single(
+                            [*r, *g, *b],
+                            width,
+                            height,
+                        )))
+                    }
 
-            layer.last_draw = hash;
+                    Source::Color(Color::Gradient(ref gradient)) => {
+                        match crate::colored::gradient(gradient, width, height) {
+                            Ok(buffer) => Some(image::DynamicImage::from(buffer)),
+                            Err(why) => {
+                                tracing::error!(
+                                    ?gradient,
+                                    ?why,
+                                    "color gradient in config is invalid"
+                                );
+                                None
+                            }
+                        }
+                    }
+                };
+            }
+
+            let image = cur_resized_img.as_ref().unwrap();
 
             let buffer_result = crate::draw::canvas(
                 pool,
@@ -200,10 +193,10 @@ impl Wallpaper {
         }
     }
 
-    fn load_images(&mut self) {
+    pub fn load_images(&mut self) {
         let mut image_queue = VecDeque::new();
 
-        let current_image = match self.entry.source {
+        match self.entry.source {
             Source::Path(ref source) => {
                 tracing::debug!(?source, "loading images");
 
@@ -262,38 +255,20 @@ impl Wallpaper {
                     }
                 }
 
-                image_queue.pop_front().and_then(|current_image_path| {
+                image_queue.pop_front().map(|current_image_path| {
                     self.current_source = Some(Source::Path(current_image_path.clone()));
-                    let img = match ImageReader::open(&current_image_path) {
-                        Ok(img) => {
-                            match img.with_guessed_format().ok().and_then(|f| f.decode().ok()) {
-                                Some(img) => Some(img),
-                                None => {
-                                    tracing::warn!(
-                                        "Could not decode image: {}",
-                                        current_image_path.display()
-                                    );
-                                    None
-                                }
-                            }
-                        }
-                        Err(_) => return None,
-                    };
                     image_queue.push_back(current_image_path);
-                    img
-                })
+                });
             }
 
             Source::Color(ref c) => {
                 self.current_source = Some(Source::Color(c.clone()));
-                None
             }
         };
         if let Err(err) = self.save_state() {
             error!("{err}");
         }
-        self.new_image = current_image.is_some();
-        self.current_image = current_image;
+        self.new_image = true;
         self.image_queue = image_queue;
     }
 
@@ -354,16 +329,7 @@ impl Wallpaper {
                                 error!("{err}");
                             }
 
-                            let image = match ImageReader::open(&next) {
-                                Ok(image) => match image.decode() {
-                                    Ok(image) => image,
-                                    Err(_) => continue,
-                                },
-                                Err(_) => continue,
-                            };
-
                             item.image_queue.push_back(next);
-                            item.current_image.replace(image);
                             item.new_image = true;
                             item.draw();
 

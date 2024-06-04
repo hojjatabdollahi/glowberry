@@ -50,7 +50,6 @@ pub struct CosmicBgLayer {
     first_configure: bool,
     width: u32,
     height: u32,
-    last_draw: Option<u64>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -313,7 +312,6 @@ impl CosmicBg {
             height,
             first_configure: false,
             pool: None,
-            last_draw: None,
         }
     }
 }
