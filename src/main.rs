@@ -37,6 +37,7 @@ use tracing::error;
 use tracing_subscriber::prelude::*;
 use wallpaper::Wallpaper;
 
+#[cfg(target_env = "gnu")]
 extern "C" {
     fn malloc_trim(pad: usize);
 }
@@ -137,6 +138,7 @@ fn main() -> color_eyre::Result<()> {
                     if changes_applied {
                         state.apply_backgrounds();
 
+                        #[cfg(target_env = "gnu")]
                         unsafe {
                             malloc_trim(0);
                         }
