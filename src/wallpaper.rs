@@ -101,19 +101,17 @@ impl Wallpaper {
         let start = Instant::now();
         let mut cur_resized_img: Option<DynamicImage> = None;
 
-        for layer in self
-            .layers
-            .iter_mut()
-            .filter(|layer| !layer.first_configure)
-        {
+        for layer in self.layers.iter_mut().filter(|layer| layer.needs_redraw) {
             let Some(pool) = layer.pool.as_mut() else {
                 continue;
             };
 
-            if cur_resized_img.as_ref().map_or(true, |img| {
-                img.width() != layer.width || img.height() != layer.height
-            }) {
-                let CosmicBgLayer { width, height, .. } = *layer;
+            let (width, height) = layer.size.unwrap();
+
+            if cur_resized_img
+                .as_ref()
+                .map_or(true, |img| img.width() != width || img.height() != height)
+            {
                 let Some(source) = self.current_source.as_ref() else {
                     tracing::info!("No source for wallpaper");
                     continue;
@@ -182,17 +180,13 @@ impl Wallpaper {
 
             let image = cur_resized_img.as_ref().unwrap();
 
-            let buffer_result = crate::draw::canvas(
-                pool,
-                image,
-                layer.width as i32,
-                layer.height as i32,
-                layer.width as i32 * 4,
-            );
+            let buffer_result =
+                crate::draw::canvas(pool, image, width as i32, height as i32, width as i32 * 4);
 
             match buffer_result {
                 Ok(buffer) => {
                     crate::draw::layer_surface(layer, &self.queue_handle, &buffer);
+                    layer.needs_redraw = false;
 
                     let elapsed = Instant::now().duration_since(start);
 

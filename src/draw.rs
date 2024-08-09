@@ -46,8 +46,7 @@ pub fn layer_surface(
     queue_handle: &QueueHandle<CosmicBg>,
     buffer: &Buffer,
 ) {
-    let width = layer.width;
-    let height = layer.height;
+    let (width, height) = layer.size.unwrap();
 
     let wl_surface = layer.layer.wl_surface();
 
