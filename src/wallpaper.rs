@@ -11,7 +11,7 @@ use std::{
 
 use cosmic_bg_config::{state::State, Color, Entry, SamplingMethod, ScalingMode, Source};
 use cosmic_config::CosmicConfigEntry;
-use image::{io::Reader as ImageReader, DynamicImage};
+use image::{DynamicImage, ImageReader};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rand::{seq::SliceRandom, thread_rng};
 use sctk::reexports::{

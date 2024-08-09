@@ -14,7 +14,7 @@ image = { version = "0.25", features = ["hdr", "jpeg", "png", "rayon", "webp"], 
 notify = "6.1.1"
 rand = "0.8"
 ron = { workspace = true }
-sctk = { package = "smithay-client-toolkit", git = "https://github.com/smithay/client-toolkit", rev = "2e9bf9f" }
+sctk = { package = "smithay-client-toolkit", version = "0.19.2" }
 slab = "0.4.9"
 tracing = { workspace=true }
 tracing-subscriber = "0.3.18"
@@ -30,6 +30,8 @@ tracing = "0.1.40"
 
 [workspace.dependencies.cosmic-config]
 git = "https://github.com/pop-os/libcosmic"
+# TODO: Remove when sctk is updated to latest calloop, like cosmic-config
+rev = "8c6f2c9ebc5c2c04fe168c2d941f8c5a416b33bb"
 features = ["calloop"]
 
 [profile.release]

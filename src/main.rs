@@ -75,6 +75,7 @@ fn main() -> color_eyre::Result<()> {
 
     WaylandSource::new(conn, event_queue)
         .insert(event_loop.handle())
+        .map_err(|err| err.error)
         .wrap_err("failed to insert main EventLoop into WaylandSource")?;
 
     let config_context = cosmic_bg_config::context();
@@ -346,6 +347,24 @@ impl CompositorHandler for CosmicBg {
         _new_transform: wl_output::Transform,
     ) {
         // TODO
+    }
+
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &WlOutput,
+    ) {
+    }
+
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &WlOutput,
+    ) {
     }
 }
 
