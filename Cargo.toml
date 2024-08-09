@@ -10,6 +10,7 @@ cosmic-bg-config = { path = "./config" }
 cosmic-config = { workspace=true }
 dirs = "5.0.1"
 eyre = "0.6.11"
+fast_image_resize = { version = "4.2.1", features = ["image"] }
 image = { version = "0.25", features = ["hdr", "jpeg", "png", "rayon", "webp"], default-features = false }
 notify = "6.1.1"
 rand = "0.8"
