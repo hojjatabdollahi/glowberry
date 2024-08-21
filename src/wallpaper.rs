@@ -255,17 +255,15 @@ impl Wallpaper {
                     };
 
                     // If a wallpaper from this slideshow was previously set, resume with that wallpaper.
-                    if let Ok(context) = cosmic_bg_config::context() {
-                        if let Some(Source::Path(last_path)) = current_image(&self.entry.output) {
-                            if image_queue.contains(&last_path) {
-                                while let Some(path) = image_queue.pop_front() {
-                                    if path == last_path {
-                                        image_queue.push_front(path);
-                                        break;
-                                    }
-
-                                    image_queue.push_back(path);
+                    if let Some(Source::Path(last_path)) = current_image(&self.entry.output) {
+                        if image_queue.contains(&last_path) {
+                            while let Some(path) = image_queue.pop_front() {
+                                if path == last_path {
+                                    image_queue.push_front(path);
+                                    break;
                                 }
+
+                                image_queue.push_back(path);
                             }
                         }
                     }
@@ -322,7 +320,6 @@ impl Wallpaper {
         let cosmic_bg_clone = self.entry.output.clone();
         // set timer for rotation
         if rotation_freq > 0 {
-            let output = self.entry.output.clone();
             self.timer_token = self
                 .loop_handle
                 .insert_source(
