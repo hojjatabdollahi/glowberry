@@ -6,10 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-colorgrad = { workspace=true }
-cosmic-config = { workspace=true }
+colorgrad.workspace = true
 derive_setters = "0.1.6"
-image = "0.24.8"
-ron = { workspace=true }
-serde = { version = "1.0.196", features = ["derive"] }
-tracing = { workspace=true }
+image.workspace = true
+ron.workspace = true
+serde = { version = "1.0.208", features = ["derive"] }
+tracing.workspace = true
+
+[dependencies.cosmic-config]
+git = "https://github.com/pop-os/libcosmic"

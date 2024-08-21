@@ -4,36 +4,39 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-color-eyre = "0.6.2"
+color-eyre = "0.6.3"
 colorgrad = { workspace = true }
 cosmic-bg-config = { path = "./config" }
-cosmic-config = { workspace=true }
 dirs = "5.0.1"
-eyre = "0.6.11"
+eyre = "0.6.12"
 fast_image_resize = { version = "4.2.1", features = ["image"] }
-image = { version = "0.25", features = ["hdr", "jpeg", "png", "rayon", "webp"], default-features = false }
+image = { workspace = true, features = ["hdr", "jpeg", "png", "rayon", "webp"] }
 notify = "6.1.1"
 rand = "0.8"
 ron = { workspace = true }
 sctk = { package = "smithay-client-toolkit", version = "0.19.2" }
 slab = "0.4.9"
-tracing = { workspace=true }
+tracing = { workspace = true }
 tracing-subscriber = "0.3.18"
-walkdir = "2.4"
+walkdir = "2.5"
 
 [workspace]
 members = ["config"]
 
 [workspace.dependencies]
 colorgrad = "0.6.2"
+image = { version = "0.25.2", default-features = false }
 ron = "0.8"
 tracing = "0.1.40"
 
-[workspace.dependencies.cosmic-config]
+[dependencies.cosmic-config]
 git = "https://github.com/pop-os/libcosmic"
-# TODO: Remove when sctk is updated to latest calloop, like cosmic-config
 rev = "8c6f2c9ebc5c2c04fe168c2d941f8c5a416b33bb"
 features = ["calloop"]
 
 [profile.release]
 opt-level = 3
+
+# TODO: Remove when sctk is updated to latest calloop, like cosmic-config
+[patch.'https://github.com/pop-os/libcosmic']
+cosmic-config = { git = "https://github.com/pop-os/libcosmic?branch=master", rev = "8c6f2c9ebc5c2c04fe168c2d941f8c5a416b33bb" }
