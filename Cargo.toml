@@ -39,4 +39,4 @@ opt-level = 3
 
 # TODO: Remove when sctk is updated to latest calloop, like cosmic-config
 [patch.'https://github.com/pop-os/libcosmic']
-cosmic-config = { git = "https://github.com/pop-os/libcosmic?branch=master", rev = "8c6f2c9ebc5c2c04fe168c2d941f8c5a416b33bb" }
+cosmic-config = { git = "https://github.com/pop-os//libcosmic", rev = "8c6f2c9ebc5c2c04fe168c2d941f8c5a416b33bb" }
