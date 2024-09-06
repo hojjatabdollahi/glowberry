@@ -39,7 +39,6 @@ pub struct Wallpaper {
     // Cache of source image, if `current_source` is a `Source::Path`
     current_image: Option<image::DynamicImage>,
     timer_token: Option<RegistrationToken>,
-    new_image: bool,
 }
 
 impl Drop for Wallpaper {
@@ -63,7 +62,6 @@ impl Wallpaper {
             current_source: None,
             current_image: None,
             image_queue: VecDeque::default(),
-            new_image: false,
             timer_token: None,
             loop_handle,
             queue_handle,
@@ -188,13 +186,17 @@ impl Wallpaper {
             }
 
             let image = cur_resized_img.as_ref().unwrap();
-
             let buffer_result =
                 crate::draw::canvas(pool, image, width as i32, height as i32, width as i32 * 4);
 
             match buffer_result {
                 Ok(buffer) => {
-                    crate::draw::layer_surface(layer, &self.queue_handle, &buffer);
+                    crate::draw::layer_surface(
+                        layer,
+                        &self.queue_handle,
+                        &buffer,
+                        (width as i32, height as i32),
+                    );
                     layer.needs_redraw = false;
 
                     let elapsed = Instant::now().duration_since(start);
@@ -282,7 +284,6 @@ impl Wallpaper {
         if let Err(err) = self.save_state() {
             error!("{err}");
         }
-        self.new_image = true;
         self.image_queue = image_queue;
     }
 
@@ -343,7 +344,7 @@ impl Wallpaper {
                             }
 
                             item.image_queue.push_back(next);
-                            item.new_image = true;
+                            item.clear_image();
                             item.draw();
 
                             return TimeoutAction::ToDuration(Duration::from_secs(rotation_freq));
@@ -353,6 +354,13 @@ impl Wallpaper {
                     },
                 )
                 .ok();
+        }
+    }
+
+    fn clear_image(&mut self) {
+        self.current_image = None;
+        for l in &mut self.layers {
+            l.needs_redraw = true;
         }
     }
 }
