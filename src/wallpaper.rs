@@ -11,7 +11,9 @@ use std::{
 
 use cosmic_bg_config::{state::State, Color, Entry, SamplingMethod, ScalingMode, Source};
 use cosmic_config::CosmicConfigEntry;
-use image::{DynamicImage, ImageReader};
+use eyre::{eyre, OptionExt};
+use image::{DynamicImage, GrayAlphaImage, GrayImage, ImageReader, RgbImage, RgbaImage};
+use jxl_oxide::{EnumColourEncoding, JxlImage, PixelFormat};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rand::{seq::SliceRandom, thread_rng};
 use sctk::reexports::{
@@ -123,27 +125,42 @@ impl Wallpaper {
                     tracing::info!("No source for wallpaper");
                     continue;
                 };
+
                 cur_resized_img = match source {
                     Source::Path(ref path) => {
                         if self.current_image.is_none() {
-                            self.current_image = Some(match ImageReader::open(&path) {
-                                Ok(img) => {
-                                    match img
-                                        .with_guessed_format()
-                                        .ok()
-                                        .and_then(|f| f.decode().ok())
-                                    {
-                                        Some(img) => img,
-                                        None => {
-                                            tracing::warn!(
-                                                "Could not decode image: {}",
-                                                path.display()
-                                            );
-                                            continue;
+                            self.current_image = Some(match path.extension() {
+                                Some(ext) if ext == "jxl" => match decode_jpegxl(&path) {
+                                    Ok(image) => image,
+                                    Err(why) => {
+                                        tracing::warn!(
+                                            ?why,
+                                            "jpegl-xl image decode failed: {}",
+                                            path.display()
+                                        );
+                                        continue;
+                                    }
+                                },
+
+                                _ => match ImageReader::open(&path) {
+                                    Ok(img) => {
+                                        match img
+                                            .with_guessed_format()
+                                            .ok()
+                                            .and_then(|f| f.decode().ok())
+                                        {
+                                            Some(img) => img,
+                                            None => {
+                                                tracing::warn!(
+                                                    "could not decode image: {}",
+                                                    path.display()
+                                                );
+                                                continue;
+                                            }
                                         }
                                     }
-                                }
-                                Err(_) => continue,
+                                    Err(_) => continue,
+                                },
                             });
                         }
                         let img = self.current_image.as_ref().unwrap();
@@ -379,4 +396,75 @@ fn current_image(output: &str) -> Option<Source> {
     };
 
     wallpaper.map(|(_name, path)| path)
+}
+
+/// Decodes JPEG XL image files into `image::DynamicImage` via `jxl-oxide`.
+fn decode_jpegxl(path: &std::path::Path) -> eyre::Result<DynamicImage> {
+    let mut image = JxlImage::builder()
+        .open(path)
+        .map_err(|why| eyre!("failed to read image header: {why}"))?;
+
+    image.request_color_encoding(EnumColourEncoding::srgb(
+        jxl_oxide::RenderingIntent::Relative,
+    ));
+
+    let render = image
+        .render_frame(0)
+        .map_err(|why| eyre!("failed to render image frame: {why}"))?;
+
+    let framebuffer = render.image_all_channels();
+
+    match image.pixel_format() {
+        PixelFormat::Graya => GrayAlphaImage::from_raw(
+            framebuffer.width() as u32,
+            framebuffer.height() as u32,
+            framebuffer
+                .buf()
+                .iter()
+                .map(|x| x * 255. + 0.5)
+                .map(|x| x as u8)
+                .collect::<Vec<_>>(),
+        )
+        .map(DynamicImage::ImageLumaA8)
+        .ok_or_eyre("Can't decode gray alpha buffer"),
+        PixelFormat::Gray => GrayImage::from_raw(
+            framebuffer.width() as u32,
+            framebuffer.height() as u32,
+            framebuffer
+                .buf()
+                .iter()
+                .map(|x| x * 255. + 0.5)
+                .map(|x| x as u8)
+                .collect::<Vec<_>>(),
+        )
+        .map(DynamicImage::ImageLuma8)
+        .ok_or_eyre("Can't decode gray buffer"),
+        PixelFormat::Rgba => RgbaImage::from_raw(
+            framebuffer.width() as u32,
+            framebuffer.height() as u32,
+            framebuffer
+                .buf()
+                .iter()
+                .map(|x| x * 255. + 0.5)
+                .map(|x| x as u8)
+                .collect::<Vec<_>>(),
+        )
+        .map(DynamicImage::ImageRgba8)
+        .ok_or_eyre("Can't decode rgba buffer"),
+        PixelFormat::Rgb => RgbImage::from_raw(
+            framebuffer.width() as u32,
+            framebuffer.height() as u32,
+            framebuffer
+                .buf()
+                .iter()
+                .map(|x| x * 255. + 0.5)
+                .map(|x| x as u8)
+                .collect::<Vec<_>>(),
+        )
+        .map(DynamicImage::ImageRgb8)
+        .ok_or_eyre("Can't decode rgb buffer"),
+        //TODO: handle this
+        PixelFormat::Cmyk => Err(eyre!("unsupported pixel format: CMYK")),
+        PixelFormat::Cmyka => Err(eyre!("unsupported pixel format: CMYKA")),
+    }
 }
