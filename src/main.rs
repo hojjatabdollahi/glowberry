@@ -6,6 +6,32 @@ mod img_source;
 mod scaler;
 mod wallpaper;
 
+/// Access glibc malloc tunables.
+#[cfg(target_env = "gnu")]
+mod malloc {
+    use std::os::raw::c_int;
+    const M_MMAP_THRESHOLD: c_int = -3;
+
+    extern "C" {
+        fn malloc_trim(pad: usize);
+        fn mallopt(param: c_int, value: c_int) -> c_int;
+    }
+
+    /// Prevents glibc from hoarding memory via memory fragmentation.
+    pub fn limit_mmap_threshold() {
+        unsafe {
+            mallopt(M_MMAP_THRESHOLD, 65536);
+        }
+    }
+
+    /// Asks glibc to trim malloc arenas.
+    pub fn trim() {
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+
 use cosmic_bg_config::{state::State, Config};
 use cosmic_config::{calloop::ConfigWatchSource, CosmicConfigEntry};
 use eyre::Context;
@@ -43,14 +69,10 @@ use sctk::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
+
 use tracing::error;
 use tracing_subscriber::prelude::*;
 use wallpaper::Wallpaper;
-
-#[cfg(target_env = "gnu")]
-extern "C" {
-    fn malloc_trim(pad: usize);
-}
 
 #[derive(Debug)]
 pub struct CosmicBgLayer {
@@ -66,6 +88,10 @@ pub struct CosmicBgLayer {
 
 #[allow(clippy::too_many_lines)]
 fn main() -> color_eyre::Result<()> {
+    // Prevents glibc from hoarding memory via memory fragmentation.
+    #[cfg(target_env = "gnu")]
+    malloc::limit_mmap_threshold();
+
     color_eyre::install()?;
 
     if std::env::var("RUST_SPANTRACE").is_err() {
@@ -151,9 +177,7 @@ fn main() -> color_eyre::Result<()> {
                         state.apply_backgrounds();
 
                         #[cfg(target_env = "gnu")]
-                        unsafe {
-                            malloc_trim(0);
-                        }
+                        malloc::trim();
 
                         tracing::debug!(
                             same_on_all = state.config.same_on_all,
