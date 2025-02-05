@@ -213,7 +213,7 @@ fn main() -> color_eyre::Result<()> {
         shm_state: Shm::bind(&globals, &qh).unwrap(),
         layer_state: LayerShell::bind(&globals, &qh).unwrap(),
         viewporter: globals.bind(&qh, 1..=1, ()).unwrap(),
-        fractional_scale_manager: globals.bind(&qh, 1..=1, ()).unwrap(),
+        fractional_scale_manager: globals.bind(&qh, 1..=1, ()).ok(),
         qh,
         source_tx,
         loop_handle: event_loop.handle(),
@@ -242,7 +242,7 @@ pub struct CosmicBg {
     shm_state: Shm,
     layer_state: LayerShell,
     viewporter: wp_viewporter::WpViewporter,
-    fractional_scale_manager: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    fractional_scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     qh: QueueHandle<CosmicBg>,
     source_tx: calloop::channel::SyncSender<(String, notify::Event)>,
     loop_handle: calloop::LoopHandle<'static, CosmicBg>,
@@ -319,8 +319,13 @@ impl CosmicBg {
 
         let viewport = self.viewporter.get_viewport(&surface, &self.qh, ());
 
-        self.fractional_scale_manager
-            .get_fractional_scale(&surface, &self.qh, surface.downgrade());
+        let fractional_scale = if let Some(mngr) = self.fractional_scale_manager.as_ref() {
+            mngr.get_fractional_scale(&surface, &self.qh, surface.downgrade());
+            None
+        } else {
+            (self.compositor_state.wl_compositor().version() < 6)
+                .then_some(output_info.scale_factor as u32 * 120)
+        };
 
         CosmicBgLayer {
             layer,
@@ -328,7 +333,7 @@ impl CosmicBg {
             wl_output: output,
             output_info,
             size: None,
-            fractional_scale: None,
+            fractional_scale,
             needs_redraw: false,
             pool: None,
         }
@@ -340,10 +345,22 @@ impl CompositorHandler for CosmicBg {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
-        // Not needed for this example.
+        if self.fractional_scale_manager.is_none() {
+            for wallpaper in &mut self.wallpapers {
+                if let Some(layer) = wallpaper
+                    .layers
+                    .iter_mut()
+                    .find(|layer| layer.layer.wl_surface() == surface)
+                {
+                    layer.fractional_scale = Some(new_factor as u32 * 120);
+                    wallpaper.draw();
+                    break;
+                }
+            }
+        }
     }
 
     fn frame(
@@ -423,9 +440,26 @@ impl OutputHandler for CosmicBg {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
-        // TODO
+        if self.fractional_scale_manager.is_none()
+            && self.compositor_state.wl_compositor().version() < 6
+        {
+            let Some(output_info) = self.output_state.info(&output) else {
+                return;
+            };
+            for wallpaper in &mut self.wallpapers {
+                if let Some(layer) = wallpaper
+                    .layers
+                    .iter_mut()
+                    .find(|layer| layer.wl_output == output)
+                {
+                    layer.fractional_scale = Some(output_info.scale_factor as u32 * 120);
+                    wallpaper.draw();
+                    break;
+                }
+            }
+        }
     }
 
     fn output_destroyed(
