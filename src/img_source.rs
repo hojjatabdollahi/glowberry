@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0-only
+// SPDX-License-Identifier: MPL-2.0
 
 use notify::event::{ModifyKind, RenameMode};
 use sctk::reexports::calloop::{channel, LoopHandle};

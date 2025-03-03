@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0-only'
+// SPDX-License-Identifier: MPL-2.0
 
 use crate::{CosmicBg, CosmicBgLayer};
 use image::{DynamicImage, GenericImageView};

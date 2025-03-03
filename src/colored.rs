@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0-only
+// SPDX-License-Identifier: MPL-2.0
 
 use colorgrad::Color;
 use cosmic_bg_config::Gradient;

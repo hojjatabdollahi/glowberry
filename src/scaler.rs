@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0-only
+// SPDX-License-Identifier: MPL-2.0
 
 //! Background scaling methods such as fit, stretch, and zoom.
 

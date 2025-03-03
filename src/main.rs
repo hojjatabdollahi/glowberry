@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0-only
+// SPDX-License-Identifier: MPL-2.0
 
 mod colored;
 mod draw;
