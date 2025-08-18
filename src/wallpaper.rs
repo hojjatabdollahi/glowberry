@@ -9,18 +9,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cosmic_bg_config::{state::State, Color, Entry, SamplingMethod, ScalingMode, Source};
+use cosmic_bg_config::{Color, Entry, SamplingMethod, ScalingMode, Source, state::State};
 use cosmic_config::CosmicConfigEntry;
-use eyre::{eyre, OptionExt};
+use eyre::{OptionExt, eyre};
 use image::{DynamicImage, GrayAlphaImage, GrayImage, ImageReader, RgbImage, RgbaImage};
 use jxl_oxide::{EnumColourEncoding, JxlImage, PixelFormat};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{rng, seq::SliceRandom};
 use sctk::reexports::{
     calloop::{
-        self,
+        self, RegistrationToken,
         timer::{TimeoutAction, Timer},
-        RegistrationToken,
     },
     client::QueueHandle,
 };
@@ -127,7 +126,7 @@ impl Wallpaper {
                 };
 
                 cur_resized_img = match source {
-                    Source::Path(ref path) => {
+                    Source::Path(path) => {
                         if self.current_image.is_none() {
                             self.current_image = Some(match path.extension() {
                                 Some(ext) if ext == "jxl" => match decode_jpegxl(&path) {
@@ -178,15 +177,11 @@ impl Wallpaper {
                         }
                     }
 
-                    Source::Color(Color::Single([ref r, ref g, ref b])) => {
-                        Some(image::DynamicImage::from(crate::colored::single(
-                            [*r, *g, *b],
-                            width,
-                            height,
-                        )))
-                    }
+                    Source::Color(Color::Single([r, g, b])) => Some(image::DynamicImage::from(
+                        crate::colored::single([*r, *g, *b], width, height),
+                    )),
 
-                    Source::Color(Color::Gradient(ref gradient)) => {
+                    Source::Color(Color::Gradient(gradient)) => {
                         match crate::colored::gradient(gradient, width, height) {
                             Ok(buffer) => Some(image::DynamicImage::from(buffer)),
                             Err(why) => {
@@ -280,7 +275,7 @@ impl Wallpaper {
                             image_slice
                                 .sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
                         }
-                        SamplingMethod::Random => image_slice.shuffle(&mut thread_rng()),
+                        SamplingMethod::Random => image_slice.shuffle(&mut rng()),
                     };
 
                     // If a wallpaper from this slideshow was previously set, resume with that wallpaper.

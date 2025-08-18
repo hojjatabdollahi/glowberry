@@ -7,10 +7,10 @@ edition = "2021"
 
 [dependencies]
 colorgrad.workspace = true
-derive_setters = "0.1.6"
+derive_setters = "0.1.8"
 image.workspace = true
 ron.workspace = true
-serde = { version = "1.0.208", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
 tracing.workspace = true
 
 [dependencies.cosmic-config]

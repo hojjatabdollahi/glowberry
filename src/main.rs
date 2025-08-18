@@ -12,7 +12,7 @@ mod malloc {
     use std::os::raw::c_int;
     const M_MMAP_THRESHOLD: c_int = -3;
 
-    extern "C" {
+    unsafe extern "C" {
         fn malloc_trim(pad: usize);
         fn mallopt(param: c_int, value: c_int) -> c_int;
     }
@@ -32,8 +32,8 @@ mod malloc {
     }
 }
 
-use cosmic_bg_config::{state::State, Config};
-use cosmic_config::{calloop::ConfigWatchSource, CosmicConfigEntry};
+use cosmic_bg_config::{Config, state::State};
+use cosmic_config::{CosmicConfigEntry, calloop::ConfigWatchSource};
 use eyre::Context;
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
@@ -43,13 +43,12 @@ use sctk::{
         calloop,
         calloop_wayland_source::WaylandSource,
         client::{
-            delegate_noop,
+            Connection, Dispatch, Proxy, QueueHandle, Weak, delegate_noop,
             globals::registry_queue_init,
             protocol::{
                 wl_output::{self, WlOutput},
                 wl_surface,
             },
-            Connection, Dispatch, Proxy, QueueHandle, Weak,
         },
         protocols::wp::{
             fractional_scale::v1::client::{
@@ -61,13 +60,13 @@ use sctk::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     shell::{
+        WaylandSurface,
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
             LayerSurfaceConfigure,
         },
-        WaylandSurface,
     },
-    shm::{slot::SlotPool, Shm, ShmHandler},
+    shm::{Shm, ShmHandler, slot::SlotPool},
 };
 
 use tracing::error;
@@ -95,7 +94,9 @@ fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
     if std::env::var("RUST_SPANTRACE").is_err() {
-        std::env::set_var("RUST_SPANTRACE", "0");
+        unsafe {
+            std::env::set_var("RUST_SPANTRACE", "0");
+        }
     }
 
     init_logger();
