@@ -3,7 +3,7 @@
 use crate::{CosmicBg, CosmicBgLayer};
 use image::{DynamicImage, GenericImageView};
 use sctk::{
-    reexports::client::{protocol::wl_shm, QueueHandle},
+    reexports::client::{QueueHandle, protocol::wl_shm},
     shell::WaylandSurface,
     shm::slot::{Buffer, CreateBufferError, SlotPool},
 };

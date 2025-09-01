@@ -2,43 +2,34 @@
 name = "cosmic-bg"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85.1"
+rust-version = "1.85"
 
 [dependencies]
 color-eyre = "0.6.5"
 colorgrad = { workspace = true }
 cosmic-bg-config = { path = "./config" }
-dirs = "6.0.0"
 eyre = "0.6.12"
-fast_image_resize = { version = "4.2.3", features = ["image"] }
+fast_image_resize = { version = "5.1.4", features = ["image"] }
 image = { workspace = true, features = ["hdr", "jpeg", "png", "rayon", "webp"] }
 jxl-oxide = { version = "0.12.4", features = ["image"] }
-notify = "6.1.1"
+notify = "8.2.0"
 rand = "0.9.2"
-ron = { workspace = true }
-sctk = { package = "smithay-client-toolkit", version = "0.19.2" }
-slab = "0.4.11"
+sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
 tracing = { workspace = true }
-tracing-subscriber = "0.3.19"
+tracing-subscriber = "0.3.20"
 walkdir = "2.5"
 
 [workspace]
 members = ["config"]
 
 [workspace.dependencies]
-colorgrad = "0.6.2"
-image = { version = "0.25.6", default-features = false }
-ron = "0.10.1"
+colorgrad = "0.7.2"
+image = { version = "0.25.7", default-features = false }
 tracing = "0.1.41"
 
 [dependencies.cosmic-config]
 git = "https://github.com/pop-os/libcosmic"
-rev = "8c6f2c9ebc5c2c04fe168c2d941f8c5a416b33bb"
 features = ["calloop"]
 
 [profile.release]
 opt-level = 3
-
-# TODO: Remove when sctk is updated to latest calloop, like cosmic-config
-[patch.'https://github.com/pop-os/libcosmic']
-cosmic-config = { git = "https://github.com/pop-os//libcosmic", rev = "8c6f2c9ebc5c2c04fe168c2d941f8c5a416b33bb" }

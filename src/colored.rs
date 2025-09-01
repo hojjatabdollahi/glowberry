@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use colorgrad::Color;
+use colorgrad::{Color, Gradient as ColorGradient};
 use cosmic_bg_config::Gradient;
 use image::Rgb32FImage;
 
@@ -24,23 +24,22 @@ pub fn gradient(
     gradient: &Gradient,
     width: u32,
     height: u32,
-) -> Result<Rgb32FImage, colorgrad::CustomGradientError> {
+) -> Result<Rgb32FImage, colorgrad::GradientBuilderError> {
     let mut colors = Vec::with_capacity(gradient.colors.len());
 
     for &[r, g, b] in &*gradient.colors {
         colors.push(colorgrad::Color::from_linear_rgba(
-            f64::from(r),
-            f64::from(g),
-            f64::from(b),
+            f32::from(r),
+            f32::from(g),
+            f32::from(b),
             1.0,
         ));
     }
 
-    let grad = colorgrad::CustomGradient::new()
+    let grad = colorgrad::GradientBuilder::new()
         .colors(&colors)
         .mode(colorgrad::BlendMode::LinearRgb)
-        .interpolation(colorgrad::Interpolation::Linear)
-        .build()?;
+        .build::<colorgrad::LinearGradient>()?;
 
     let mut imgbuf = image::ImageBuffer::new(width, height);
 
@@ -70,15 +69,15 @@ pub fn gradient(
                 x * f64::cos(angle) - y * f64::sin(angle),
                 -width / SCALE,
                 width / SCALE,
-                dmin,
-                dmax,
+                f64::from(dmin),
+                f64::from(dmax),
             )
         }),
     };
 
     #[allow(clippy::cast_possible_truncation)]
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
-        let Color { r, g, b, .. } = grad.at(positioner(x, y));
+        let Color { r, g, b, .. } = grad.at(positioner(x, y) as f32);
 
         *pixel = image::Rgb([r as f32, g as f32, b as f32]);
     }

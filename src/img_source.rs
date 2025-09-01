@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use notify::event::{ModifyKind, RenameMode};
-use sctk::reexports::calloop::{channel, LoopHandle};
+use sctk::reexports::calloop::{LoopHandle, channel};
 
 use crate::CosmicBg;
 

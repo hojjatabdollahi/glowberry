@@ -1,23 +1,14 @@
-on:
-  push:
-    branches: [master_jammy]
-  pull_request:
+name: Continuous Integration
 
-name: CI
+on: [push, pull_request]
 
 jobs:
-  rustfmt:
-    name: Rustfmt
-    runs-on: ubuntu-20.04
+  formatting:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
           components: rustfmt
-      - name: Create blank versions of configured file
-        run: echo -e "" >> src/config.rs
-      - name: Run cargo fmt
-        run: cargo fmt --all -- --check
+      - name: Run rustfmt
+        run: cargo +nightly fmt --all -- --check
