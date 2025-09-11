@@ -6,14 +6,14 @@
   <!-- Insert your license of choice here -->
   <!-- <project_license>MIT</project_license> -->
   <name>COSMIC Background</name>
-  <name xml:lang="ar">خَلفِيَّةُ كوزمِك</name>
+  <name xml:lang="ar">خَلفِيَّةُ COSMIC</name>
   <name xml:lang="pl">Tapeta COSMIC</name>
   <summary>COSMIC Background desktop daemon</summary>
-  <summary xml:lang="ar">نَاطِرُ خَلفِيَّةِ سَطحِ مَكتَبِ كوزمِك</summary>
+  <summary xml:lang="ar">نَاطِرُ خَلفِيَّةِ سَطحِ مَكتَبِ COSMIC</summary>
   <summary xml:lang="pl">Usługa tapety pulpitu COSMIC</summary>
   <description>
     <p>COSMIC Background desktop daemon</p>
-    <p xml:lang="ar">نَاطِرُ خَلفِيَّةِ سَطحِ مَكتَبِ كوزمِك</p>
+    <p xml:lang="ar">نَاطِرُ خَلفِيَّةِ سَطحِ مَكتَبِ COSMIC</p>
     <p xml:lang="pl">Usługa tapety pulpitu COSMIC</p>
   </description>
   <!-- <screenshots>
