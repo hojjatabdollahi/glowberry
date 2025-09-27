@@ -2,11 +2,13 @@
 Name=COSMIC Background
 Name[zh_CN]=COSMIC 
 Name[ar]=خَلفِيَّةُ COSMIC
+Name[cs]=Pozadí COSMIC
 Name[pl]=Tapeta COSMIC
 Name[ru]=Фоны COSMIC
 Comment=COSMIC Background desktop daemon
 Comment[zh_CN]=COSMIC 背景桌面守护进程
 Comment[ar]=نَاطِرُ خَلفِيَّةِ سَطحِ مَكتَبِ COSMIC
+Comment[cs]=Daemon pozadí plochy COSMIC
 Comment[pl]=Usługa tapety pulpitu COSMIC
 Comment[ru]=Демон фонов оболочки COSMIC
 Type=Application
