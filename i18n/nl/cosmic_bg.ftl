@@ -1,2 +1,2 @@
-app-name = COSMIC Achtergrondjes
-translator-credits = Feike Donia
+app-name = COSMIC Achtergrond
+translator-credits = Ashley Wulber

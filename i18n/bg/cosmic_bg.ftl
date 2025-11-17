@@ -1,2 +1,4 @@
 app-name = Фон на COSMIC
-translator-credits = twlvnn kraftwerk
+translator-credits =
+    Aleks Gerenski
+    twlvnn kraftwerk

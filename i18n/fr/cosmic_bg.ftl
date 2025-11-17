@@ -1,2 +1,2 @@
 app-name = Arrière-plan COSMIC
-translator-credits = Roxfr
+translator-credits = Julien Brd

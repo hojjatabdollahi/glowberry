@@ -1,2 +1,2 @@
 app-name = Tła COSMIC
-translator-credits = Lech
+translator-credits = VandaL
