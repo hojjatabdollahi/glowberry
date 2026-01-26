@@ -1,2 +1,2 @@
-app-name = Фон COSMIC
+app-name = Тло COSMIC
 translator-credits = Yevhen Popok, Yelysei Matviienko
