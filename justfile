@@ -28,6 +28,7 @@ export INSTALL_DIR := base-dir / 'share'
 cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
 bin-src := cargo-target-dir / 'release' / name
 bin-dst := base-dir / 'bin' / name
+shaders-dir := base-dir / 'share' / 'cosmic-bg' / 'shaders'
 
 # Default recipe which runs `just build-release`
 default: build-release
@@ -66,10 +67,14 @@ install:
     install -Dm0755 {{bin-src}} {{bin-dst}}
     @just data/install
     @just data/icons/install
+    # Install bundled shaders for live wallpapers
+    install -d {{shaders-dir}}
+    install -Dm0644 examples/*.wgsl {{shaders-dir}}/
 
 # Uninstalls installed files
 uninstall:
     rm {{bin-dst}}
+    rm -rf {{shaders-dir}}
     @just data/uninstall
     @just data/icons/uninstall
 
