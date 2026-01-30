@@ -141,6 +141,8 @@ pub struct FragmentCanvas {
     start_time: Instant,
     last_frame: Instant,
     frame_interval: Duration,
+    /// The configured (original) frame rate from the shader source.
+    configured_frame_rate: u8,
 
     // Optional background texture
     _background_texture: Option<wgpu::Texture>,
@@ -372,8 +374,8 @@ impl FragmentCanvas {
         });
 
         // Calculate frame interval
-        let frame_rate = source.frame_rate.clamp(1, 60);
-        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(frame_rate));
+        let configured_frame_rate = source.frame_rate.clamp(1, 60);
+        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(configured_frame_rate));
 
         Ok(Self {
             pipeline,
@@ -383,6 +385,7 @@ impl FragmentCanvas {
             start_time: Instant::now(),
             last_frame: Instant::now(),
             frame_interval,
+            configured_frame_rate,
             _background_texture: background_texture,
         })
     }
@@ -449,6 +452,25 @@ impl FragmentCanvas {
     /// Mark that a frame was rendered.
     pub fn mark_frame_rendered(&mut self) {
         self.last_frame = Instant::now();
+    }
+
+    /// Get the configured (original) frame rate.
+    pub fn configured_frame_rate(&self) -> u8 {
+        self.configured_frame_rate
+    }
+
+    /// Get the current effective frame rate.
+    pub fn current_frame_rate(&self) -> u8 {
+        (1.0 / self.frame_interval.as_secs_f64()).round() as u8
+    }
+
+    /// Set a temporary frame rate override.
+    /// Pass `None` to restore the configured frame rate.
+    pub fn set_frame_rate_override(&mut self, frame_rate: Option<u8>) {
+        let effective_rate = frame_rate
+            .unwrap_or(self.configured_frame_rate)
+            .clamp(1, 60);
+        self.frame_interval = Duration::from_secs_f64(1.0 / f64::from(effective_rate));
     }
 
     /// Render the shader to a texture view.

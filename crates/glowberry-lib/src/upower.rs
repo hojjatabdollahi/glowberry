@@ -11,6 +11,9 @@ use futures::StreamExt;
 use tokio::sync::watch;
 use zbus::{Connection, proxy};
 
+/// Re-export calloop channel types for convenience.
+pub use calloop::channel::{Channel as CalloopChannel, Sender as CalloopSender};
+
 /// UPower D-Bus proxy for the main UPower interface.
 #[proxy(
     interface = "org.freedesktop.UPower",
@@ -88,10 +91,16 @@ impl PowerMonitorHandle {
     }
 }
 
+/// Message sent when power state changes.
+#[derive(Debug, Clone, Copy)]
+pub struct PowerStateChanged;
+
 /// Power monitor that watches UPower D-Bus signals.
 pub struct PowerMonitor {
     tx: watch::Sender<PowerState>,
     handle: PowerMonitorHandle,
+    /// Optional sender to notify calloop when power state changes.
+    notify_tx: Option<CalloopSender<PowerStateChanged>>,
 }
 
 impl PowerMonitor {
@@ -101,7 +110,14 @@ impl PowerMonitor {
     pub fn new() -> (Self, PowerMonitorHandle) {
         let (tx, rx) = watch::channel(PowerState::default());
         let handle = PowerMonitorHandle { rx };
-        (Self { tx, handle: handle.clone() }, handle)
+        (Self { tx, handle: handle.clone(), notify_tx: None }, handle)
+    }
+
+    /// Set a notification sender that will be called when power state changes.
+    /// This can be used to wake up a calloop event loop.
+    pub fn with_notify(mut self, notify_tx: CalloopSender<PowerStateChanged>) -> Self {
+        self.notify_tx = Some(notify_tx);
+        self
     }
 
     /// Get a handle to query the current power state.
@@ -145,10 +161,11 @@ impl PowerMonitor {
 
         // Clone what we need for the monitoring task
         let tx = self.tx.clone();
+        let notify_tx = self.notify_tx.clone();
         
         // Spawn monitoring task
         tokio::spawn(async move {
-            if let Err(e) = monitor_loop(connection, tx).await {
+            if let Err(e) = monitor_loop(connection, tx, notify_tx).await {
                 tracing::error!(?e, "Power monitor error");
             }
         });
@@ -160,6 +177,7 @@ impl PowerMonitor {
 async fn monitor_loop(
     connection: Connection,
     tx: watch::Sender<PowerState>,
+    notify_tx: Option<CalloopSender<PowerStateChanged>>,
 ) -> zbus::Result<()> {
     let upower = UPowerProxy::new(&connection).await?;
     
@@ -186,6 +204,13 @@ async fn monitor_loop(
         None
     };
 
+    // Helper to send notification
+    let notify = |notify_tx: &Option<CalloopSender<PowerStateChanged>>| {
+        if let Some(tx) = notify_tx {
+            let _ = tx.send(PowerStateChanged);
+        }
+    };
+
     loop {
         tokio::select! {
             Some(change) = async { on_battery_stream.next().await } => {
@@ -194,6 +219,7 @@ async fn monitor_loop(
                         state.on_battery = on_battery;
                     });
                     tracing::debug!(on_battery, "Battery state changed");
+                    notify(&notify_tx);
                 }
             }
             Some(change) = async { lid_closed_stream.next().await } => {
@@ -202,6 +228,7 @@ async fn monitor_loop(
                         state.lid_is_closed = lid_is_closed;
                     });
                     tracing::debug!(lid_is_closed, "Lid state changed");
+                    notify(&notify_tx);
                 }
             }
             Some(change) = async { 
@@ -216,6 +243,7 @@ async fn monitor_loop(
                         state.battery_percentage = Some(percentage);
                     });
                     tracing::debug!(percentage, "Battery percentage changed");
+                    notify(&notify_tx);
                 }
             }
             else => {
@@ -232,7 +260,12 @@ async fn monitor_loop(
 /// 
 /// This is a convenience function that creates a monitor and starts it
 /// on a new tokio runtime if one isn't already running.
-pub fn start_power_monitor() -> Option<PowerMonitorHandle> {
+/// 
+/// If `notify_tx` is provided, it will be called when power state changes,
+/// allowing the caller to wake up their event loop.
+pub fn start_power_monitor(
+    notify_tx: Option<CalloopSender<PowerStateChanged>>,
+) -> Option<PowerMonitorHandle> {
     // Create a new tokio runtime for the power monitor
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -240,6 +273,11 @@ pub fn start_power_monitor() -> Option<PowerMonitorHandle> {
         .ok()?;
 
     let (monitor, handle) = PowerMonitor::new();
+    let monitor = if let Some(tx) = notify_tx {
+        monitor.with_notify(tx)
+    } else {
+        monitor
+    };
     
     // Spawn the monitor on a separate thread with its own runtime
     std::thread::spawn(move || {

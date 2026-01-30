@@ -2,7 +2,7 @@
 
 use crate::{
     fragment_canvas, gpu, img_source,
-    upower::{start_power_monitor, PowerMonitorHandle},
+    upower::{start_power_monitor, PowerMonitorHandle, PowerStateChanged},
     user_context::{EnvGuard, UserContext},
     wallpaper::Wallpaper,
 };
@@ -211,6 +211,8 @@ impl BackgroundEngine {
                                     tracing::debug!(key, "power saving config changed");
                                     state.power_saving_config = conf_context.power_saving_config();
                                     tracing::info!(config = ?state.power_saving_config, "Updated power saving config");
+                                    // Force reapply frame rates with new config
+                                    state.reapply_frame_rates();
                                 }
 
                                 _ => {
@@ -261,13 +263,27 @@ impl BackgroundEngine {
             .unwrap_or_default();
         tracing::info!(?power_saving_config, "Loaded power saving config");
 
+        // Create channel for power state change notifications
+        let (power_notify_tx, power_notify_rx) = calloop::channel::channel();
+
         // Start power monitor for battery/lid state tracking
-        let power_monitor = start_power_monitor();
+        let power_monitor = start_power_monitor(Some(power_notify_tx));
         if power_monitor.is_some() {
             tracing::info!("Power monitor started successfully");
         } else {
             tracing::warn!("Failed to start power monitor, power saving features will be disabled");
         }
+
+        // Insert power state change notification source into event loop
+        event_loop
+            .handle()
+            .insert_source(power_notify_rx, |event, _, state| {
+                if let calloop::channel::Event::Msg(PowerStateChanged) = event {
+                    tracing::debug!("Received power state change notification");
+                    state.on_power_state_changed();
+                }
+            })
+            .expect("failed to insert power notification channel into event loop");
 
         let source_tx = img_source::img_source(&event_loop.handle(), |state, source, event| {
             use notify::event::{ModifyKind, RenameMode};
@@ -367,6 +383,8 @@ impl BackgroundEngine {
             connection: conn_for_state,
             power_monitor,
             power_saving_config,
+            current_frame_rate_override: None,
+            was_on_battery: false,
         };
 
         loop {
@@ -457,6 +475,10 @@ pub struct CosmicBg {
     power_monitor: Option<PowerMonitorHandle>,
     /// Power saving configuration.
     power_saving_config: PowerSavingConfig,
+    /// Currently applied frame rate override (None = using configured rates).
+    current_frame_rate_override: Option<u8>,
+    /// Whether we were on battery in the last check (for detecting changes).
+    was_on_battery: bool,
 }
 
 // Manual Debug impl since wgpu types don't implement Debug
@@ -523,19 +545,99 @@ impl CosmicBg {
         false
     }
 
-    /// Get the effective frame rate based on power state.
-    /// Returns None if using the shader's configured frame rate.
-    fn effective_frame_rate(&self) -> Option<u8> {
+    /// Check if power state has changed and update frame rates if needed.
+    /// Returns true if frame rate was changed.
+    fn check_and_update_frame_rates(&mut self) -> bool {
         let Some(ref power_monitor) = self.power_monitor else {
-            return None;
+            return false;
         };
 
         let power_state = power_monitor.current();
+        let on_battery = power_state.on_battery;
 
-        if power_state.on_battery {
+        // Check if battery state changed
+        if on_battery == self.was_on_battery {
+            return false;
+        }
+
+        self.was_on_battery = on_battery;
+        self.reapply_frame_rates();
+        true
+    }
+
+    /// Reapply frame rate settings based on current power state and config.
+    /// Called when config changes or battery state changes.
+    fn reapply_frame_rates(&mut self) {
+        let on_battery = self
+            .power_monitor
+            .as_ref()
+            .map(|pm| pm.current().on_battery)
+            .unwrap_or(false);
+
+        // Determine new frame rate override
+        let new_override = if on_battery {
             self.power_saving_config.on_battery_action.frame_rate()
         } else {
-            None
+            None // Restore to configured rate
+        };
+
+        // Check if override actually changed
+        if new_override == self.current_frame_rate_override {
+            return;
+        }
+
+        self.current_frame_rate_override = new_override;
+
+        // Apply to all shader canvases
+        for wallpaper in &mut self.wallpapers {
+            for layer in &mut wallpaper.layers {
+                if let Some(gpu_state) = &mut layer.gpu_state {
+                    gpu_state.canvas.set_frame_rate_override(new_override);
+                    tracing::info!(
+                        output = ?layer.output_info.name,
+                        override_fps = ?new_override,
+                        configured_fps = gpu_state.canvas.configured_frame_rate(),
+                        "Updated shader frame rate"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Called when power state changes (from D-Bus notification).
+    /// This handles resuming from paused state and updating frame rates.
+    fn on_power_state_changed(&mut self) {
+        let was_paused = self.should_pause_animation();
+
+        // Update battery state tracking
+        if let Some(ref power_monitor) = self.power_monitor {
+            self.was_on_battery = power_monitor.current().on_battery;
+        }
+
+        // Reapply frame rates based on new power state
+        self.reapply_frame_rates();
+
+        let is_paused = self.should_pause_animation();
+
+        // If we were paused and now we're not, request frame callbacks to resume
+        if was_paused && !is_paused {
+            tracing::info!("Resuming shader animation after power state change");
+            self.request_frame_callbacks();
+        }
+    }
+
+    /// Request frame callbacks for all shader layers.
+    /// Used to resume animation after being paused.
+    fn request_frame_callbacks(&mut self) {
+        let qh = self.qh.clone();
+        for wallpaper in &mut self.wallpapers {
+            for layer in &mut wallpaper.layers {
+                if layer.gpu_state.is_some() {
+                    let wl_surface = layer.layer.wl_surface();
+                    wl_surface.frame(&qh, wl_surface.clone());
+                    layer.layer.commit();
+                }
+            }
         }
     }
 
@@ -825,6 +927,9 @@ impl CompositorHandler for CosmicBg {
         surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        // Check for power state changes and update frame rates if needed
+        self.check_and_update_frame_rates();
+
         // Check if animation should be paused due to power state
         let should_pause = self.should_pause_animation();
 
@@ -909,9 +1014,14 @@ impl CompositorHandler for CosmicBg {
                     }
 
                     // Request next frame callback to continue animation
-                    // We always request this so we can resume when unpaused
-                    surface.frame(qh, surface.clone());
-                    layer.layer.commit();
+                    // Only request if not paused - when paused, GPU goes truly idle
+                    // The on_power_state_changed handler will request frames when resuming
+                    if !should_pause {
+                        surface.frame(qh, surface.clone());
+                        layer.layer.commit();
+                    } else {
+                        tracing::debug!(output = ?layer.output_info.name, "Shader paused, not requesting frame callback");
+                    }
                 }
                 break;
             }

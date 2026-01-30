@@ -2419,6 +2419,7 @@ name = "glowberry-lib"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "calloop 0.14.3",
  "colorgrad",
  "cosmic-config",
  "eyre",
