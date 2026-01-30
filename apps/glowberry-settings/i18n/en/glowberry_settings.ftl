@@ -38,6 +38,10 @@ shader-license = License
 show-details = Show Details
 hide-details = Hide Details
 reset-to-defaults = Reset to Defaults
+shader-resource-usage = Resource Usage
+resource-low = Low
+resource-medium = Medium
+resource-high = High
 
 # Settings drawer
 settings = Settings
@@ -45,6 +49,21 @@ background-service = Background Service
 use-glowberry = Use GlowBerry as default
 performance = Performance
 prefer-low-power = Prefer low power GPU
+
+# Power saving section
+power-saving = Power Saving
+pause-fullscreen = Pause for fullscreen apps
+pause-covered = Pause when covered by windows
+coverage-threshold = Pause at coverage
+on-battery = On battery power
+action-nothing = Do nothing
+action-pause = Pause animation
+action-reduce-15 = Reduce to 15 FPS
+action-reduce-10 = Reduce to 10 FPS
+action-reduce-5 = Reduce to 5 FPS
+pause-low-battery = Pause on low battery
+low-battery-threshold = Battery threshold
+pause-lid-closed = Pause when lid closed
 
 # About
 repository = Repository

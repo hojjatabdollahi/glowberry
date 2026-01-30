@@ -6,14 +6,14 @@
 //
 // [PARAMS]
 // speed: f32 = 0.5 | min: 0.1 | max: 2.0 | step: 0.1 | label: Speed
-// zoom: i32 = 40 | min: 10 | max: 80 | step: 5 | label: Zoom
+// detail: i32 = 40 | min: 10 | max: 80 | step: 5 | label: Detail
 // brightness: f32 = 0.975 | min: 0.5 | max: 1.5 | step: 0.025 | label: Brightness
 // vignette: f32 = 5.0 | min: 0.0 | max: 10.0 | step: 0.5 | label: Vignette
 // [/PARAMS]
 
 // Default parameter values
 const speed: f32 = 0.5;
-const zoom: i32 = 40;
+const detail: i32 = 40;
 const brightness: f32 = 0.975;
 const vignette: f32 = 5.0;
 
@@ -37,7 +37,7 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     let yBoost = cosRange(time * 0.1, 10.0,  5.0);
     let fScale = cosRange(time * 15.5, 1.25, 0.5);
 
-    for (var i: i32 = 1; i < zoom; i++) {
+    for (var i: i32 = 1; i < detail; i++) {
         let fi = f32(i);
         var newp = p;
 

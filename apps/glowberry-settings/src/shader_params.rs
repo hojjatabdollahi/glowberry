@@ -54,6 +54,25 @@ impl ParamValue {
     }
 }
 
+/// Shader complexity level
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Complexity {
+    Low,
+    Medium,
+    High,
+}
+
+impl Complexity {
+    /// Get a display string for the complexity level
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Complexity::Low => "Low",
+            Complexity::Medium => "Medium",
+            Complexity::High => "High",
+        }
+    }
+}
+
 /// Parsed shader with metadata and parameters
 #[derive(Debug, Clone)]
 pub struct ParsedShader {
@@ -195,6 +214,111 @@ impl ParsedShader {
         }
 
         result
+    }
+
+    /// Estimate shader complexity based on static analysis
+    ///
+    /// This uses heuristics to estimate GPU load:
+    /// - Loop count and nesting
+    /// - Iteration parameters (params that control loop counts)
+    /// - Expensive math operations (sin, cos, exp, pow, sqrt, etc.)
+    /// - Texture sampling (if present)
+    pub fn estimate_complexity(
+        &self,
+        param_values: Option<&HashMap<String, ParamValue>>,
+    ) -> Complexity {
+        let source = &self.source_body;
+        let mut score: f32 = 0.0;
+
+        // Count loops
+        let for_loops = source.matches("for ").count() + source.matches("for(").count();
+        let while_loops = source.matches("loop ").count() + source.matches("loop{").count();
+        let total_loops = for_loops + while_loops;
+        score += total_loops as f32 * 10.0;
+
+        // Check for nested loops (very expensive)
+        // Simple heuristic: if we have 2+ loops, assume some nesting
+        if total_loops >= 2 {
+            score += 15.0;
+        }
+
+        // Count expensive math operations
+        let expensive_ops = [
+            ("sin(", 1.0),
+            ("cos(", 1.0),
+            ("tan(", 1.5),
+            ("exp(", 1.5),
+            ("exp2(", 1.2),
+            ("log(", 1.5),
+            ("log2(", 1.2),
+            ("pow(", 2.0),
+            ("sqrt(", 0.8),
+            ("inverseSqrt(", 0.8),
+            ("length(", 0.5),
+            ("normalize(", 0.8),
+            ("dot(", 0.3),
+            ("cross(", 0.5),
+            ("reflect(", 1.0),
+            ("refract(", 1.5),
+            ("atan(", 1.5),
+            ("atan2(", 1.5),
+            ("asin(", 1.5),
+            ("acos(", 1.5),
+            ("sinh(", 2.0),
+            ("cosh(", 2.0),
+            ("tanh(", 1.5),
+            ("smoothstep(", 0.5),
+            ("mix(", 0.3),
+        ];
+
+        for (op, weight) in expensive_ops {
+            let count = source.matches(op).count();
+            score += count as f32 * weight;
+        }
+
+        // Check for texture sampling (expensive)
+        if source.contains("textureSample") || source.contains("iTexture") {
+            score += 5.0;
+        }
+
+        // Check for iteration-controlling parameters
+        // These multiply the base cost
+        let iteration_params: Vec<&ShaderParam> = self
+            .params
+            .iter()
+            .filter(|p| {
+                let name_lower = p.name.to_lowercase();
+                name_lower.contains("iteration")
+                    || name_lower.contains("layers")
+                    || name_lower.contains("steps")
+                    || name_lower.contains("samples")
+                    || (name_lower == "zoom" && p.param_type == ParamType::I32)
+                    || (name_lower.contains("num_") || name_lower.contains("count"))
+            })
+            .collect();
+
+        // Get current or default iteration values
+        for param in iteration_params {
+            let value = param_values
+                .and_then(|v| v.get(&param.name))
+                .unwrap_or(&param.default);
+
+            let iter_count = value.as_i32().max(1) as f32;
+            // Iteration params have multiplicative effect
+            // Normalize: assume default of ~10 iterations is "normal"
+            let multiplier = (iter_count / 10.0).max(0.5);
+            score *= multiplier;
+        }
+
+        // Classify based on score
+        // These thresholds are tuned based on the existing shaders
+        if score < 15.0 {
+            Complexity::Low
+        } else if score < 40.0 {
+            Complexity::Medium
+        } else {
+            Complexity::High
+        }
     }
 }
 

@@ -3,7 +3,7 @@
 //! Main application state and logic for GlowBerry Settings
 
 use crate::fl;
-use crate::shader_params::{ParsedShader, ParamType, ParamValue};
+use crate::shader_params::{Complexity, ParsedShader, ParamType, ParamValue};
 use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::Subscription;
@@ -13,6 +13,7 @@ use cosmic::{ApplicationExt, Element};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use glowberry_config::{Color, Config, Context as ConfigContext, Entry, Gradient, Source};
+use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use image::{ImageBuffer, Rgba};
 use slotmap::{DefaultKey, SecondaryMap, SlotMap};
 use std::borrow::Cow;
@@ -85,6 +86,24 @@ pub struct GlowBerrySettings {
     
     /// Whether shader details section is expanded
     shader_details_expanded: bool,
+    
+    /// Power saving configuration
+    power_saving: PowerSavingConfig,
+    
+    /// Coverage threshold options for dropdown
+    coverage_threshold_options: Vec<String>,
+    /// Selected coverage threshold index
+    selected_coverage_threshold: usize,
+    
+    /// On battery action options for dropdown
+    on_battery_action_options: Vec<String>,
+    /// Selected on battery action index
+    selected_on_battery_action: usize,
+    
+    /// Low battery threshold options for dropdown
+    low_battery_threshold_options: Vec<String>,
+    /// Selected low battery threshold index
+    selected_low_battery_threshold: usize,
 }
 
 /// Information about an available shader
@@ -166,6 +185,22 @@ pub enum Message {
     ToggleShaderDetails,
     /// Reset shader parameters to defaults
     ResetShaderParams(usize),
+    
+    // Power saving messages
+    /// Toggle pause for fullscreen apps
+    SetPauseOnFullscreen(bool),
+    /// Toggle pause when covered by windows
+    SetPauseOnCovered(bool),
+    /// Change coverage threshold
+    SetCoverageThreshold(usize),
+    /// Change on battery action
+    SetOnBatteryAction(usize),
+    /// Toggle pause on low battery
+    SetPauseOnLowBattery(bool),
+    /// Change low battery threshold
+    SetLowBatteryThreshold(usize),
+    /// Toggle pause when lid closed
+    SetPauseOnLidClosed(bool),
 }
 
 /// Default colors available in the color picker
@@ -289,11 +324,58 @@ impl cosmic::Application for GlowBerrySettings {
             glowberry_is_default: is_glowberry_default(),
             shader_param_values: HashMap::new(),
             shader_details_expanded: false,
+            power_saving: PowerSavingConfig::default(),
+            coverage_threshold_options: vec![
+                "50%".to_string(),
+                "90%".to_string(),
+                "99%".to_string(),
+                "100%".to_string(),
+            ],
+            selected_coverage_threshold: 1, // 90% default
+            on_battery_action_options: vec![
+                fl!("action-nothing"),
+                fl!("action-pause"),
+                fl!("action-reduce-15"),
+                fl!("action-reduce-10"),
+                fl!("action-reduce-5"),
+            ],
+            selected_on_battery_action: 0, // Nothing default
+            low_battery_threshold_options: vec![
+                "10%".to_string(),
+                "20%".to_string(),
+                "30%".to_string(),
+                "50%".to_string(),
+            ],
+            selected_low_battery_threshold: 1, // 20% default
         };
         
-        // Load prefer_low_power from config
+        // Load prefer_low_power and power saving from config
         if let Some(ctx) = &app.config_context {
             app.prefer_low_power = ctx.prefer_low_power();
+            app.power_saving = ctx.power_saving_config();
+            
+            // Set dropdown indices based on loaded config
+            app.selected_coverage_threshold = match app.power_saving.coverage_threshold {
+                50 => 0,
+                90 => 1,
+                99 => 2,
+                100 => 3,
+                _ => 1, // Default to 90%
+            };
+            app.selected_on_battery_action = match app.power_saving.on_battery_action {
+                OnBatteryAction::Nothing => 0,
+                OnBatteryAction::Pause => 1,
+                OnBatteryAction::ReduceTo15Fps => 2,
+                OnBatteryAction::ReduceTo10Fps => 3,
+                OnBatteryAction::ReduceTo5Fps => 4,
+            };
+            app.selected_low_battery_threshold = match app.power_saving.low_battery_threshold {
+                10 => 0,
+                20 => 1,
+                30 => 2,
+                50 => 3,
+                _ => 1, // Default to 20%
+            };
         }
 
         // Initialize selection from config
@@ -568,6 +650,81 @@ impl cosmic::Application for GlowBerrySettings {
                     }
                 }
             }
+            
+            // Power saving messages
+            Message::SetPauseOnFullscreen(value) => {
+                self.power_saving.pause_on_fullscreen = value;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_pause_on_fullscreen(value);
+                }
+            }
+            
+            Message::SetPauseOnCovered(value) => {
+                self.power_saving.pause_on_covered = value;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_pause_on_covered(value);
+                }
+            }
+            
+            Message::SetCoverageThreshold(idx) => {
+                self.selected_coverage_threshold = idx;
+                let threshold = match idx {
+                    0 => 50,
+                    1 => 90,
+                    2 => 99,
+                    3 => 100,
+                    _ => 90,
+                };
+                self.power_saving.coverage_threshold = threshold;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_coverage_threshold(threshold);
+                }
+            }
+            
+            Message::SetOnBatteryAction(idx) => {
+                self.selected_on_battery_action = idx;
+                let action = match idx {
+                    0 => OnBatteryAction::Nothing,
+                    1 => OnBatteryAction::Pause,
+                    2 => OnBatteryAction::ReduceTo15Fps,
+                    3 => OnBatteryAction::ReduceTo10Fps,
+                    4 => OnBatteryAction::ReduceTo5Fps,
+                    _ => OnBatteryAction::Nothing,
+                };
+                self.power_saving.on_battery_action = action;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_on_battery_action(action);
+                }
+            }
+            
+            Message::SetPauseOnLowBattery(value) => {
+                self.power_saving.pause_on_low_battery = value;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_pause_on_low_battery(value);
+                }
+            }
+            
+            Message::SetLowBatteryThreshold(idx) => {
+                self.selected_low_battery_threshold = idx;
+                let threshold = match idx {
+                    0 => 10,
+                    1 => 20,
+                    2 => 30,
+                    3 => 50,
+                    _ => 20,
+                };
+                self.power_saving.low_battery_threshold = threshold;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_low_battery_threshold(threshold);
+                }
+            }
+            
+            Message::SetPauseOnLidClosed(value) => {
+                self.power_saving.pause_on_lid_closed = value;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_pause_on_lid_closed(value);
+                }
+            }
         }
 
         Task::none()
@@ -671,6 +828,94 @@ impl cosmic::Application for GlowBerrySettings {
 impl GlowBerrySettings {
     /// Build the settings drawer content
     fn settings_drawer_view(&self) -> Element<'_, Message> {
+        // Build power saving section
+        let mut power_saving_section = widget::settings::section()
+            .title(fl!("power-saving"));
+        
+        // Pause for fullscreen apps
+        power_saving_section = power_saving_section.add(settings::item(
+            fl!("pause-fullscreen"),
+            toggler(self.power_saving.pause_on_fullscreen)
+                .on_toggle(Message::SetPauseOnFullscreen),
+        ));
+        
+        // Pause when covered by windows (with conditional threshold dropdown)
+        {
+            let toggle_row = settings::item(
+                fl!("pause-covered"),
+                toggler(self.power_saving.pause_on_covered)
+                    .on_toggle(Message::SetPauseOnCovered),
+            );
+            
+            if self.power_saving.pause_on_covered {
+                let dropdown_row = settings::item(
+                    fl!("coverage-threshold"),
+                    dropdown(
+                        &self.coverage_threshold_options,
+                        Some(self.selected_coverage_threshold),
+                        Message::SetCoverageThreshold,
+                    ),
+                );
+                
+                power_saving_section = power_saving_section.add(
+                    widget::column::with_children(vec![
+                        toggle_row.into(),
+                        dropdown_row.into(),
+                    ])
+                    .spacing(8)
+                );
+            } else {
+                power_saving_section = power_saving_section.add(toggle_row);
+            }
+        }
+        
+        // On battery power action
+        power_saving_section = power_saving_section.add(settings::item(
+            fl!("on-battery"),
+            dropdown(
+                &self.on_battery_action_options,
+                Some(self.selected_on_battery_action),
+                Message::SetOnBatteryAction,
+            ),
+        ));
+        
+        // Pause on low battery (with conditional threshold dropdown)
+        {
+            let toggle_row = settings::item(
+                fl!("pause-low-battery"),
+                toggler(self.power_saving.pause_on_low_battery)
+                    .on_toggle(Message::SetPauseOnLowBattery),
+            );
+            
+            if self.power_saving.pause_on_low_battery {
+                let dropdown_row = settings::item(
+                    fl!("low-battery-threshold"),
+                    dropdown(
+                        &self.low_battery_threshold_options,
+                        Some(self.selected_low_battery_threshold),
+                        Message::SetLowBatteryThreshold,
+                    ),
+                );
+                
+                power_saving_section = power_saving_section.add(
+                    widget::column::with_children(vec![
+                        toggle_row.into(),
+                        dropdown_row.into(),
+                    ])
+                    .spacing(8)
+                );
+            } else {
+                power_saving_section = power_saving_section.add(toggle_row);
+            }
+        }
+        
+        // Pause when lid closed
+        power_saving_section = power_saving_section.add(settings::item(
+            fl!("pause-lid-closed"),
+            toggler(self.power_saving.pause_on_lid_closed)
+                .on_toggle(Message::SetPauseOnLidClosed),
+        ));
+        
         widget::settings::view_column(vec![
             // Default background service section
             widget::settings::section()
@@ -688,6 +933,8 @@ impl GlowBerrySettings {
                     toggler(self.prefer_low_power).on_toggle(Message::PreferLowPower),
                 ))
                 .into(),
+            // Power saving section
+            power_saving_section.into(),
         ])
         .into()
     }
@@ -986,6 +1233,19 @@ impl GlowBerrySettings {
                                 widget::text(&metadata.license),
                             ));
                         }
+                        
+                        // Resource usage estimate
+                        let param_values = self.shader_param_values.get(&shader_idx);
+                        let complexity = parsed.estimate_complexity(param_values);
+                        let usage_label = match complexity {
+                            Complexity::Low => fl!("resource-low"),
+                            Complexity::Medium => fl!("resource-medium"),
+                            Complexity::High => fl!("resource-high"),
+                        };
+                        list = list.add(settings::item(
+                            fl!("shader-resource-usage"),
+                            widget::text(usage_label),
+                        ));
                         
                         // Shader parameters
                         for param in &parsed.params {
@@ -1328,38 +1588,49 @@ fn is_glowberry_default() -> bool {
 }
 
 /// Set or unset GlowBerry as the default cosmic-bg
-/// This requires elevated privileges, so we use pkexec
+/// This requires elevated privileges for the symlink, so we use pkexec
 async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
     use tokio::process::Command;
 
-    let script = if enable {
+    // Get current user for pkill
+    let user = std::env::var("USER").unwrap_or_else(|_| "".to_string());
+
+    let symlink_script = if enable {
         // Create symlink to make glowberry the default
-        r#"
-            set -e
-            ln -sf /usr/bin/glowberry /usr/local/bin/cosmic-bg
-            # Restart cosmic-bg to apply the change
-            pkill -f cosmic-bg || true
-        "#
+        "ln -sf /usr/bin/glowberry /usr/local/bin/cosmic-bg"
     } else {
-        // Remove symlink to restore original cosmic-bg
-        r#"
-            set -e
-            rm -f /usr/local/bin/cosmic-bg
-            # Restart cosmic-bg to apply the change
-            pkill -f cosmic-bg || true
-        "#
+        // Point symlink to the original cosmic-bg
+        "ln -sf /usr/bin/cosmic-bg /usr/local/bin/cosmic-bg"
     };
 
+    // First, update the symlink with elevated privileges
     let output = Command::new("pkexec")
-        .args(["sh", "-c", script])
+        .args(["sh", "-c", symlink_script])
         .output()
         .await
         .map_err(|e| format!("Failed to run pkexec: {}", e))?;
 
-    if output.status.success() {
-        Ok(enable)
-    } else {
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Command failed: {}", stderr))
+        return Err(format!("Failed to update symlink: {}", stderr));
     }
+
+    // Kill the daemon processes as the current user (no pkexec needed)
+    // Use -x for exact match to avoid killing glowberry-settings
+    // Also use pkill -f with full path to be more specific
+    if !user.is_empty() {
+        // Kill glowberry daemon (exact match, not glowberry-settings)
+        let _ = Command::new("pkill")
+            .args(["-x", "-u", &user, "glowberry"])
+            .output()
+            .await;
+        
+        // Kill cosmic-bg (exact match)
+        let _ = Command::new("pkill")
+            .args(["-x", "-u", &user, "cosmic-bg"])
+            .output()
+            .await;
+    }
+
+    Ok(enable)
 }

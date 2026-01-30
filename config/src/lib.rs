@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+pub mod power_saving;
 pub mod state;
 
 use cosmic_config::{Config as CosmicConfig, ConfigGet, ConfigSet};
