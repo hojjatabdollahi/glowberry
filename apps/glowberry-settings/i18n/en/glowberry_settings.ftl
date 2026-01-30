@@ -29,6 +29,11 @@ fps-60 = 60 FPS
 loading-wallpapers = Loading wallpapers...
 no-shaders = No shaders found. Install shaders to /usr/share/glowberry/shaders/
 
+# Shader metadata
+shader-author = Author
+shader-source = Source
+shader-license = License
+
 # Settings drawer
 settings = Settings
 background-service = Background Service

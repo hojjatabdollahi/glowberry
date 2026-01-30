@@ -1,6 +1,21 @@
-// Organic Blob - animated 3D blob with soft lighting
-// Very efficient ray marcher with only 6 iterations
-// cosmic-bg provides: iResolution (vec2f), iTime (f32)
+// [SHADER]
+// name: Organic Blob
+// author: kishimisu (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/mtyGWy
+// license: CC BY-NC-SA 3.0
+//
+// [PARAMS]
+// speed: f32 = 1.0 | min: 0.2 | max: 3.0 | step: 0.1 | label: Speed
+// iterations: i32 = 6 | min: 3 | max: 12 | step: 1 | label: Detail
+// glow: f32 = 0.7 | min: 0.3 | max: 1.5 | step: 0.1 | label: Glow
+// distance: f32 = 2.5 | min: 1.5 | max: 5.0 | step: 0.25 | label: Distance
+// [/PARAMS]
+
+// Default parameter values
+const speed: f32 = 1.0;
+const iterations: i32 = 6;
+const glow: f32 = 0.7;
+const distance: f32 = 2.5;
 
 fn rot(a: f32) -> mat2x2<f32> {
     let c = cos(a);
@@ -10,7 +25,7 @@ fn rot(a: f32) -> mat2x2<f32> {
 
 fn map(p_in: vec3<f32>) -> f32 {
     var p = p_in;
-    let t = iTime;
+    let t = iTime * speed;
     
     // Rotate xz and xy
     let rxz = rot(t * 0.4);
@@ -31,15 +46,15 @@ fn map(p_in: vec3<f32>) -> f32 {
 fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = fragCoord.xy / iResolution.y - vec2<f32>(0.9, 0.5);
     var cl = vec3<f32>(0.0);
-    var d = 2.5;
+    var d = distance;
     
-    for (var i = 0; i <= 5; i++) {
+    for (var i = 0; i < iterations; i++) {
         let p = vec3<f32>(0.0, 0.0, 5.0) + normalize(vec3<f32>(uv, -1.0)) * d;
         let rz = map(p);
         let f = clamp((rz - map(p + 0.1)) * 0.5, -0.1, 1.0);
         // COSMIC DE logo colors: purple/violet and cyan/teal
         let l = vec3<f32>(0.2, 0.05, 0.3) + vec3<f32>(2.0, 4.0, 5.0) * f;
-        cl = cl * l + smoothstep(2.5, 0.0, rz) * 0.7 * l;
+        cl = cl * l + smoothstep(distance, 0.0, rz) * glow * l;
         d += min(rz, 1.0);
     }
     
