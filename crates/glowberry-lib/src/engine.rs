@@ -2,12 +2,17 @@
 
 use crate::{
     fragment_canvas, gpu, img_source,
+    upower::{start_power_monitor, PowerMonitorHandle},
     user_context::{EnvGuard, UserContext},
     wallpaper::Wallpaper,
 };
 use cosmic_config::{calloop::ConfigWatchSource, CosmicConfigEntry};
 use eyre::{eyre, Context};
-use glowberry_config::{state::State, Config};
+use glowberry_config::{
+    power_saving::{OnBatteryAction, PowerSavingConfig},
+    state::State,
+    Config,
+};
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
@@ -194,6 +199,20 @@ impl BackgroundEngine {
                                     changes_applied = true;
                                 }
 
+                                // Power saving config keys
+                                glowberry_config::power_saving::PAUSE_ON_FULLSCREEN
+                                | glowberry_config::power_saving::PAUSE_ON_COVERED
+                                | glowberry_config::power_saving::COVERAGE_THRESHOLD
+                                | glowberry_config::power_saving::ADJUST_ON_BATTERY
+                                | glowberry_config::power_saving::ON_BATTERY_ACTION
+                                | glowberry_config::power_saving::PAUSE_ON_LOW_BATTERY
+                                | glowberry_config::power_saving::LOW_BATTERY_THRESHOLD
+                                | glowberry_config::power_saving::PAUSE_ON_LID_CLOSED => {
+                                    tracing::debug!(key, "power saving config changed");
+                                    state.power_saving_config = conf_context.power_saving_config();
+                                    tracing::info!(config = ?state.power_saving_config, "Updated power saving config");
+                                }
+
                                 _ => {
                                     tracing::debug!(key, "key modified");
                                     if let Some(output) = key.strip_prefix("output.") {
@@ -235,6 +254,20 @@ impl BackgroundEngine {
                 Config::default()
             }
         };
+
+        // Load power saving configuration
+        let power_saving_config = glowberry_config::context()
+            .map(|ctx| ctx.power_saving_config())
+            .unwrap_or_default();
+        tracing::info!(?power_saving_config, "Loaded power saving config");
+
+        // Start power monitor for battery/lid state tracking
+        let power_monitor = start_power_monitor();
+        if power_monitor.is_some() {
+            tracing::info!("Power monitor started successfully");
+        } else {
+            tracing::warn!("Failed to start power monitor, power saving features will be disabled");
+        }
 
         let source_tx = img_source::img_source(&event_loop.handle(), |state, source, event| {
             use notify::event::{ModifyKind, RenameMode};
@@ -332,6 +365,8 @@ impl BackgroundEngine {
             active_outputs: Vec::new(),
             gpu_renderer,
             connection: conn_for_state,
+            power_monitor,
+            power_saving_config,
         };
 
         loop {
@@ -418,6 +453,10 @@ pub struct CosmicBg {
     gpu_renderer: Option<gpu::GpuRenderer>,
     /// Wayland connection for creating GPU surfaces.
     connection: Connection,
+    /// Power monitor handle for battery/lid state.
+    power_monitor: Option<PowerMonitorHandle>,
+    /// Power saving configuration.
+    power_saving_config: PowerSavingConfig,
 }
 
 // Manual Debug impl since wgpu types don't implement Debug
@@ -429,11 +468,77 @@ impl std::fmt::Debug for CosmicBg {
             .field("config", &self.config)
             .field("active_outputs", &self.active_outputs)
             .field("gpu_renderer", &self.gpu_renderer.is_some())
+            .field("power_monitor", &self.power_monitor.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl CosmicBg {
+    /// Check if shader animation should be paused based on current power state.
+    /// Returns true if animation should be paused.
+    fn should_pause_animation(&self) -> bool {
+        let Some(ref power_monitor) = self.power_monitor else {
+            return false; // No power monitor, don't pause
+        };
+
+        let power_state = power_monitor.current();
+        let config = &self.power_saving_config;
+
+        // Check lid closed (pause on internal displays)
+        if config.pause_on_lid_closed && power_state.lid_is_closed {
+            tracing::debug!("Pausing animation: lid is closed");
+            return true;
+        }
+
+        // Check low battery
+        if config.pause_on_low_battery {
+            if let Some(percentage) = power_state.battery_percentage {
+                if percentage <= config.low_battery_threshold as f64 {
+                    tracing::debug!(
+                        percentage,
+                        threshold = config.low_battery_threshold,
+                        "Pausing animation: low battery"
+                    );
+                    return true;
+                }
+            }
+        }
+
+        // Check on battery action
+        if power_state.on_battery {
+            match config.on_battery_action {
+                OnBatteryAction::Pause => {
+                    tracing::debug!("Pausing animation: on battery (pause action)");
+                    return true;
+                }
+                OnBatteryAction::Nothing
+                | OnBatteryAction::ReduceTo15Fps
+                | OnBatteryAction::ReduceTo10Fps
+                | OnBatteryAction::ReduceTo5Fps => {
+                    // Don't pause, but frame rate may be reduced (handled elsewhere)
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Get the effective frame rate based on power state.
+    /// Returns None if using the shader's configured frame rate.
+    fn effective_frame_rate(&self) -> Option<u8> {
+        let Some(ref power_monitor) = self.power_monitor else {
+            return None;
+        };
+
+        let power_state = power_monitor.current();
+
+        if power_state.on_battery {
+            self.power_saving_config.on_battery_action.frame_rate()
+        } else {
+            None
+        }
+    }
+
     fn shader_physical_size(
         layer_size: Option<(u32, u32)>,
         fractional_scale: Option<u32>,
@@ -720,6 +825,9 @@ impl CompositorHandler for CosmicBg {
         surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        // Check if animation should be paused due to power state
+        let should_pause = self.should_pause_animation();
+
         // Find the wallpaper and layer for this surface
         for wallpaper in &mut self.wallpapers {
             if let Some(layer) = wallpaper
@@ -729,65 +837,79 @@ impl CompositorHandler for CosmicBg {
             {
                 // Check if this is a shader wallpaper with GPU state
                 if let Some(gpu_state) = &mut layer.gpu_state {
-                    // Check if we should render this frame (frame rate limiting)
-                    if gpu_state.canvas.should_render() {
-                        if let Some(gpu) = &self.gpu_renderer {
-                            // Get current texture
-                            match gpu_state.surface.get_current_texture() {
-                                Ok(surface_texture) => {
-                                    let view = surface_texture
-                                        .texture
-                                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    // Skip rendering if paused, but still request frame callback
+                    // so we can resume when power state changes
+                    if !should_pause {
+                        // Check if we should render this frame (frame rate limiting)
+                        if gpu_state.canvas.should_render() {
+                            if let Some(gpu) = &self.gpu_renderer {
+                                // Get current texture
+                                match gpu_state.surface.get_current_texture() {
+                                    Ok(surface_texture) => {
+                                        let view = surface_texture
+                                            .texture
+                                            .create_view(&wgpu::TextureViewDescriptor::default());
 
-                                    // Update resolution for this specific layer's surface
-                                    let width = gpu_state.surface_config.width;
-                                    let height = gpu_state.surface_config.height;
+                                        // Update resolution for this specific layer's surface
+                                        let width = gpu_state.surface_config.width;
+                                        let height = gpu_state.surface_config.height;
 
-                                    tracing::debug!(
-                                        output = ?layer.output_info.name,
-                                        width,
-                                        height,
-                                        "Rendering shader frame"
-                                    );
+                                        tracing::trace!(
+                                            output = ?layer.output_info.name,
+                                            width,
+                                            height,
+                                            "Rendering shader frame"
+                                        );
 
-                                    gpu_state
-                                        .canvas
-                                        .update_resolution(gpu.queue(), width, height);
+                                        gpu_state.canvas.update_resolution(
+                                            gpu.queue(),
+                                            width,
+                                            height,
+                                        );
 
-                                    // Render the shader
-                                    gpu_state.canvas.render(gpu, &view);
+                                        // Render the shader
+                                        gpu_state.canvas.render(gpu, &view);
 
-                                    // Present
-                                    surface_texture.present();
+                                        // Present
+                                        surface_texture.present();
 
-                                    gpu_state.canvas.mark_frame_rendered();
-                                }
-                                Err(wgpu::SurfaceError::Timeout) => {
-                                    tracing::warn!("GPU surface timeout");
-                                }
-                                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                                    let width = gpu_state.surface_config.width;
-                                    let height = gpu_state.surface_config.height;
-                                    gpu_state.surface_config =
-                                        gpu.configure_surface(&gpu_state.surface, width, height);
-                                    gpu_state
-                                        .canvas
-                                        .update_resolution(gpu.queue(), width, height);
-                                    tracing::warn!(
-                                        "GPU surface lost or outdated; reconfigured surface"
-                                    );
-                                }
-                                Err(wgpu::SurfaceError::OutOfMemory) => {
-                                    tracing::error!("GPU out of memory");
-                                }
-                                Err(err) => {
-                                    tracing::warn!(?err, "GPU surface error");
+                                        gpu_state.canvas.mark_frame_rendered();
+                                    }
+                                    Err(wgpu::SurfaceError::Timeout) => {
+                                        tracing::warn!("GPU surface timeout");
+                                    }
+                                    Err(
+                                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated,
+                                    ) => {
+                                        let width = gpu_state.surface_config.width;
+                                        let height = gpu_state.surface_config.height;
+                                        gpu_state.surface_config = gpu.configure_surface(
+                                            &gpu_state.surface,
+                                            width,
+                                            height,
+                                        );
+                                        gpu_state.canvas.update_resolution(
+                                            gpu.queue(),
+                                            width,
+                                            height,
+                                        );
+                                        tracing::warn!(
+                                            "GPU surface lost or outdated; reconfigured surface"
+                                        );
+                                    }
+                                    Err(wgpu::SurfaceError::OutOfMemory) => {
+                                        tracing::error!("GPU out of memory");
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(?err, "GPU surface error");
+                                    }
                                 }
                             }
                         }
                     }
 
                     // Request next frame callback to continue animation
+                    // We always request this so we can resume when unpaused
                     surface.frame(qh, surface.clone());
                     layer.layer.commit();
                 }

@@ -2423,6 +2423,7 @@ dependencies = [
  "cosmic-config",
  "eyre",
  "fast_image_resize",
+ "futures",
  "glowberry-config",
  "image",
  "jxl-oxide",
@@ -2432,10 +2433,12 @@ dependencies = [
  "raw-window-handle",
  "smithay-client-toolkit 0.20.0",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "walkdir",
  "wayland-backend",
  "wgpu 26.0.1",
+ "zbus 5.13.2",
 ]
 
 [[package]]

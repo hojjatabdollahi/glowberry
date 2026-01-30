@@ -6,6 +6,7 @@ pub mod fragment_canvas;
 pub mod gpu;
 pub mod img_source;
 pub mod scaler;
+pub mod upower;
 pub mod user_context;
 pub mod wallpaper;
 

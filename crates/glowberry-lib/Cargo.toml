@@ -10,6 +10,9 @@ colorgrad = { workspace = true }
 glowberry-config = { path = "../../config" }
 cosmic-config = { git = "https://github.com/pop-os/libcosmic", features = ["calloop"] }
 eyre = "0.6.12"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+futures = "0.3"
 fast_image_resize = { version = "5.1.4", features = ["image"] }
 image = { workspace = true, features = ["hdr", "jpeg", "png", "rayon", "webp"] }
 jxl-oxide = { version = "0.12.4", features = ["image"] }
