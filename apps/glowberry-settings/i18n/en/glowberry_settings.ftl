@@ -31,6 +31,8 @@ no-shaders = No shaders found. Install shaders to /usr/share/glowberry/shaders/
 
 # Settings drawer
 settings = Settings
+background-service = Background Service
+use-glowberry = Use GlowBerry as default
 performance = Performance
 prefer-low-power = Prefer low power GPU
 

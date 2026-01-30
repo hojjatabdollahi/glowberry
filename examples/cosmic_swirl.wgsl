@@ -37,7 +37,7 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     var col = vec3<f32>(
         0.5 * sin(3.0 * p.x) + 0.5,
         0.5 * sin(3.0 * p.y) + 0.5,
-        sin(p.x + p.y)
+        0.5 * sin(p.x + p.y) + 0.5
     );
     col *= brightness;
 
@@ -46,8 +46,11 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
         (1.0 - vigAmt * (uv.y - 0.5) * (uv.y - 0.5)) *
         (1.0 - vigAmt * (uv.x - 0.5) * (uv.x - 0.5));
 
-    var extrusion = (col.x + col.y + col.z) / 4.0;
-    extrusion *= 1.5;
+    // Apply vignette to darken edges toward black
+    col *= max(vignette, 0.0);
 
-    return vec4<f32>(col, extrusion);
+    // Clamp to ensure no negative values
+    col = max(col, vec3<f32>(0.0));
+
+    return vec4<f32>(col, 1.0);
 }

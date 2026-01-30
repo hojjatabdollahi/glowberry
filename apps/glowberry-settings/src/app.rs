@@ -147,6 +147,10 @@ pub enum Message {
     PreferLowPower(bool),
     /// Config changed externally (from daemon or another instance)
     ConfigChanged(Config),
+    /// Toggle GlowBerry as the default background service
+    SetGlowBerryDefault(bool),
+    /// Result of setting GlowBerry as default
+    SetGlowBerryDefaultResult(Result<bool, String>),
 }
 
 /// Default colors available in the color picker
@@ -267,6 +271,7 @@ impl cosmic::Application for GlowBerrySettings {
             cached_display_handle: None,
             current_folder,
             prefer_low_power: true, // Will be set below
+            glowberry_is_default: is_glowberry_default(),
         };
         
         // Load prefer_low_power from config
@@ -488,6 +493,33 @@ impl cosmic::Application for GlowBerrySettings {
                     }
                 }
             }
+
+            Message::SetGlowBerryDefault(enable) => {
+                // Run the enable/disable command asynchronously with pkexec
+                return Task::perform(
+                    async move {
+                        set_glowberry_default(enable).await
+                    },
+                    |result| cosmic::Action::App(Message::SetGlowBerryDefaultResult(result)),
+                );
+            }
+
+            Message::SetGlowBerryDefaultResult(result) => {
+                match result {
+                    Ok(is_default) => {
+                        self.glowberry_is_default = is_default;
+                        tracing::info!(
+                            "GlowBerry is now {}",
+                            if is_default { "enabled" } else { "disabled" }
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to set GlowBerry default: {}", e);
+                        // Refresh the actual state
+                        self.glowberry_is_default = is_glowberry_default();
+                    }
+                }
+            }
         }
 
         Task::none()
@@ -592,6 +624,14 @@ impl GlowBerrySettings {
     /// Build the settings drawer content
     fn settings_drawer_view(&self) -> Element<'_, Message> {
         widget::settings::view_column(vec![
+            // Default background service section
+            widget::settings::section()
+                .title(fl!("background-service"))
+                .add(settings::item(
+                    fl!("use-glowberry"),
+                    toggler(self.glowberry_is_default).on_toggle(Message::SetGlowBerryDefault),
+                ))
+                .into(),
             // GPU settings section
             widget::settings::section()
                 .title(fl!("performance"))
@@ -1062,5 +1102,53 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
             MenuAction::Settings => Message::ToggleContextPage(ContextPage::Settings),
         }
+    }
+}
+
+/// Check if GlowBerry is currently set as the default cosmic-bg
+fn is_glowberry_default() -> bool {
+    // Check if /usr/local/bin/cosmic-bg exists and points to glowberry
+    match std::fs::read_link("/usr/local/bin/cosmic-bg") {
+        Ok(target) => {
+            target.to_string_lossy().contains("glowberry")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Set or unset GlowBerry as the default cosmic-bg
+/// This requires elevated privileges, so we use pkexec
+async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
+    use tokio::process::Command;
+
+    let script = if enable {
+        // Create symlink to make glowberry the default
+        r#"
+            set -e
+            ln -sf /usr/bin/glowberry /usr/local/bin/cosmic-bg
+            # Restart cosmic-bg to apply the change
+            pkill -f cosmic-bg || true
+        "#
+    } else {
+        // Remove symlink to restore original cosmic-bg
+        r#"
+            set -e
+            rm -f /usr/local/bin/cosmic-bg
+            # Restart cosmic-bg to apply the change
+            pkill -f cosmic-bg || true
+        "#
+    };
+
+    let output = Command::new("pkexec")
+        .args(["sh", "-c", script])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run pkexec: {}", e))?;
+
+    if output.status.success() {
+        Ok(enable)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Command failed: {}", stderr))
     }
 }
