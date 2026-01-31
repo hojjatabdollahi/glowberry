@@ -8,10 +8,9 @@ use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::Subscription;
 use cosmic::iced_runtime::core::image::Handle as ImageHandle;
-use cosmic::widget::{self, button, container, dropdown, menu, settings, slider, toggler};
+use cosmic::widget::{self, button, container, dropdown, settings, slider, toggler};
 use cosmic::{ApplicationExt, Element};
 use cosmic::iced::{Alignment, Length};
-use cosmic::prelude::*;
 use glowberry_config::{Color, Config, Context as ConfigContext, Entry, Gradient, Source};
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use image::{ImageBuffer, Rgba};
@@ -47,8 +46,7 @@ pub struct GlowBerrySettings {
     context_page: ContextPage,
     /// About information
     about: widget::about::About,
-    /// Key bindings for the application's menu bar
-    key_binds: HashMap<menu::KeyBind, MenuAction>,
+
 
     /// Category dropdown model
     categories: dropdown::multi::Model<String, Category>,
@@ -294,7 +292,6 @@ impl cosmic::Application for GlowBerrySettings {
             config_context,
             context_page: ContextPage::default(),
             about,
-            key_binds: HashMap::new(),
             categories,
             selection: SelectionContext::default(),
             available_shaders,
@@ -733,22 +730,18 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
-        let menu_bar = menu::bar(vec![menu::Tree::with_children(
-            menu::root(fl!("view")).apply(Element::from),
-            menu::items(
-                &self.key_binds,
-                vec![
-                    menu::Item::Button(fl!("about"), None, MenuAction::About),
-                    menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
-                ],
-            ),
-        )]);
-
-        vec![menu_bar.into()]
+        vec![]
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
-        vec![]
+        vec![
+            widget::button::icon(widget::icon::from_name("preferences-system-symbolic"))
+                .on_press(Message::ToggleContextPage(ContextPage::Settings))
+                .into(),
+            widget::button::icon(widget::icon::from_name("help-about-symbolic"))
+                .on_press(Message::ToggleContextPage(ContextPage::About))
+                .into(),
+        ]
     }
 
     fn context_drawer(&self) -> Option<ContextDrawer<'_, Self::Message>> {
@@ -1093,16 +1086,21 @@ impl GlowBerrySettings {
                 ),
             ));
 
-            // Show Details button
-            let details_label = if self.shader_details_expanded {
-                fl!("hide-details")
+            // Show Details button (centered, pull-down style with chevron icon)
+            let (details_label, chevron_icon) = if self.shader_details_expanded {
+                (fl!("hide-details"), "go-up-symbolic")
             } else {
-                fl!("show-details")
+                (fl!("show-details"), "go-down-symbolic")
             };
             
+            let details_button = widget::button::text(details_label)
+                .trailing_icon(widget::icon::from_name(chevron_icon).size(16))
+                .on_press(Message::ToggleShaderDetails);
+            
             list = list.add(
-                widget::button::standard(details_label)
-                    .on_press(Message::ToggleShaderDetails)
+                container(details_button)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Center)
             );
 
             // Collapsible details section
@@ -1467,23 +1465,7 @@ fn titlecase(s: &str) -> String {
         .join(" ")
 }
 
-/// Menu actions for the application
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MenuAction {
-    About,
-    Settings,
-}
 
-impl menu::action::MenuAction for MenuAction {
-    type Message = Message;
-
-    fn message(&self) -> Self::Message {
-        match self {
-            MenuAction::About => Message::ToggleContextPage(ContextPage::About),
-            MenuAction::Settings => Message::ToggleContextPage(ContextPage::Settings),
-        }
-    }
-}
 
 /// Check if GlowBerry is currently set as the default cosmic-bg
 fn is_glowberry_default() -> bool {
