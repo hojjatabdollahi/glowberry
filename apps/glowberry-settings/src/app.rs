@@ -176,8 +176,6 @@ pub enum Message {
     SameWallpaper(bool),
     /// Display output changed (for per-display mode)
     OutputChanged(segmented_button::Entity),
-    /// Displays have been detected
-    DisplaysDetected(HashMap<String, (String, (u32, u32))>),
     /// Prefer low power GPU toggle
     PreferLowPower(bool),
     /// Config changed externally (from daemon or another instance)
@@ -186,8 +184,10 @@ pub enum Message {
     SetGlowBerryDefault(bool),
     /// Result of setting GlowBerry as default
     SetGlowBerryDefaultResult(Result<bool, String>),
-    /// Shader parameter changed (shader_index, param_name, value)
+    /// Shader parameter changed (shader_index, param_name, value) - updates UI only
     ShaderParamChanged(usize, String, ParamValue),
+    /// Shader parameter slider released - applies to config
+    ShaderParamReleased,
     /// Toggle shader details section
     ToggleShaderDetails,
     /// Reset shader parameters to defaults
@@ -367,7 +367,11 @@ impl cosmic::Application for GlowBerrySettings {
             };
         }
 
-        // Initialize selection from config
+        // Populate outputs from config first - these are the outputs that have been configured
+        // The daemon adds outputs to config as it discovers them via Wayland
+        app.populate_outputs_from_config();
+
+        // Initialize selection from config (needs outputs to be populated first for per-display mode)
         app.init_from_config();
 
         // Set the window title and start loading shader thumbnails
@@ -379,21 +383,7 @@ impl cosmic::Application for GlowBerrySettings {
             Task::none()
         };
 
-        // Query available displays
-        let displays_task = Task::perform(
-            async {
-                let mut displays = HashMap::new();
-                if let Ok(list) = cosmic_randr_shell::list().await {
-                    for (_key, output) in list.outputs {
-                        displays.insert(output.name, (output.model, output.physical));
-                    }
-                }
-                displays
-            },
-            |displays| cosmic::Action::App(Message::DisplaysDetected(displays)),
-        );
-
-        (app, Task::batch([title_task, shader_task, displays_task]))
+        (app, Task::batch([title_task, shader_task]))
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -520,22 +510,33 @@ impl cosmic::Application for GlowBerrySettings {
                     );
                 }
                 WallpaperEvent::Loaded => {
+                    // Get the correct entry based on same_on_all and active_output
+                    let entry = if self.config.same_on_all {
+                        Some(&self.config.default_background)
+                    } else if let Some(ref output_name) = self.active_output {
+                        self.config.entry(output_name)
+                    } else {
+                        Some(&self.config.default_background)
+                    };
+                    
                     // Only select a wallpaper if config source is a Path
                     // Don't override if user has a Color or Shader selected
-                    if let Source::Path(config_path) = &self.config.default_background.source {
-                        // Find the wallpaper that matches the config path
-                        if let Some((key, _)) = self
-                            .selection
-                            .paths
-                            .iter()
-                            .find(|(_, p)| *p == config_path)
-                        {
-                            self.selection.active = Choice::Wallpaper(key);
-                            self.categories.selected = Some(Category::Wallpapers);
-                        } else {
-                            // Config path not found in loaded wallpapers, pick first one
-                            if let Some((key, _)) = self.selection.paths.iter().next() {
+                    if let Some(entry) = entry {
+                        if let Source::Path(config_path) = &entry.source {
+                            // Find the wallpaper that matches the config path
+                            if let Some((key, _)) = self
+                                .selection
+                                .paths
+                                .iter()
+                                .find(|(_, p)| *p == config_path)
+                            {
                                 self.selection.active = Choice::Wallpaper(key);
+                                self.categories.selected = Some(Category::Wallpapers);
+                            } else {
+                                // Config path not found in loaded wallpapers, pick first one
+                                if let Some((key, _)) = self.selection.paths.iter().next() {
+                                    self.selection.active = Choice::Wallpaper(key);
+                                }
                             }
                         }
                     }
@@ -591,32 +592,6 @@ impl cosmic::Application for GlowBerrySettings {
                 self.cache_display_image();
             }
 
-            Message::DisplaysDetected(displays) => {
-                self.outputs.clear();
-                self.show_tab_bar = displays.len() > 1;
-                
-                let mut first = None;
-                for (name, (_model, physical)) in displays {
-                    let is_internal = name == "eDP-1";
-                    
-                    let entity = self.outputs
-                        .insert()
-                        .text(display_name(&name, physical))
-                        .data(OutputName(name));
-                    
-                    if is_internal || first.is_none() {
-                        first = Some(entity.id());
-                    }
-                }
-                
-                if let Some(id) = first {
-                    self.outputs.activate(id);
-                    if let Some(name) = self.outputs.data::<OutputName>(id) {
-                        self.active_output = Some(name.0.clone());
-                    }
-                }
-            }
-
             Message::PreferLowPower(value) => {
                 self.prefer_low_power = value;
                 if let Some(ctx) = &self.config_context {
@@ -635,6 +610,9 @@ impl cosmic::Application for GlowBerrySettings {
                     if let Some(ctx) = &self.config_context {
                         self.prefer_low_power = ctx.prefer_low_power();
                     }
+                    
+                    // Refresh outputs from config (daemon may have added new ones)
+                    self.populate_outputs_from_config();
                     
                     // Re-cache display image if needed
                     if matches!(self.selection.active, Choice::Wallpaper(_)) {
@@ -671,17 +649,18 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ShaderParamChanged(shader_idx, param_name, value) => {
-                // Store the new value
+                // Store the new value in memory only (don't write to config yet)
                 self.shader_param_values
                     .entry(shader_idx)
                     .or_insert_with(HashMap::new)
                     .insert(param_name, value);
-                
-                // Re-apply the shader with new parameters
-                if let Choice::Shader(idx) = self.selection.active {
-                    if idx == shader_idx {
-                        self.apply_selection();
-                    }
+                // UI will update to show new value, but config is not written
+            }
+            
+            Message::ShaderParamReleased => {
+                // Apply the shader with current parameters when slider is released
+                if matches!(self.selection.active, Choice::Shader(_)) {
+                    self.apply_selection();
                 }
             }
             
@@ -940,54 +919,17 @@ impl GlowBerrySettings {
     }
 
     fn init_from_config(&mut self) {
-        match &self.config.default_background.source {
-            Source::Path(_path) => {
-                // Will be set when wallpapers load
-            }
-            Source::Color(color) => {
-                self.selection.active = Choice::Color(color.clone());
-                self.categories.selected = Some(Category::Colors);
-            }
-            Source::Shader(shader) => {
-                // Shaders are already pre-discovered in init, just find the selected one
-                if let glowberry_config::ShaderContent::Path(config_path) = &shader.shader {
-                    // Try exact path match first
-                    let found = if let Some(idx) = self.available_shaders.iter().position(|s| &s.path == config_path) {
-                        self.selection.active = Choice::Shader(idx);
-                        true
-                    } else {
-                        // Fall back to filename match (in case paths differ due to XDG_DATA_DIRS)
-                        if let Some(config_filename) = config_path.file_name() {
-                            if let Some(idx) = self.available_shaders.iter().position(|s| {
-                                s.path.file_name() == Some(config_filename)
-                            }) {
-                                self.selection.active = Choice::Shader(idx);
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    };
-                    
-                    // If no shader found, select the first one if available
-                    if !found && !self.available_shaders.is_empty() {
-                        self.selection.active = Choice::Shader(0);
-                    }
-                } else if !self.available_shaders.is_empty() {
-                    // Inline shader content - just select first shader
-                    self.selection.active = Choice::Shader(0);
-                }
-                
-                self.selected_shader_frame_rate = match shader.frame_rate {
-                    0..=22 => 0,
-                    23..=45 => 1,
-                    _ => 2,
-                };
-                self.categories.selected = Some(Category::Shaders);
-            }
-        }
+        // Determine which entry to use based on same_on_all and active_output
+        let entry = if self.config.same_on_all {
+            &self.config.default_background
+        } else if let Some(ref output_name) = self.active_output {
+            // Try to find a per-output entry
+            self.config.entry(output_name).unwrap_or(&self.config.default_background)
+        } else {
+            &self.config.default_background
+        };
+        
+        self.select_entry_source(&entry.source.clone());
     }
 
     fn cache_display_image(&mut self) {
@@ -1075,35 +1017,95 @@ impl GlowBerrySettings {
         }
     }
 
-    /// Select a source from entry (used when switching displays)
+    /// Select a source from entry (used when switching displays or on init)
     fn select_entry_source(&mut self, source: &Source) {
         match source {
             Source::Path(path) => {
                 // Find the wallpaper in our loaded wallpapers
                 if let Some((key, _)) = self.selection.paths.iter().find(|(_, p)| *p == path) {
                     self.selection.active = Choice::Wallpaper(key);
-                    self.categories.selected = Some(Category::Wallpapers);
                 }
+                // Always set category to wallpapers for path sources
+                // (the actual wallpaper will be selected when WallpaperEvent::Loaded fires if not found yet)
+                self.categories.selected = Some(Category::Wallpapers);
             }
             Source::Color(color) => {
                 self.selection.active = Choice::Color(color.clone());
                 self.categories.selected = Some(Category::Colors);
             }
             Source::Shader(shader_source) => {
-                if let glowberry_config::ShaderContent::Path(path) = &shader_source.shader {
-                    if let Some(idx) = self.available_shaders.iter().position(|s| &s.path == path) {
+                if let glowberry_config::ShaderContent::Path(config_path) = &shader_source.shader {
+                    // Try exact path match first
+                    let found = if let Some(idx) = self.available_shaders.iter().position(|s| &s.path == config_path) {
                         self.selection.active = Choice::Shader(idx);
-                        self.categories.selected = Some(Category::Shaders);
-                        self.selected_shader_frame_rate = match shader_source.frame_rate {
-                            0..=22 => 0,
-                            23..=45 => 1,
-                            _ => 2,
-                        };
+                        true
+                    } else {
+                        // Fall back to filename match (in case paths differ due to XDG_DATA_DIRS)
+                        if let Some(config_filename) = config_path.file_name() {
+                            if let Some(idx) = self.available_shaders.iter().position(|s| {
+                                s.path.file_name() == Some(config_filename)
+                            }) {
+                                self.selection.active = Choice::Shader(idx);
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    // If no shader found, select the first one if available
+                    if !found && !self.available_shaders.is_empty() {
+                        self.selection.active = Choice::Shader(0);
                     }
+                } else if !self.available_shaders.is_empty() {
+                    // Inline shader content - just select first shader
+                    self.selection.active = Choice::Shader(0);
                 }
+                
+                self.selected_shader_frame_rate = match shader_source.frame_rate {
+                    0..=22 => 0,
+                    23..=45 => 1,
+                    _ => 2,
+                };
+                self.categories.selected = Some(Category::Shaders);
             }
         }
         self.cache_display_image();
+    }
+
+    /// Populate the outputs tab bar from config
+    /// The daemon adds outputs to config as it discovers them via Wayland
+    fn populate_outputs_from_config(&mut self) {
+        self.outputs.clear();
+        
+        // Get outputs from config - these are outputs that have per-display backgrounds
+        let output_names: Vec<String> = self.config.outputs.iter().cloned().collect();
+        
+        self.show_tab_bar = output_names.len() > 1;
+        
+        let mut first = None;
+        for name in output_names {
+            let is_internal = name == "eDP-1";
+            
+            // Use the output name directly (e.g., "DP-1", "HDMI-A-1", "eDP-1")
+            let entity = self.outputs
+                .insert()
+                .text(name.clone())
+                .data(OutputName(name));
+            
+            if is_internal || first.is_none() {
+                first = Some(entity.id());
+            }
+        }
+        
+        if let Some(id) = first {
+            self.outputs.activate(id);
+            if let Some(name) = self.outputs.data::<OutputName>(id) {
+                self.active_output = Some(name.0.clone());
+            }
+        }
     }
 
     /// Load shader thumbnails
@@ -1320,6 +1322,7 @@ impl GlowBerrySettings {
                                                     ParamValue::F32(v),
                                                 )
                                             })
+                                            .on_release(Message::ShaderParamReleased)
                                             .step(step)
                                             .width(Length::Fixed(150.0))
                                             .into(),
@@ -1348,6 +1351,7 @@ impl GlowBerrySettings {
                                                     ParamValue::I32(v as i32),
                                                 )
                                             })
+                                            .on_release(Message::ShaderParamReleased)
                                             .step(step)
                                             .width(Length::Fixed(150.0))
                                             .into(),
@@ -1601,31 +1605,6 @@ fn titlecase(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Generate a human-friendly display name for an output
-fn display_name(name: &str, physical: (u32, u32)) -> String {
-    // Common display name prefixes
-    let friendly_name = if name.starts_with("eDP") {
-        "Built-in Display"
-    } else if name.starts_with("DP") {
-        "DisplayPort"
-    } else if name.starts_with("HDMI") {
-        "HDMI"
-    } else if name.starts_with("VGA") {
-        "VGA"
-    } else if name.starts_with("DVI") {
-        "DVI"
-    } else {
-        name
-    };
-    
-    // Add resolution if available
-    if physical.0 > 0 && physical.1 > 0 {
-        format!("{} ({}x{})", friendly_name, physical.0, physical.1)
-    } else {
-        friendly_name.to_string()
-    }
 }
 
 /// Check if GlowBerry is currently set as the default cosmic-bg

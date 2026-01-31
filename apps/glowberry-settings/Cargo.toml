@@ -26,9 +26,6 @@ cosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", d
     "wgpu",
 ] }
 
-# Display output detection
-cosmic-randr-shell = { git = "https://github.com/pop-os/cosmic-randr" }
-
 # Async runtime
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "fs"] }
 
