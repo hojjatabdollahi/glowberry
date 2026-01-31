@@ -67,3 +67,6 @@ repository = Repository
 
 # Context pages
 about = About
+
+# Display selection
+all-displays = All Displays

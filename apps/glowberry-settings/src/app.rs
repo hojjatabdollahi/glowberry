@@ -8,8 +8,8 @@ use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::Subscription;
 use cosmic::iced_runtime::core::image::Handle as ImageHandle;
-use cosmic::widget::{self, button, container, dropdown, settings, slider, toggler};
-use cosmic::{ApplicationExt, Element};
+use cosmic::widget::{self, button, container, dropdown, segmented_button, settings, slider, tab_bar, text, toggler};
+use cosmic::{Apply, ApplicationExt, Element};
 use cosmic::iced::{Alignment, Length};
 use glowberry_config::{Color, Config, Context as ConfigContext, Entry, Gradient, Source};
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
@@ -18,6 +18,10 @@ use slotmap::{DefaultKey, SecondaryMap, SlotMap};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Wrapper for output name to store in segmented button data
+#[derive(Clone, Debug)]
+struct OutputName(String);
 
 mod wallpaper_subscription;
 use wallpaper_subscription::WallpaperEvent;
@@ -47,6 +51,12 @@ pub struct GlowBerrySettings {
     /// About information
     about: widget::about::About,
 
+    /// Model for selecting between display outputs
+    outputs: segmented_button::SingleSelectModel,
+    /// The display that is currently being configured (None means "all")
+    active_output: Option<String>,
+    /// Whether to show the tab bar (more than one display)
+    show_tab_bar: bool,
 
     /// Category dropdown model
     categories: dropdown::multi::Model<String, Category>,
@@ -164,6 +174,10 @@ pub enum Message {
     OpenUrl(String),
     /// Same wallpaper on all displays toggle
     SameWallpaper(bool),
+    /// Display output changed (for per-display mode)
+    OutputChanged(segmented_button::Entity),
+    /// Displays have been detected
+    DisplaysDetected(HashMap<String, (String, (u32, u32))>),
     /// Prefer low power GPU toggle
     PreferLowPower(bool),
     /// Config changed externally (from daemon or another instance)
@@ -292,6 +306,9 @@ impl cosmic::Application for GlowBerrySettings {
             config_context,
             context_page: ContextPage::default(),
             about,
+            outputs: segmented_button::SingleSelectModel::default(),
+            active_output: None,
+            show_tab_bar: false,
             categories,
             selection: SelectionContext::default(),
             available_shaders,
@@ -362,7 +379,21 @@ impl cosmic::Application for GlowBerrySettings {
             Task::none()
         };
 
-        (app, Task::batch([title_task, shader_task]))
+        // Query available displays
+        let displays_task = Task::perform(
+            async {
+                let mut displays = HashMap::new();
+                if let Ok(list) = cosmic_randr_shell::list().await {
+                    for (_key, output) in list.outputs {
+                        displays.insert(output.name, (output.model, output.physical));
+                    }
+                }
+                displays
+            },
+            |displays| cosmic::Action::App(Message::DisplaysDetected(displays)),
+        );
+
+        (app, Task::batch([title_task, shader_task, displays_task]))
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -536,7 +567,54 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::SameWallpaper(value) => {
                 self.config.same_on_all = value;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_same_on_all(value);
+                }
+                // Clear per-output backgrounds when switching to same-on-all
+                if value {
+                    self.config.backgrounds.clear();
+                    self.config.outputs.clear();
+                }
                 self.apply_selection();
+            }
+
+            Message::OutputChanged(entity) => {
+                self.outputs.activate(entity);
+                if let Some(name) = self.outputs.data::<OutputName>(entity) {
+                    self.active_output = Some(name.0.clone());
+                    
+                    // Load the wallpaper for this specific output if it exists
+                    if let Some(entry) = self.config.entry(&name.0) {
+                        self.select_entry_source(&entry.source.clone());
+                    }
+                }
+                self.cache_display_image();
+            }
+
+            Message::DisplaysDetected(displays) => {
+                self.outputs.clear();
+                self.show_tab_bar = displays.len() > 1;
+                
+                let mut first = None;
+                for (name, (_model, physical)) in displays {
+                    let is_internal = name == "eDP-1";
+                    
+                    let entity = self.outputs
+                        .insert()
+                        .text(display_name(&name, physical))
+                        .data(OutputName(name));
+                    
+                    if is_internal || first.is_none() {
+                        first = Some(entity.id());
+                    }
+                }
+                
+                if let Some(id) = first {
+                    self.outputs.activate(id);
+                    if let Some(name) = self.outputs.data::<OutputName>(id) {
+                        self.active_output = Some(name.0.clone());
+                    }
+                }
             }
 
             Message::PreferLowPower(value) => {
@@ -674,7 +752,7 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let mut children: Vec<Element<'_, Message>> = Vec::with_capacity(5);
+        let mut children: Vec<Element<'_, Message>> = Vec::with_capacity(6);
 
         // 1. Display preview (centered)
         children.push(
@@ -684,7 +762,27 @@ impl cosmic::Application for GlowBerrySettings {
                 .into(),
         );
 
-        // 2. Settings list (same on all displays, fit) - centered
+        // 2. Display selector (tab bar or "All Displays" label)
+        if self.config.same_on_all {
+            // Show "All Displays" heading
+            let element = text::heading(fl!("all-displays"))
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .apply(container)
+                .width(Length::Fill)
+                .height(Length::Fixed(32.0));
+            children.push(element.into());
+        } else if self.show_tab_bar {
+            // Show tab bar to select which display to configure
+            let element = tab_bar::horizontal(&self.outputs)
+                .button_alignment(Alignment::Center)
+                .on_activate(Message::OutputChanged);
+            children.push(element.into());
+        }
+
+        // 3. Settings list (same on all displays, fit) - centered
         children.push(
             container(self.view_settings_list())
                 .width(Length::Fill)
@@ -962,10 +1060,50 @@ impl GlowBerrySettings {
             }
         };
 
-        let entry = Entry::new("all".to_string(), source);
+        // Determine the output name to use
+        let output = if self.config.same_on_all {
+            "all".to_string()
+        } else if let Some(ref name) = self.active_output {
+            name.clone()
+        } else {
+            "all".to_string()
+        };
+
+        let entry = Entry::new(output, source);
         if let Err(e) = self.config.set_entry(ctx, entry) {
             tracing::error!("Failed to set wallpaper: {}", e);
         }
+    }
+
+    /// Select a source from entry (used when switching displays)
+    fn select_entry_source(&mut self, source: &Source) {
+        match source {
+            Source::Path(path) => {
+                // Find the wallpaper in our loaded wallpapers
+                if let Some((key, _)) = self.selection.paths.iter().find(|(_, p)| *p == path) {
+                    self.selection.active = Choice::Wallpaper(key);
+                    self.categories.selected = Some(Category::Wallpapers);
+                }
+            }
+            Source::Color(color) => {
+                self.selection.active = Choice::Color(color.clone());
+                self.categories.selected = Some(Category::Colors);
+            }
+            Source::Shader(shader_source) => {
+                if let glowberry_config::ShaderContent::Path(path) = &shader_source.shader {
+                    if let Some(idx) = self.available_shaders.iter().position(|s| &s.path == path) {
+                        self.selection.active = Choice::Shader(idx);
+                        self.categories.selected = Some(Category::Shaders);
+                        self.selected_shader_frame_rate = match shader_source.frame_rate {
+                            0..=22 => 0,
+                            23..=45 => 1,
+                            _ => 2,
+                        };
+                    }
+                }
+            }
+        }
+        self.cache_display_image();
     }
 
     /// Load shader thumbnails
@@ -1465,7 +1603,30 @@ fn titlecase(s: &str) -> String {
         .join(" ")
 }
 
-
+/// Generate a human-friendly display name for an output
+fn display_name(name: &str, physical: (u32, u32)) -> String {
+    // Common display name prefixes
+    let friendly_name = if name.starts_with("eDP") {
+        "Built-in Display"
+    } else if name.starts_with("DP") {
+        "DisplayPort"
+    } else if name.starts_with("HDMI") {
+        "HDMI"
+    } else if name.starts_with("VGA") {
+        "VGA"
+    } else if name.starts_with("DVI") {
+        "DVI"
+    } else {
+        name
+    };
+    
+    // Add resolution if available
+    if physical.0 > 0 && physical.1 > 0 {
+        format!("{} ({}x{})", friendly_name, physical.0, physical.1)
+    } else {
+        friendly_name.to_string()
+    }
+}
 
 /// Check if GlowBerry is currently set as the default cosmic-bg
 fn is_glowberry_default() -> bool {
