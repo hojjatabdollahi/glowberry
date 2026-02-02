@@ -1,8 +1,8 @@
 // [SHADER]
-// name: Gradient Wave
-// author: GlowBerry
-// source: Original
-// license: MIT
+// name: Gradient Flow
+// author: @hahnzhu (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/wdyczG
+// license: CC BY-NC-SA 3.0
 //
 // [PARAMS]
 // speed: f32 = 0.5 | min: 0.1 | max: 2.0 | step: 0.1 | label: Speed

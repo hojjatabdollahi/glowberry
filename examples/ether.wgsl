@@ -1,7 +1,7 @@
 // [SHADER]
-// name: Organic Blob
-// author: kishimisu (adapted for GlowBerry)
-// source: https://www.shadertoy.com/view/mtyGWy
+// name: Ether
+// author: @nimitz (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/MsjSW3
 // license: CC BY-NC-SA 3.0
 //
 // [PARAMS]

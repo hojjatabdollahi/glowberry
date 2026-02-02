@@ -1,7 +1,7 @@
 // [SHADER]
-// name: Neon Waves
-// author: al-ro (adapted for GlowBerry)
-// source: https://www.shadertoy.com/view/WdK3Dz
+// name: Discoteq
+// author: supah (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/DtXfDr
 // license: CC BY-NC-SA 3.0
 //
 // [PARAMS]

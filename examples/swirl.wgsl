@@ -1,7 +1,7 @@
 // [SHADER]
-// name: Cosmic Swirl
-// author: Xor (adapted for GlowBerry)
-// source: https://www.shadertoy.com/view/Mss3WN
+// name: 70s Melt
+// author: @tomorrowevening (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/XsX3zl
 // license: CC BY-NC-SA 3.0
 //
 // [PARAMS]

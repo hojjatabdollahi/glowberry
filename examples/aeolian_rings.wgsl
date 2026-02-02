@@ -1,7 +1,7 @@
 // [SHADER]
-// name: Neon Flower
-// author: al-ro (adapted for GlowBerry)
-// source: https://www.shadertoy.com/view/7ltBzl
+// name: Aeolian Rings
+// author: @Pelsmith3377 (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/w3tyWn
 // license: CC BY-NC-SA 3.0
 //
 // [PARAMS]

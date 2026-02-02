@@ -1,7 +1,7 @@
 // [SHADER]
 // name: Rainbow Ring
-// author: al-ro (adapted for GlowBerry)
-// source: https://www.shadertoy.com/view/wl2Bzw
+// author: @dynamite (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/XdlSDs
 // license: CC BY-NC-SA 3.0
 //
 // [PARAMS]

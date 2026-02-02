@@ -1,7 +1,7 @@
 // [SHADER]
-// name: Color Waves
-// author: kishimisu (adapted for GlowBerry)
-// source: https://www.shadertoy.com/view/mtyGWy
+// name: Glossy Gradients 
+// author: @Peace (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/lX2GDR
 // license: CC BY-NC-SA 3.0
 //
 // [PARAMS]

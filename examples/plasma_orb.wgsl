@@ -1,7 +1,7 @@
 // [SHADER]
 // name: Plasma Orb
-// author: kishimisu (adapted for GlowBerry)
-// source: https://www.shadertoy.com/view/mtyGWy
+// author: @ns8 (adapted for GlowBerry)
+// source: https://www.shadertoy.com/view/tXGyRG
 // license: CC BY-NC-SA 3.0
 //
 // [PARAMS]
