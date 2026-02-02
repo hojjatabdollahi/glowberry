@@ -4,12 +4,11 @@
   <metadata_license>CC0</metadata_license>
   <project_license>MPL-2.0</project_license>
   <name>GlowBerry</name>
-  <summary>Enhanced background service for COSMIC desktop with live shader support</summary>
+  <summary>Enhanced background service with live shader support</summary>
   <description>
     <p>
-      GlowBerry is an enhanced background/wallpaper service for the COSMIC desktop environment.
-      It extends the official cosmic-bg with live shader wallpaper support, allowing animated
-      GPU-rendered backgrounds using WGSL shaders.
+      GlowBerry is an enhanced background/wallpaper service with live shader wallpaper support,
+      allowing animated GPU-rendered backgrounds using WGSL shaders.
     </p>
     <p>Features:</p>
     <ul>
@@ -18,8 +17,6 @@
       <li>Solid color and gradient backgrounds</li>
       <li>Slideshow rotation</li>
       <li>Per-output configuration</li>
-      <li>Can be installed alongside official cosmic-bg</li>
-      <li>Switch between GlowBerry and cosmic-bg via update-alternatives</li>
     </ul>
   </description>
   <url type="homepage">https://github.com/hojjatabdollahi/glowberry</url>

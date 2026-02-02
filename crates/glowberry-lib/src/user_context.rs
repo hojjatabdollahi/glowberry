@@ -66,21 +66,21 @@ mod tests {
     #[test]
     fn user_context_applies_and_restores_env() {
         unsafe {
-            std::env::set_var("COSMIC_BG_TEST_ENV_RESTORE", "initial");
+            std::env::set_var("GLOWBERRY_TEST_ENV_RESTORE", "initial");
         }
 
-        let context = UserContext::new([("COSMIC_BG_TEST_ENV_RESTORE", "applied")]);
+        let context = UserContext::new([("GLOWBERRY_TEST_ENV_RESTORE", "applied")]);
         let _guard = context.apply();
 
         assert_eq!(
-            std::env::var("COSMIC_BG_TEST_ENV_RESTORE").as_deref(),
+            std::env::var("GLOWBERRY_TEST_ENV_RESTORE").as_deref(),
             Ok("applied")
         );
 
         drop(_guard);
 
         assert_eq!(
-            std::env::var("COSMIC_BG_TEST_ENV_RESTORE").as_deref(),
+            std::env::var("GLOWBERRY_TEST_ENV_RESTORE").as_deref(),
             Ok("initial")
         );
     }
@@ -88,24 +88,24 @@ mod tests {
     #[test]
     fn user_context_restores_duplicate_keys_in_reverse_order() {
         unsafe {
-            std::env::set_var("COSMIC_BG_TEST_ENV_DUPLICATE", "initial");
+            std::env::set_var("GLOWBERRY_TEST_ENV_DUPLICATE", "initial");
         }
 
         let context = UserContext::new([
-            ("COSMIC_BG_TEST_ENV_DUPLICATE", "first"),
-            ("COSMIC_BG_TEST_ENV_DUPLICATE", "second"),
+            ("GLOWBERRY_TEST_ENV_DUPLICATE", "first"),
+            ("GLOWBERRY_TEST_ENV_DUPLICATE", "second"),
         ]);
         let _guard = context.apply();
 
         assert_eq!(
-            std::env::var("COSMIC_BG_TEST_ENV_DUPLICATE").as_deref(),
+            std::env::var("GLOWBERRY_TEST_ENV_DUPLICATE").as_deref(),
             Ok("second")
         );
 
         drop(_guard);
 
         assert_eq!(
-            std::env::var("COSMIC_BG_TEST_ENV_DUPLICATE").as_deref(),
+            std::env::var("GLOWBERRY_TEST_ENV_DUPLICATE").as_deref(),
             Ok("initial")
         );
     }

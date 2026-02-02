@@ -895,15 +895,26 @@ impl GlowBerrySettings {
                 .on_toggle(Message::SetPauseOnLidClosed),
         ));
         
+        // Build background service section with optional PATH warning
+        let mut bg_service_section = widget::settings::section()
+            .title(fl!("background-service"))
+            .add(settings::item(
+                fl!("use-glowberry"),
+                toggler(self.glowberry_is_default).on_toggle(Message::SetGlowBerryDefault),
+            ));
+        
+        // Add PATH order warning if incorrect
+        if !is_path_order_correct() {
+            bg_service_section = bg_service_section.add(
+                widget::text(fl!("path-order-warning"))
+                    .size(12)
+                    .class(cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.9, 0.6, 0.2)))
+            );
+        }
+        
         widget::settings::view_column(vec![
             // Default background service section
-            widget::settings::section()
-                .title(fl!("background-service"))
-                .add(settings::item(
-                    fl!("use-glowberry"),
-                    toggler(self.glowberry_is_default).on_toggle(Message::SetGlowBerryDefault),
-                ))
-                .into(),
+            bg_service_section.into(),
             // GPU settings section
             widget::settings::section()
                 .title(fl!("performance"))
@@ -1651,34 +1662,92 @@ fn titlecase(s: &str) -> String {
         .join(" ")
 }
 
-/// Check if GlowBerry is currently set as the default cosmic-bg
-fn is_glowberry_default() -> bool {
-    // Check if /usr/local/bin/cosmic-bg exists and points to glowberry
-    match std::fs::read_link("/usr/local/bin/cosmic-bg") {
-        Ok(target) => {
-            target.to_string_lossy().contains("glowberry")
+/// Check if /usr/local/bin comes before /usr/bin in PATH.
+/// 
+/// Returns:
+/// - `Ok(true)` if PATH order is correct (or /usr/bin not in PATH)
+/// - `Ok(false)` if /usr/bin comes before /usr/local/bin
+/// - `Err(msg)` if /usr/local/bin is not in PATH at all
+fn check_path_order() -> Result<bool, &'static str> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    
+    let mut local_bin_pos: Option<usize> = None;
+    let mut usr_bin_pos: Option<usize> = None;
+    
+    for (i, p) in path.split(':').enumerate() {
+        if p == "/usr/local/bin" && local_bin_pos.is_none() {
+            local_bin_pos = Some(i);
+        } else if p == "/usr/bin" && usr_bin_pos.is_none() {
+            usr_bin_pos = Some(i);
         }
+    }
+    
+    match (local_bin_pos, usr_bin_pos) {
+        (None, _) => Err("/usr/local/bin is not in PATH"),
+        (Some(_), None) => Ok(true), // /usr/bin not in PATH, so /usr/local/bin wins
+        (Some(local), Some(usr)) => Ok(local < usr),
+    }
+}
+
+/// Check if GlowBerry is currently enabled as the default background service.
+/// 
+/// This works by checking if /usr/local/bin/cosmic-bg exists and is a symlink
+/// pointing to glowberry. Since /usr/local/bin is searched before /usr/bin in PATH,
+/// cosmic-session will run glowberry instead of the original cosmic-bg when enabled.
+fn is_glowberry_default() -> bool {
+    match std::fs::read_link("/usr/local/bin/cosmic-bg") {
+        Ok(target) => target.to_string_lossy().contains("glowberry"),
         Err(_) => false,
     }
 }
 
-/// Set or unset GlowBerry as the default cosmic-bg
-/// This requires elevated privileges for the symlink, so we use pkexec
+/// Check if the PATH is configured correctly for GlowBerry override to work.
+fn is_path_order_correct() -> bool {
+    check_path_order().unwrap_or(false)
+}
+
+/// Enable or disable GlowBerry as the default background service.
+/// 
+/// When enabled, creates a symlink at /usr/local/bin/cosmic-bg -> /usr/bin/glowberry.
+/// When disabled, removes the symlink so the original /usr/bin/cosmic-bg is used.
+/// 
+/// This requires elevated privileges for the symlink operations, so we use pkexec.
 async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
     use tokio::process::Command;
 
+    // Check PATH order when enabling
+    if enable {
+        match check_path_order() {
+            Err(msg) => {
+                return Err(format!(
+                    "Cannot enable GlowBerry: {}. \
+                    Add /usr/local/bin to your PATH before /usr/bin.",
+                    msg
+                ));
+            }
+            Ok(false) => {
+                return Err(
+                    "Cannot enable GlowBerry: /usr/bin comes before /usr/local/bin in PATH. \
+                    The symlink override won't work. Please fix your PATH configuration \
+                    so that /usr/local/bin appears before /usr/bin.".to_string()
+                );
+            }
+            Ok(true) => {} // PATH is correct, proceed
+        }
+    }
+
     // Get current user for pkill
-    let user = std::env::var("USER").unwrap_or_else(|_| "".to_string());
+    let user = std::env::var("USER").unwrap_or_default();
 
     let symlink_script = if enable {
-        // Create symlink to make glowberry the default
+        // Create symlink to make glowberry intercept cosmic-bg calls
         "ln -sf /usr/bin/glowberry /usr/local/bin/cosmic-bg"
     } else {
-        // Point symlink to the original cosmic-bg
-        "ln -sf /usr/bin/cosmic-bg /usr/local/bin/cosmic-bg"
+        // Remove symlink to restore original cosmic-bg
+        "rm -f /usr/local/bin/cosmic-bg"
     };
 
-    // First, update the symlink with elevated privileges
+    // Update the symlink with elevated privileges
     let output = Command::new("pkexec")
         .args(["sh", "-c", symlink_script])
         .output()
@@ -1690,16 +1759,15 @@ async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
         return Err(format!("Failed to update symlink: {}", stderr));
     }
 
-    // Kill the daemon processes as the current user (no pkexec needed)
+    // Kill the daemon processes so the correct one restarts
     // Use -x for exact match to avoid killing glowberry-settings
-    // Also use pkill -f with full path to be more specific
     if !user.is_empty() {
         // Kill glowberry daemon (exact match, not glowberry-settings)
         let _ = Command::new("pkill")
             .args(["-x", "-u", &user, "glowberry"])
             .output()
             .await;
-        
+
         // Kill cosmic-bg (exact match)
         let _ = Command::new("pkill")
             .args(["-x", "-u", &user, "cosmic-bg"])

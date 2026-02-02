@@ -52,7 +52,7 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
         let p = vec3<f32>(0.0, 0.0, 5.0) + normalize(vec3<f32>(uv, -1.0)) * d;
         let rz = map(p);
         let f = clamp((rz - map(p + 0.1)) * 0.5, -0.1, 1.0);
-        // COSMIC DE logo colors: purple/violet and cyan/teal
+        // Purple/violet and cyan/teal colors
         let l = vec3<f32>(0.2, 0.05, 0.3) + vec3<f32>(2.0, 4.0, 5.0) * f;
         cl = cl * l + smoothstep(distance, 0.0, rz) * glow * l;
         d += min(rz, 1.0);

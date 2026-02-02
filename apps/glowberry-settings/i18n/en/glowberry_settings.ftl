@@ -47,6 +47,7 @@ resource-high = High
 settings = Settings
 background-service = Background Service
 use-glowberry = Use GlowBerry as default
+path-order-warning = Warning: /usr/local/bin must come before /usr/bin in PATH for this to work
 performance = Performance
 prefer-low-power = Prefer low power GPU
 

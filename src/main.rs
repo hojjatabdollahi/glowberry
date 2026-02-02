@@ -4,19 +4,11 @@ use clap::Parser;
 use glowberry_lib::engine::{BackgroundEngine, EngineConfig};
 use tracing_subscriber::prelude::*;
 
-/// GlowBerry - Enhanced background service for COSMIC desktop
+/// GlowBerry - Enhanced background service with live shader support
 #[derive(Parser, Debug)]
 #[command(name = "glowberry")]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    /// Import configuration from official cosmic-bg
-    #[arg(long)]
-    import_cosmic_bg: bool,
-
-    /// Export configuration to cosmic-bg format
-    #[arg(long)]
-    export_cosmic_bg: bool,
-}
+struct Args {}
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -29,49 +21,11 @@ fn main() -> color_eyre::Result<()> {
 
     init_logger();
 
-    let args = Args::parse();
-
-    if args.import_cosmic_bg {
-        return import_from_cosmic_bg();
-    }
-
-    if args.export_cosmic_bg {
-        return export_to_cosmic_bg();
-    }
+    let _args = Args::parse();
 
     BackgroundEngine::run(EngineConfig::default())?;
 
     Ok(())
-}
-
-fn import_from_cosmic_bg() -> color_eyre::Result<()> {
-    match glowberry_config::import_from_cosmic_bg() {
-        Ok(count) => {
-            tracing::info!("Successfully imported {} entries from cosmic-bg", count);
-            println!("Successfully imported {count} entries from cosmic-bg");
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!("Failed to import from cosmic-bg: {}", e);
-            eprintln!("Failed to import from cosmic-bg: {e}");
-            Err(e.into())
-        }
-    }
-}
-
-fn export_to_cosmic_bg() -> color_eyre::Result<()> {
-    match glowberry_config::export_to_cosmic_bg() {
-        Ok(count) => {
-            tracing::info!("Successfully exported {} entries to cosmic-bg", count);
-            println!("Successfully exported {count} entries to cosmic-bg");
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!("Failed to export to cosmic-bg: {}", e);
-            eprintln!("Failed to export to cosmic-bg: {e}");
-            Err(e.into())
-        }
-    }
 }
 
 fn init_logger() {

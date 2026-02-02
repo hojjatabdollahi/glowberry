@@ -2,151 +2,213 @@
 #
 # glowberry-switch - Helper script to switch between GlowBerry and official cosmic-bg
 #
-# Usage: glowberry-switch {glowberry|cosmic-bg|status|import|export}
+# This works by creating a symlink at /usr/local/bin/cosmic-bg that points to glowberry.
+# Since /usr/local/bin is searched before /usr/bin, cosmic-session will run glowberry
+# instead of the original cosmic-bg when enabled.
+#
+# Usage: glowberry-switch {enable|disable|status}
 #
 
 set -e
 
 GLOWBERRY_BIN="/usr/bin/glowberry"
-COSMIC_BG_ORIG="/usr/bin/cosmic-bg-original"
-
-# Try alternate location for original cosmic-bg
-if [ ! -f "$COSMIC_BG_ORIG" ]; then
-    COSMIC_BG_ORIG="/usr/bin/cosmic-bg.real"
-fi
+SYMLINK_PATH="/usr/local/bin/cosmic-bg"
+ORIGINAL_COSMIC_BG="/usr/bin/cosmic-bg"
 
 usage() {
     cat <<EOF
 Usage: glowberry-switch <command>
 
 Commands:
-    glowberry, enable     Switch to GlowBerry as the active background service
-    cosmic-bg, disable    Switch to the original cosmic-bg
-    status                Show current active background service
-    import                Import configuration from cosmic-bg to GlowBerry
-    export                Export GlowBerry configuration to cosmic-bg format
+    enable                Enable GlowBerry as the background service (creates symlink)
+    disable               Disable GlowBerry and restore original cosmic-bg
+    status                Show current status
     help                  Show this help message
 
+How it works:
+    GlowBerry intercepts cosmic-session's call to cosmic-bg by placing a symlink
+    at /usr/local/bin/cosmic-bg that points to /usr/bin/glowberry. Since
+    /usr/local/bin is searched before /usr/bin in PATH, cosmic-session will
+    run GlowBerry instead of the original cosmic-bg.
+
 Examples:
-    glowberry-switch glowberry    # Enable GlowBerry
-    glowberry-switch cosmic-bg    # Switch back to original
-    glowberry-switch status       # Check current status
-    glowberry-switch import       # Import cosmic-bg settings
+    glowberry-switch enable     # Enable GlowBerry
+    glowberry-switch disable    # Switch back to original cosmic-bg
+    glowberry-switch status     # Check current status
 EOF
 }
 
-check_alternatives() {
-    if ! command -v update-alternatives &> /dev/null; then
-        echo "Warning: update-alternatives not found, using direct symlinks"
-        return 1
+# Check if /usr/local/bin comes before /usr/bin in PATH
+# Returns 0 if PATH is correct, 1 if not
+check_path_order() {
+    # Get positions of /usr/local/bin and /usr/bin in PATH
+    local path_array
+    IFS=':' read -ra path_array <<< "$PATH"
+    
+    local local_bin_pos=-1
+    local usr_bin_pos=-1
+    local i=0
+    
+    for p in "${path_array[@]}"; do
+        if [ "$p" = "/usr/local/bin" ]; then
+            local_bin_pos=$i
+        elif [ "$p" = "/usr/bin" ]; then
+            usr_bin_pos=$i
+        fi
+        ((i++))
+    done
+    
+    if [ $local_bin_pos -eq -1 ]; then
+        return 2  # /usr/local/bin not in PATH at all
+    elif [ $usr_bin_pos -eq -1 ]; then
+        return 0  # /usr/bin not in PATH, so /usr/local/bin wins by default
+    elif [ $local_bin_pos -lt $usr_bin_pos ]; then
+        return 0  # /usr/local/bin comes first - correct
+    else
+        return 1  # /usr/bin comes first - wrong order
     fi
-    return 0
 }
 
-switch_to_glowberry() {
+warn_path_order() {
+    check_path_order
+    local result=$?
+    
+    if [ $result -eq 1 ]; then
+        echo ""
+        echo "WARNING: /usr/bin appears before /usr/local/bin in your PATH!"
+        echo "         GlowBerry override may not work correctly."
+        echo ""
+        echo "Your PATH order:"
+        echo "$PATH" | tr ':' '\n' | grep -n "bin" | head -10
+        echo ""
+        echo "To fix this, ensure /usr/local/bin comes before /usr/bin in your PATH."
+        echo "You may need to edit ~/.bashrc, ~/.profile, or /etc/environment"
+        echo ""
+    elif [ $result -eq 2 ]; then
+        echo ""
+        echo "WARNING: /usr/local/bin is not in your PATH!"
+        echo "         GlowBerry override will not work."
+        echo ""
+        echo "Add /usr/local/bin to your PATH by editing ~/.bashrc or ~/.profile:"
+        echo "  export PATH=\"/usr/local/bin:\$PATH\""
+        echo ""
+    fi
+}
+
+enable_glowberry() {
     if ! [ -f "$GLOWBERRY_BIN" ]; then
         echo "Error: GlowBerry not found at $GLOWBERRY_BIN"
         echo "Please install GlowBerry first with: just install"
         exit 1
     fi
 
-    if check_alternatives; then
-        sudo update-alternatives --set cosmic-bg "$GLOWBERRY_BIN"
-    else
-        sudo ln -sf "$GLOWBERRY_BIN" /usr/bin/cosmic-bg
-    fi
-    
-    echo "✓ GlowBerry is now the active background service"
+    # Check PATH order and warn if incorrect
+    warn_path_order
+
+    # Create the symlink (requires sudo)
+    echo "Creating symlink at $SYMLINK_PATH -> $GLOWBERRY_BIN"
+    sudo ln -sf "$GLOWBERRY_BIN" "$SYMLINK_PATH"
+
+    # Kill any running cosmic-bg/glowberry processes so the new one starts
+    echo "Restarting background service..."
+    pkill -x cosmic-bg 2>/dev/null || true
+    pkill -x glowberry 2>/dev/null || true
+
     echo ""
-    echo "To apply changes, restart your COSMIC session or run:"
-    echo "  systemctl --user restart cosmic-bg 2>/dev/null || cosmic-bg &"
+    echo "GlowBerry is now enabled!"
+    echo "The background service will restart automatically, or you can log out and back in."
 }
 
-switch_to_cosmic_bg() {
-    if ! [ -f "$COSMIC_BG_ORIG" ]; then
-        echo "Error: Original cosmic-bg not found"
-        echo "Looked in: /usr/bin/cosmic-bg-original, /usr/bin/cosmic-bg.real"
-        echo ""
-        echo "If you haven't saved the original cosmic-bg binary, you may need to"
-        echo "reinstall the cosmic-bg package from your distribution."
-        exit 1
+disable_glowberry() {
+    if [ -L "$SYMLINK_PATH" ]; then
+        echo "Removing symlink at $SYMLINK_PATH"
+        sudo rm "$SYMLINK_PATH"
+    else
+        echo "No symlink found at $SYMLINK_PATH"
     fi
 
-    if check_alternatives; then
-        sudo update-alternatives --set cosmic-bg "$COSMIC_BG_ORIG"
-    else
-        sudo ln -sf "$COSMIC_BG_ORIG" /usr/bin/cosmic-bg
-    fi
-    
-    echo "✓ Original cosmic-bg is now the active background service"
+    # Kill any running processes so the original cosmic-bg can start
+    echo "Restarting background service..."
+    pkill -x cosmic-bg 2>/dev/null || true
+    pkill -x glowberry 2>/dev/null || true
+
     echo ""
-    echo "To apply changes, restart your COSMIC session or run:"
-    echo "  systemctl --user restart cosmic-bg 2>/dev/null || cosmic-bg &"
+    echo "GlowBerry disabled. Original cosmic-bg is now active."
+    echo "The background service will restart automatically, or you can log out and back in."
 }
 
 show_status() {
-    echo "Background Service Status"
-    echo "========================="
+    echo "GlowBerry Status"
+    echo "================"
     echo ""
-    
-    if check_alternatives 2>/dev/null; then
-        echo "Using update-alternatives system:"
-        update-alternatives --display cosmic-bg 2>/dev/null || echo "  No alternatives configured"
+
+    # Check PATH order
+    check_path_order
+    local path_result=$?
+    if [ $path_result -eq 0 ]; then
+        echo "PATH order: OK (/usr/local/bin before /usr/bin)"
+    elif [ $path_result -eq 1 ]; then
+        echo "PATH order: WARNING - /usr/bin comes before /usr/local/bin!"
     else
-        if [ -L /usr/bin/cosmic-bg ]; then
-            TARGET=$(readlink -f /usr/bin/cosmic-bg)
-            echo "Current cosmic-bg points to: $TARGET"
-            
-            if [ "$TARGET" = "$GLOWBERRY_BIN" ]; then
-                echo "Status: GlowBerry is active"
-            else
-                echo "Status: Original cosmic-bg is active"
-            fi
-        else
-            echo "cosmic-bg is a regular binary (not managed by alternatives)"
-        fi
+        echo "PATH order: WARNING - /usr/local/bin not in PATH!"
     fi
-    
     echo ""
-    echo "GlowBerry binary: $([ -f "$GLOWBERRY_BIN" ] && echo "installed" || echo "not found")"
-    echo "Original cosmic-bg: $([ -f "$COSMIC_BG_ORIG" ] && echo "found" || echo "not found")"
-}
 
-import_config() {
-    if ! [ -f "$GLOWBERRY_BIN" ]; then
-        echo "Error: GlowBerry not installed"
-        exit 1
+    # Check if GlowBerry is installed
+    if [ -f "$GLOWBERRY_BIN" ]; then
+        echo "GlowBerry binary: installed at $GLOWBERRY_BIN"
+    else
+        echo "GlowBerry binary: NOT INSTALLED"
     fi
-    
-    echo "Importing configuration from cosmic-bg..."
-    "$GLOWBERRY_BIN" --import-cosmic-bg
-}
 
-export_config() {
-    if ! [ -f "$GLOWBERRY_BIN" ]; then
-        echo "Error: GlowBerry not installed"
-        exit 1
+    # Check if original cosmic-bg exists
+    if [ -f "$ORIGINAL_COSMIC_BG" ]; then
+        echo "Original cosmic-bg: installed at $ORIGINAL_COSMIC_BG"
+    else
+        echo "Original cosmic-bg: not found"
     fi
-    
-    echo "Exporting configuration to cosmic-bg format..."
-    "$GLOWBERRY_BIN" --export-cosmic-bg
+
+    echo ""
+
+    # Check symlink status
+    if [ -L "$SYMLINK_PATH" ]; then
+        TARGET=$(readlink -f "$SYMLINK_PATH")
+        echo "Symlink: $SYMLINK_PATH -> $TARGET"
+        if [ "$TARGET" = "$GLOWBERRY_BIN" ]; then
+            echo "Status: GlowBerry is ENABLED (will run instead of cosmic-bg)"
+        else
+            echo "Status: Symlink points elsewhere"
+        fi
+    else
+        echo "Symlink: not present"
+        echo "Status: Original cosmic-bg is active"
+    fi
+
+    echo ""
+
+    # Check which binary would actually run
+    WHICH_COSMIC_BG=$(which cosmic-bg 2>/dev/null || echo "not found")
+    echo "which cosmic-bg: $WHICH_COSMIC_BG"
+
+    # Check running process
+    if pgrep -x glowberry >/dev/null 2>&1; then
+        echo "Running: glowberry (PID: $(pgrep -x glowberry))"
+    elif pgrep -x cosmic-bg >/dev/null 2>&1; then
+        echo "Running: cosmic-bg (PID: $(pgrep -x cosmic-bg))"
+    else
+        echo "Running: no background service detected"
+    fi
 }
 
 case "${1:-}" in
-    glowberry|enable)
-        switch_to_glowberry
+    enable)
+        enable_glowberry
         ;;
-    cosmic-bg|disable|original)
-        switch_to_cosmic_bg
+    disable)
+        disable_glowberry
         ;;
     status)
         show_status
-        ;;
-    import)
-        import_config
-        ;;
-    export)
-        export_config
         ;;
     help|--help|-h)
         usage

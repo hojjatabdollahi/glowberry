@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::{colored, draw, engine::CosmicBg, engine::CosmicBgLayer, scaler};
+use crate::{colored, draw, engine::GlowBerry, engine::GlowBerryLayer, scaler};
 use cosmic_config::CosmicConfigEntry;
 use eyre::eyre;
 use glowberry_config::{
@@ -33,10 +33,10 @@ use walkdir::WalkDir;
 #[derive(Debug)]
 pub struct Wallpaper {
     pub entry: Entry,
-    pub layers: Vec<CosmicBgLayer>,
+    pub layers: Vec<GlowBerryLayer>,
     pub image_queue: VecDeque<PathBuf>,
-    loop_handle: calloop::LoopHandle<'static, CosmicBg>,
-    queue_handle: QueueHandle<CosmicBg>,
+    loop_handle: calloop::LoopHandle<'static, GlowBerry>,
+    queue_handle: QueueHandle<GlowBerry>,
     current_source: Option<Source>,
     // Cache of source image, if `current_source` is a `Source::Path`
     current_image: Option<image::DynamicImage>,
@@ -54,8 +54,8 @@ impl Drop for Wallpaper {
 impl Wallpaper {
     pub fn new(
         entry: Entry,
-        queue_handle: QueueHandle<CosmicBg>,
-        loop_handle: calloop::LoopHandle<'static, CosmicBg>,
+        queue_handle: QueueHandle<GlowBerry>,
+        loop_handle: calloop::LoopHandle<'static, GlowBerry>,
         source_tx: calloop::channel::SyncSender<(String, notify::Event)>,
     ) -> Self {
         let mut wallpaper = Wallpaper {
@@ -315,7 +315,7 @@ impl Wallpaper {
 
             Source::Shader(ref shader) => {
                 // Shader wallpapers are handled by the GPU renderer
-                // Just set the source, GPU initialization happens in CosmicBg::init_gpu_layer
+                // Just set the source, GPU initialization happens in GlowBerry::init_gpu_layer
                 self.current_source = Some(Source::Shader(shader.clone()));
                 tracing::info!("Shader wallpaper source configured");
             }
@@ -374,21 +374,21 @@ impl Wallpaper {
 
     fn register_timer(&mut self) {
         let rotation_freq = self.entry.rotation_frequency;
-        let cosmic_bg_clone = self.entry.output.clone();
+        let output_clone = self.entry.output.clone();
         // set timer for rotation
         if rotation_freq > 0 {
             self.timer_token = self
                 .loop_handle
                 .insert_source(
                     Timer::from_duration(Duration::from_secs(rotation_freq)),
-                    move |_, _, state: &mut CosmicBg| {
+                    move |_, _, state: &mut GlowBerry| {
                         let span = tracing::debug_span!("Wallpaper::timer");
                         let _handle = span.enter();
 
                         let Some(item) = state
                             .wallpapers
                             .iter_mut()
-                            .find(|w| w.entry.output == cosmic_bg_clone)
+                            .find(|w| w.entry.output == output_clone)
                         else {
                             return TimeoutAction::Drop; // Drop if no item found for this timer
                         };

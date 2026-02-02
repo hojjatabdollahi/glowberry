@@ -3,7 +3,7 @@ name = "glowberry"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-description = "Enhanced background/wallpaper service for COSMIC desktop with live shader support"
+description = "Enhanced background/wallpaper service with live shader support"
 license = "MPL-2.0"
 
 [dependencies]

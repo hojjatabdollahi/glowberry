@@ -128,10 +128,10 @@ impl BackgroundEngine {
         malloc::limit_mmap_threshold();
 
         let conn = Connection::connect_to_env().wrap_err("wayland client connection failed")?;
-        // Clone the connection for use in CosmicBg state (needed for GPU surface creation)
+        // Clone the connection for use in GlowBerry state (needed for GPU surface creation)
         let conn_for_state = conn.clone();
 
-        let mut event_loop: calloop::EventLoop<'static, CosmicBg> =
+        let mut event_loop: calloop::EventLoop<'static, GlowBerry> =
             calloop::EventLoop::try_new().wrap_err("failed to create event loop")?;
 
         let (globals, event_queue) =
@@ -361,7 +361,7 @@ impl BackgroundEngine {
             None
         };
 
-        let mut bg_state = CosmicBg {
+        let mut bg_state = GlowBerry {
             registry_state: RegistryState::new(&globals),
             output_state: OutputState::new(&globals, &qh),
             compositor_state: CompositorState::bind(&globals, &qh).unwrap(),
@@ -436,7 +436,7 @@ impl Drop for BackgroundHandle {
 }
 
 #[derive(Debug)]
-pub struct CosmicBgLayer {
+pub struct GlowBerryLayer {
     pub(crate) layer: LayerSurface,
     pub(crate) viewport: wp_viewport::WpViewport,
     pub(crate) wl_output: WlOutput,
@@ -449,7 +449,7 @@ pub struct CosmicBgLayer {
     pub(crate) gpu_state: Option<GpuLayerState>,
 }
 
-pub struct CosmicBg {
+pub struct GlowBerry {
     registry_state: RegistryState,
     output_state: OutputState,
     compositor_state: CompositorState,
@@ -457,9 +457,9 @@ pub struct CosmicBg {
     layer_state: LayerShell,
     viewporter: wp_viewporter::WpViewporter,
     fractional_scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
-    qh: QueueHandle<CosmicBg>,
+    qh: QueueHandle<GlowBerry>,
     source_tx: calloop::channel::SyncSender<(String, notify::Event)>,
-    loop_handle: calloop::LoopHandle<'static, CosmicBg>,
+    loop_handle: calloop::LoopHandle<'static, GlowBerry>,
     exit: bool,
     pub(crate) wallpapers: Vec<Wallpaper>,
     config: Config,
@@ -479,9 +479,9 @@ pub struct CosmicBg {
 }
 
 // Manual Debug impl since wgpu types don't implement Debug
-impl std::fmt::Debug for CosmicBg {
+impl std::fmt::Debug for GlowBerry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CosmicBg")
+        f.debug_struct("GlowBerry")
             .field("exit", &self.exit)
             .field("wallpapers", &self.wallpapers)
             .field("config", &self.config)
@@ -492,7 +492,7 @@ impl std::fmt::Debug for CosmicBg {
     }
 }
 
-impl CosmicBg {
+impl GlowBerry {
     /// Check if shader animation should be paused based on current power state.
     /// Returns true if animation should be paused.
     fn should_pause_animation(&self) -> bool {
@@ -657,7 +657,7 @@ impl CosmicBg {
         (w * scale / 120, h * scale / 120)
     }
 
-    fn shader_layer_physical_size(layer: &CosmicBgLayer) -> (u32, u32) {
+    fn shader_layer_physical_size(layer: &GlowBerryLayer) -> (u32, u32) {
         let output_mode_dims = layer
             .output_info
             .modes
@@ -671,7 +671,7 @@ impl CosmicBg {
     fn update_shader_layer_surface(
         gpu: &gpu::GpuRenderer,
         qh: &QueueHandle<Self>,
-        layer: &mut CosmicBgLayer,
+        layer: &mut GlowBerryLayer,
     ) {
         let (physical_w, physical_h) = Self::shader_layer_physical_size(layer);
         let Some(gpu_state) = layer.gpu_state.as_mut() else {
@@ -744,7 +744,7 @@ impl CosmicBg {
     }
 
     #[must_use]
-    pub fn new_layer(&self, output: WlOutput, output_info: OutputInfo) -> CosmicBgLayer {
+    pub fn new_layer(&self, output: WlOutput, output_info: OutputInfo) -> GlowBerryLayer {
         let surface = self.compositor_state.create_surface(&self.qh);
 
         let layer = self.layer_state.create_layer_surface(
@@ -770,7 +770,7 @@ impl CosmicBg {
                 .then_some(output_info.scale_factor as u32 * 120)
         };
 
-        CosmicBgLayer {
+        GlowBerryLayer {
             layer,
             viewport,
             wl_output: output,
@@ -879,7 +879,7 @@ impl CosmicBg {
     }
 }
 
-impl CompositorHandler for CosmicBg {
+impl CompositorHandler for GlowBerry {
     fn scale_factor_changed(
         &mut self,
         _conn: &Connection,
@@ -1054,7 +1054,7 @@ impl CompositorHandler for CosmicBg {
     }
 }
 
-impl OutputHandler for CosmicBg {
+impl OutputHandler for GlowBerry {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
@@ -1177,7 +1177,7 @@ impl OutputHandler for CosmicBg {
     }
 }
 
-impl LayerShellHandler for CosmicBg {
+impl LayerShellHandler for GlowBerry {
     fn closed(
         &mut self,
         _conn: &Connection,
@@ -1199,7 +1199,7 @@ impl LayerShellHandler for CosmicBg {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        let span = tracing::debug_span!("<CosmicBg as LayerShellHandler>::configure");
+        let span = tracing::debug_span!("<GlowBerry as LayerShellHandler>::configure");
         let _handle = span.enter();
 
         let (w, h) = configure.new_size;
@@ -1268,31 +1268,31 @@ impl LayerShellHandler for CosmicBg {
     }
 }
 
-impl ShmHandler for CosmicBg {
+impl ShmHandler for GlowBerry {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm_state
     }
 }
 
-delegate_compositor!(CosmicBg);
-delegate_output!(CosmicBg);
-delegate_shm!(CosmicBg);
-delegate_layer!(CosmicBg);
-delegate_registry!(CosmicBg);
-delegate_noop!(CosmicBg: wp_viewporter::WpViewporter);
-delegate_noop!(CosmicBg: wp_viewport::WpViewport);
-delegate_noop!(CosmicBg: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+delegate_compositor!(GlowBerry);
+delegate_output!(GlowBerry);
+delegate_shm!(GlowBerry);
+delegate_layer!(GlowBerry);
+delegate_registry!(GlowBerry);
+delegate_noop!(GlowBerry: wp_viewporter::WpViewporter);
+delegate_noop!(GlowBerry: wp_viewport::WpViewport);
+delegate_noop!(GlowBerry: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 
 impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, Weak<wl_surface::WlSurface>>
-    for CosmicBg
+    for GlowBerry
 {
     fn event(
-        state: &mut CosmicBg,
+        state: &mut GlowBerry,
         _: &wp_fractional_scale_v1::WpFractionalScaleV1,
         event: wp_fractional_scale_v1::Event,
         surface: &Weak<wl_surface::WlSurface>,
         _: &Connection,
-        _: &QueueHandle<CosmicBg>,
+        _: &QueueHandle<GlowBerry>,
     ) {
         match event {
             wp_fractional_scale_v1::Event::PreferredScale { scale } => {
@@ -1317,7 +1317,7 @@ impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, Weak<wl_surface::WlSu
                         layer.fractional_scale = Some(scale);
                         if is_shader {
                             if let Some(gpu) = gpu {
-                                CosmicBg::update_shader_layer_surface(gpu, &qh, layer);
+                                GlowBerry::update_shader_layer_surface(gpu, &qh, layer);
                             }
                         } else {
                             wallpaper.draw();
@@ -1330,7 +1330,7 @@ impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, Weak<wl_surface::WlSu
     }
 }
 
-impl ProvidesRegistryState for CosmicBg {
+impl ProvidesRegistryState for GlowBerry {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
@@ -1339,7 +1339,7 @@ impl ProvidesRegistryState for CosmicBg {
 
 #[cfg(test)]
 mod tests {
-    use super::CosmicBg;
+    use super::GlowBerry;
 
     #[test]
     fn shader_physical_size_prefers_layer_size_over_mode() {
@@ -1347,21 +1347,21 @@ mod tests {
         let scale = Some(150);
         let mode = Some((1920, 1080));
 
-        let result = CosmicBg::shader_physical_size(size, scale, mode);
+        let result = GlowBerry::shader_physical_size(size, scale, mode);
 
         assert_eq!(result, (125, 62));
     }
 
     #[test]
     fn shader_physical_size_uses_mode_when_size_missing() {
-        let result = CosmicBg::shader_physical_size(None, Some(150), Some((1280, 720)));
+        let result = GlowBerry::shader_physical_size(None, Some(150), Some((1280, 720)));
 
         assert_eq!(result, (1280, 720));
     }
 
     #[test]
     fn shader_physical_size_defaults_scale_to_120() {
-        let result = CosmicBg::shader_physical_size(Some((1200, 800)), None, Some((640, 480)));
+        let result = GlowBerry::shader_physical_size(Some((1200, 800)), None, Some((640, 480)));
 
         assert_eq!(result, (1200, 800));
     }
