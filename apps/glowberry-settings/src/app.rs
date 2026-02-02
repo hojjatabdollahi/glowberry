@@ -1618,16 +1618,12 @@ fn discover_shaders() -> Vec<ShaderInfo> {
             for data_dir in data_dirs.split(':') {
                 let shader_dir = PathBuf::from(data_dir).join("glowberry/shaders");
                 collect_shaders_from_dir(&shader_dir, &mut shaders);
-                let cosmic_dir = PathBuf::from(data_dir).join("cosmic-bg/shaders");
-                collect_shaders_from_dir(&cosmic_dir, &mut shaders);
             }
         }
     }
 
     // Standard paths
-    for dir in &["/usr/share/glowberry/shaders", "/usr/share/cosmic-bg/shaders"] {
-        collect_shaders_from_dir(std::path::Path::new(dir), &mut shaders);
-    }
+    collect_shaders_from_dir(std::path::Path::new("/usr/share/glowberry/shaders"), &mut shaders);
 
     shaders.sort_by(|a, b| a.name.cmp(&b.name));
     shaders.dedup_by(|a, b| a.name == b.name);
