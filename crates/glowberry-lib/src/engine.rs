@@ -388,6 +388,7 @@ impl BackgroundEngine {
             power_saving_config,
             current_frame_rate_override: None,
             was_on_battery: false,
+            was_animation_paused: false,
         };
 
         loop {
@@ -482,6 +483,8 @@ pub struct GlowBerry {
     current_frame_rate_override: Option<u8>,
     /// Whether we were on battery in the last check (for detecting changes).
     was_on_battery: bool,
+    /// Whether animation was paused in the last frame (for detecting resume).
+    was_animation_paused: bool,
 }
 
 // Manual Debug impl since wgpu types don't implement Debug
@@ -610,7 +613,10 @@ impl GlowBerry {
     /// Called when power state changes (from D-Bus notification).
     /// This handles resuming from paused state and updating frame rates.
     fn on_power_state_changed(&mut self) {
-        let was_paused = self.should_pause_animation();
+        // Use the tracked state from before the power change occurred.
+        // Note: power_monitor already has the NEW state when this is called,
+        // so we can't compute was_paused from current state.
+        let was_paused = self.was_animation_paused;
 
         // Update battery state tracking
         if let Some(ref power_monitor) = self.power_monitor {
@@ -625,6 +631,7 @@ impl GlowBerry {
         // If we were paused and now we're not, request frame callbacks to resume
         if was_paused && !is_paused {
             tracing::info!("Resuming shader animation after power state change");
+            self.was_animation_paused = false;
             self.request_frame_callbacks();
         }
     }
@@ -1046,6 +1053,8 @@ impl CompositorHandler for GlowBerry {
                         surface.frame(qh, surface.clone());
                         layer.layer.commit();
                     } else {
+                        // Track that we're paused so on_power_state_changed can resume us
+                        self.was_animation_paused = true;
                         tracing::debug!(output = ?layer.output_info.name, "Shader paused, not requesting frame callback");
                     }
                 }
