@@ -69,6 +69,14 @@ build-release *args: (build-debug '--release' args)
 # Compiles release profile with vendored dependencies
 build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
 
+# Build and install the Flatpak package
+flatpak:
+    flatpak-builder --disable-rofiles-fuse --force-clean build-dir flatpak/io.github.hojjatabdollahi.glowberry.yml --user --install
+
+# Regenerate flatpak/cargo-sources.json from Cargo.lock
+flatpak-sources:
+    ./flatpak/generate-sources.sh
+
 # Runs a clippy check
 check *args:
     cargo clippy --all-features {{args}} -- -W clippy::pedantic

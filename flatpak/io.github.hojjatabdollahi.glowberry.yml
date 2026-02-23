@@ -14,6 +14,8 @@ finish-args:
   - --device=dri
   # D-Bus session bus for cosmic-config daemon
   - --socket=session-bus
+  # D-Bus access to COSMIC portal for wayland permission requests
+  - --talk-name=org.freedesktop.impl.portal.desktop.cosmic
   # D-Bus system bus for UPower (battery/power state monitoring)
   - --system-talk-name=org.freedesktop.UPower
   # Read user wallpaper images
