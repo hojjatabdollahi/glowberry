@@ -2,16 +2,16 @@
 
 use crate::{
     fragment_canvas, gpu, img_source,
-    upower::{PowerMonitorHandle, PowerStateChanged, start_power_monitor},
+    upower::{start_power_monitor, PowerMonitorHandle, PowerStateChanged},
     user_context::{EnvGuard, UserContext},
     wallpaper::Wallpaper,
 };
-use cosmic_config::{CosmicConfigEntry, calloop::ConfigWatchSource};
-use eyre::{Context, eyre};
+use cosmic_config::{calloop::ConfigWatchSource, CosmicConfigEntry};
+use eyre::{eyre, Context};
 use glowberry_config::{
-    Config,
     power_saving::{OnBatteryAction, PowerSavingConfig},
     state::State,
+    Config,
 };
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
@@ -21,12 +21,13 @@ use sctk::{
         calloop,
         calloop_wayland_source::WaylandSource,
         client::{
-            Connection, Dispatch, Proxy, QueueHandle, Weak, delegate_noop,
+            delegate_noop,
             globals::registry_queue_init,
             protocol::{
                 wl_output::{self, WlOutput},
                 wl_surface,
             },
+            Connection, Dispatch, Proxy, QueueHandle, Weak,
         },
         protocols::wp::{
             fractional_scale::v1::client::{
@@ -38,14 +39,15 @@ use sctk::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     shell::{
-        WaylandSurface,
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
             LayerSurfaceConfigure,
         },
+        WaylandSurface,
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
+    shm::{slot::SlotPool, Shm, ShmHandler},
 };
+use std::collections::HashMap;
 use std::thread;
 use tracing::error;
 
@@ -104,6 +106,59 @@ impl Default for EngineConfig {
     }
 }
 
+/// Request Wayland access from the COSMIC portal via D-Bus.
+///
+/// Returns `Ok(Some(granted_globals))` on approval,
+/// `Ok(None)` on denial, `Err` on communication failure.
+fn request_wayland_access(
+    app_id: &str,
+    globals: &[&str],
+) -> eyre::Result<Option<Vec<String>>> {
+    let globals_owned: Vec<String> = globals.iter().map(|s| s.to_string()).collect();
+    let rt = tokio::runtime::Runtime::new()
+        .wrap_err("failed to create tokio runtime for D-Bus")?;
+
+    rt.block_on(async {
+        let conn = zbus::Connection::session()
+            .await
+            .wrap_err("failed to connect to session D-Bus")?;
+
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.impl.portal.desktop.cosmic"),
+                "/org/freedesktop/portal/desktop",
+                Some("com.system76.CosmicPortal.WaylandAccess"),
+                "RequestAccess",
+                &(app_id, &globals_owned, "Desktop wallpaper rendering"),
+            )
+            .await
+            .wrap_err("D-Bus call to WaylandAccess portal failed")?;
+
+        let body = reply.body();
+        let (response_code, result): (u32, HashMap<String, zbus::zvariant::OwnedValue>) = body
+            .deserialize()
+            .wrap_err("failed to deserialize portal response")?;
+
+        match response_code {
+            0 => {
+                // Success — extract granted globals from the result dict
+                if let Some(granted_val) = result.get("granted") {
+                    let granted: Vec<String> = zbus::zvariant::Value::try_from(granted_val.clone())
+                        .ok()
+                        .and_then(|v| <Vec<String>>::try_from(v).ok())
+                        .unwrap_or_default();
+                    Ok(Some(granted))
+                } else {
+                    // Success but no granted list — assume all requested were granted
+                    Ok(Some(globals_owned))
+                }
+            }
+            1 => Ok(None), // User denied
+            code => eyre::bail!("portal returned error code {}", code),
+        }
+    })
+}
+
 #[derive(Debug)]
 pub struct BackgroundEngine;
 
@@ -126,17 +181,81 @@ impl BackgroundEngine {
         #[cfg(target_env = "gnu")]
         malloc::limit_mmap_threshold();
 
-        let conn = Connection::connect_to_env().wrap_err("wayland client connection failed")?;
-        // Clone the connection for use in GlowBerry state (needed for GPU surface creation)
+        // Try connecting to Wayland, with one retry after permission grant
+        let mut attempted_permission_request = false;
+
+        let (conn, globals, event_queue, qh, layer_state, mut event_loop) = loop {
+            let conn = Connection::connect_to_env()
+                .wrap_err("wayland client connection failed")?;
+
+            let event_loop: calloop::EventLoop<'static, GlowBerry> =
+                calloop::EventLoop::try_new()
+                    .wrap_err("failed to create event loop")?;
+
+            let (globals, event_queue) =
+                registry_queue_init(&conn)
+                    .wrap_err("failed to initialize registry queue")?;
+
+            let qh = event_queue.handle();
+
+            match LayerShell::bind(&globals, &qh) {
+                Ok(layer_state) => {
+                    // Success — break out with all the state
+                    break (conn, globals, event_queue, qh, layer_state, event_loop);
+                }
+                Err(_) if !attempted_permission_request => {
+                    attempted_permission_request = true;
+                    tracing::info!(
+                        "Layer shell not available (sandboxed?), requesting permission from portal..."
+                    );
+
+                    // Drop Wayland state before requesting permission
+                    // (the portal dialog needs the compositor's attention)
+                    drop(qh);
+                    drop(event_queue);
+                    drop(globals);
+                    drop(event_loop);
+                    drop(conn);
+
+                    match request_wayland_access(
+                        "io.github.hojjatabdollahi.glowberry",
+                        &["zwlr_layer_shell_v1"],
+                    ) {
+                        Ok(Some(granted))
+                            if granted.iter().any(|g| g == "zwlr_layer_shell_v1") =>
+                        {
+                            tracing::info!("Permission granted! Reconnecting to Wayland...");
+                            continue; // retry the loop
+                        }
+                        Ok(Some(_)) => {
+                            return Err(eyre!(
+                                "Portal granted permissions but not zwlr_layer_shell_v1"
+                            ));
+                        }
+                        Ok(None) => {
+                            return Err(eyre!(
+                                "Permission denied. GlowBerry needs layer-shell access \
+                                 to render wallpapers."
+                            ));
+                        }
+                        Err(err) => {
+                            return Err(err.wrap_err(
+                                "Failed to request Wayland access from portal. \
+                                 Is the COSMIC portal running?",
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    return Err(eyre!(
+                        "Layer shell not available and permission already requested: {:?}",
+                        err
+                    ));
+                }
+            }
+        };
+
         let conn_for_state = conn.clone();
-
-        let mut event_loop: calloop::EventLoop<'static, GlowBerry> =
-            calloop::EventLoop::try_new().wrap_err("failed to create event loop")?;
-
-        let (globals, event_queue) =
-            registry_queue_init(&conn).wrap_err("failed to initialize registry queue")?;
-
-        let qh = event_queue.handle();
 
         WaylandSource::new(conn, event_queue)
             .insert(event_loop.handle())
@@ -372,7 +491,7 @@ impl BackgroundEngine {
             output_state: OutputState::new(&globals, &qh),
             compositor_state: CompositorState::bind(&globals, &qh).unwrap(),
             shm_state: Shm::bind(&globals, &qh).unwrap(),
-            layer_state: LayerShell::bind(&globals, &qh).unwrap(),
+            layer_state,
             viewporter: globals.bind(&qh, 1..=1, ()).unwrap(),
             fractional_scale_manager: globals.bind(&qh, 1..=1, ()).ok(),
             qh,
