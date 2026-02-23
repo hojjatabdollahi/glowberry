@@ -10,6 +10,9 @@ src/config.rs
 .flatpak/
 .flatpak-builder/
 flatpak_app/
+build-dir/
+flatpak-repo/
+flatpak/cargo-sources.json
 vendor
 vendor.tar
 .cargo/

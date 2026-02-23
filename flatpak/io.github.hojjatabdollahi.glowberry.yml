@@ -1,0 +1,61 @@
+app-id: io.github.hojjatabdollahi.glowberry
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+
+command: glowberry-settings
+
+finish-args:
+  # Wayland access for background rendering and settings GUI
+  - --socket=wayland
+  # GPU/Vulkan access for shader rendering
+  - --device=dri
+  # D-Bus session bus for cosmic-config daemon
+  - --socket=session-bus
+  # D-Bus system bus for UPower (battery/power state monitoring)
+  - --system-talk-name=org.freedesktop.UPower
+  # Read user wallpaper images
+  - --filesystem=xdg-pictures:ro
+  # Read/write cosmic-config state
+  - --filesystem=xdg-config/cosmic:rw
+  # Shader storage and app data
+  - --filesystem=xdg-data/glowberry:rw
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/glowberry/cargo
+    CARGO_NET_OFFLINE: 'true'
+    RUSTFLAGS: ''
+
+modules:
+  - name: glowberry
+    buildsystem: simple
+    build-commands:
+      # Build both the daemon and settings app
+      - cargo build --workspace --release --offline
+      # Install binaries
+      - install -Dm755 target/release/glowberry /app/bin/glowberry
+      - install -Dm755 target/release/glowberry-settings /app/bin/glowberry-settings
+      # Install desktop entries
+      - install -Dm644 data/io.github.hojjatabdollahi.glowberry.desktop /app/share/applications/io.github.hojjatabdollahi.glowberry.desktop
+      - install -Dm644 apps/glowberry-settings/data/io.github.hojjatabdollahi.glowberry-settings.desktop /app/share/applications/io.github.hojjatabdollahi.glowberry-settings.desktop
+      # Install metainfo
+      - install -Dm644 data/io.github.hojjatabdollahi.glowberry.metainfo.xml /app/share/metainfo/io.github.hojjatabdollahi.glowberry.metainfo.xml
+      # Install icons (daemon)
+      - install -Dm644 data/icons/io.github.hojjatabdollahi.glowberry.svg /app/share/icons/hicolor/scalable/apps/io.github.hojjatabdollahi.glowberry.svg
+      - install -Dm644 data/icons/io.github.hojjatabdollahi.glowberry-symbolic.svg /app/share/icons/hicolor/symbolic/apps/io.github.hojjatabdollahi.glowberry-symbolic.svg
+      # Install icons (settings app)
+      - install -Dm644 apps/glowberry-settings/data/icons/io.github.hojjatabdollahi.glowberry-settings.svg /app/share/icons/hicolor/scalable/apps/io.github.hojjatabdollahi.glowberry-settings.svg
+      - install -Dm644 apps/glowberry-settings/data/icons/io.github.hojjatabdollahi.glowberry-settings-symbolic.svg /app/share/icons/hicolor/symbolic/apps/io.github.hojjatabdollahi.glowberry-settings-symbolic.svg
+      # Install bundled shaders
+      - install -d /app/share/glowberry/shaders
+      - install -Dm644 examples/*.wgsl /app/share/glowberry/shaders/
+      # Install COSMIC config schema defaults
+      - cd data && find v1 -type f -exec install -Dm644 {} /app/share/cosmic/io.github.hojjatabdollahi.glowberry/{} \;
+    sources:
+      - type: dir
+        path: ..
+      - cargo-sources.json
