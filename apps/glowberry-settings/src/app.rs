@@ -819,9 +819,13 @@ impl cosmic::Application for GlowBerrySettings {
                 if granted {
                     self.permission_state = PermissionState::Granted;
                 } else {
-                    // Re-check: the user may have clicked "Deny" (permanent)
-                    // or just closed the dialog
-                    self.permission_state = PermissionState::Denied;
+                    // Re-check the actual state — the portal call may have
+                    // failed for a non-denial reason (timeout, parse error).
+                    // The permission may still have been granted.
+                    self.permission_state = PermissionState::Checking;
+                    return Task::perform(check_wayland_permission(), |status| {
+                        cosmic::Action::App(Message::PermissionChecked(status))
+                    });
                 }
             }
 
@@ -2212,8 +2216,10 @@ async fn request_wayland_permission() -> bool {
     {
         Ok(reply) => {
             // PortalResponse is (u32, a{sv}) — 0 = success
-            let response: Result<(u32, zbus::zvariant::OwnedValue), _> =
-                reply.body().deserialize();
+            let response: Result<
+                (u32, HashMap<String, zbus::zvariant::OwnedValue>),
+                _,
+            > = reply.body().deserialize();
             match response {
                 Ok((0, _)) => true,
                 Ok((code, _)) => {
