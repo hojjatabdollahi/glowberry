@@ -45,6 +45,32 @@ pub enum ContextPage {
     About,
 }
 
+/// Flatpak app ID used for permission checks (the daemon runs under this ID).
+const FLATPAK_APP_ID: &str = "io.github.hojjatabdollahi.glowberry";
+
+/// The Wayland global that the daemon needs permission for.
+const REQUIRED_GLOBAL: &str = "zwlr_layer_shell_v1";
+
+/// Tracks whether the daemon has the Wayland permissions it needs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PermissionState {
+    /// Not running in a Flatpak — no permission needed.
+    #[default]
+    NotApplicable,
+    /// Checking permission status via D-Bus.
+    Checking,
+    /// Permission has been granted.
+    Granted,
+    /// Permission has not been decided yet ("unknown").
+    NeedsPermission,
+    /// Permission was permanently denied.
+    Denied,
+    /// User dismissed the dialog with "Continue Anyway".
+    Dismissed,
+    /// Portal permission dialog is currently open.
+    Requesting,
+}
+
 /// Main application state
 pub struct GlowBerrySettings {
     core: Core,
@@ -115,6 +141,9 @@ pub struct GlowBerrySettings {
 
     /// Window background opacity (0.0 = transparent, 1.0 = opaque)
     window_opacity: f32,
+
+    /// Wayland permission state (only relevant when running in Flatpak)
+    permission_state: PermissionState,
 }
 
 /// Information about an available shader
@@ -215,6 +244,16 @@ pub enum Message {
     SetWindowOpacity(f32),
     /// Window opacity slider released (save to config)
     WindowOpacityReleased,
+
+    // Permission messages (Flatpak only)
+    /// D-Bus permission check completed: "granted", "denied", or "unknown"
+    PermissionChecked(String),
+    /// User clicked "Request Permission" button
+    RequestPermission,
+    /// Portal permission request completed (true = granted)
+    PermissionRequestResult(bool),
+    /// User clicked "Continue Anyway" to dismiss the dialog
+    DismissPermissionDialog,
 }
 
 /// Default colors available in the color picker
@@ -359,6 +398,7 @@ impl cosmic::Application for GlowBerrySettings {
             ],
             selected_low_battery_threshold: 1, // 20% default
             window_opacity: 1.0,               // Will be set below from config
+            permission_state: PermissionState::default(),
         };
 
         // Load prefer_low_power, power saving, and window opacity from config
@@ -400,7 +440,17 @@ impl cosmic::Application for GlowBerrySettings {
             Task::none()
         };
 
-        (app, Task::batch([title_task, shader_task]))
+        // Check Wayland permission if running in a Flatpak
+        let permission_task = if std::path::Path::new("/.flatpak-info").exists() {
+            app.permission_state = PermissionState::Checking;
+            Task::perform(check_wayland_permission(), |status| {
+                cosmic::Action::App(Message::PermissionChecked(status))
+            })
+        } else {
+            Task::none()
+        };
+
+        (app, Task::batch([title_task, shader_task, permission_task]))
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -748,13 +798,58 @@ impl cosmic::Application for GlowBerrySettings {
                     let _ = ctx.set_window_opacity(self.window_opacity);
                 }
             }
+
+            Message::PermissionChecked(status) => {
+                self.permission_state = match status.as_str() {
+                    "granted" => PermissionState::Granted,
+                    "denied" => PermissionState::Denied,
+                    _ => PermissionState::NeedsPermission,
+                };
+            }
+
+            Message::RequestPermission => {
+                self.permission_state = PermissionState::Requesting;
+                return Task::perform(
+                    request_wayland_permission(),
+                    |granted| cosmic::Action::App(Message::PermissionRequestResult(granted)),
+                );
+            }
+
+            Message::PermissionRequestResult(granted) => {
+                if granted {
+                    self.permission_state = PermissionState::Granted;
+                } else {
+                    // Re-check: the user may have clicked "Deny" (permanent)
+                    // or just closed the dialog
+                    self.permission_state = PermissionState::Denied;
+                }
+            }
+
+            Message::DismissPermissionDialog => {
+                self.permission_state = PermissionState::Dismissed;
+            }
         }
 
         Task::none()
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
+        // Show permission dialog overlay when needed
+        match self.permission_state {
+            PermissionState::NeedsPermission
+            | PermissionState::Denied
+            | PermissionState::Requesting => {
+                return self.view_permission_dialog();
+            }
+            _ => {}
+        }
+
         let mut children: Vec<Element<'_, Message>> = Vec::with_capacity(6);
+
+        // Permission warning banner (shown after dismissing the dialog)
+        if self.permission_state == PermissionState::Dismissed {
+            children.push(self.view_permission_banner());
+        }
 
         // 1. Display preview (centered)
         children.push(
@@ -896,6 +991,93 @@ impl cosmic::Application for GlowBerrySettings {
 }
 
 impl GlowBerrySettings {
+    /// Permission dialog shown when the Flatpak hasn't been granted layer-shell access.
+    fn view_permission_dialog(&self) -> Element<'_, Message> {
+        use cosmic::iced::widget::column;
+
+        let is_denied = self.permission_state == PermissionState::Denied;
+        let is_requesting = self.permission_state == PermissionState::Requesting;
+
+        let title = if is_denied {
+            fl!("permission-denied-title")
+        } else {
+            fl!("permission-needed-title")
+        };
+
+        let body = if is_denied {
+            fl!("permission-denied-body")
+        } else {
+            fl!("permission-needed-body")
+        };
+
+        let mut content: Vec<Element<'_, Message>> = vec![text(body).into()];
+
+        if is_denied {
+            content.push(text(fl!("permission-denied-hint")).into());
+        }
+
+        let request_btn = if is_requesting {
+            button::text(fl!("permission-requesting"))
+        } else {
+            button::text(fl!("permission-request-btn"))
+                .on_press(Message::RequestPermission)
+                .class(cosmic::theme::Button::Suggested)
+        };
+
+        let dismiss_btn =
+            button::text(fl!("permission-continue-btn")).on_press(Message::DismissPermissionDialog);
+
+        let dialog = widget::dialog()
+            .title(title)
+            .control(column(content).spacing(12))
+            .primary_action(request_btn)
+            .secondary_action(dismiss_btn);
+
+        container(dialog)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .padding(40)
+            .into()
+    }
+
+    /// Small warning banner shown after the user dismisses the permission dialog.
+    fn view_permission_banner(&self) -> Element<'_, Message> {
+        use cosmic::iced::widget::row;
+
+        let warning = row![
+            widget::icon::from_name("dialog-warning-symbolic").size(16),
+            text(fl!("permission-banner")),
+            button::text(fl!("permission-request-btn"))
+                .on_press(Message::RequestPermission)
+                .class(cosmic::theme::Button::Suggested),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        container(warning)
+            .width(Length::Fill)
+            .padding([8, 16])
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                cosmic::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(
+                        cosmic::iced::Color::from_rgba8(255, 170, 0, 0.15),
+                    )),
+                    icon_color: Some(cosmic::iced::Color::from_rgba8(255, 170, 0, 1.0)),
+                    text_color: Some(cosmic.background.on.into()),
+                    border: cosmic::iced::Border {
+                        color: cosmic::iced::Color::from_rgba8(255, 170, 0, 0.4),
+                        width: 1.0,
+                        radius: 8.0.into(),
+                    },
+                    shadow: cosmic::iced::Shadow::default(),
+                }
+            }))
+            .into()
+    }
+
     /// Build the settings drawer content
     fn settings_drawer_view(&self) -> Element<'_, Message> {
         // Build power saving section
@@ -1970,4 +2152,83 @@ async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
     }
 
     Ok(enable)
+}
+
+/// Check whether the compositor has granted layer-shell permission to the Flatpak app.
+/// Returns "granted", "denied", or "unknown".
+async fn check_wayland_permission() -> String {
+    let conn = match zbus::Connection::session().await {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(?err, "Failed to connect to session bus for permission check");
+            return "unknown".to_string();
+        }
+    };
+    match conn
+        .call_method(
+            Some("com.system76.CosmicCompositor"),
+            "/com/system76/CosmicCompositor",
+            Some("com.system76.CosmicCompositor.WaylandPermissions"),
+            "Check",
+            &(FLATPAK_APP_ID, REQUIRED_GLOBAL),
+        )
+        .await
+    {
+        Ok(reply) => reply
+            .body()
+            .deserialize()
+            .unwrap_or_else(|_| "unknown".to_string()),
+        Err(err) => {
+            tracing::warn!(?err, "Failed to check wayland permission via D-Bus");
+            "unknown".to_string()
+        }
+    }
+}
+
+/// Request Wayland access via the COSMIC portal's consent dialog.
+/// Returns `true` if permission was granted.
+async fn request_wayland_permission() -> bool {
+    let conn = match zbus::Connection::session().await {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(?err, "Failed to connect to session bus for permission request");
+            return false;
+        }
+    };
+    // Call the portal's RequestAccess method, which shows the consent dialog
+    match conn
+        .call_method(
+            Some("org.freedesktop.impl.portal.desktop.cosmic"),
+            "/org/freedesktop/portal/desktop",
+            Some("com.system76.CosmicPortal.WaylandAccess"),
+            "RequestAccess",
+            &(
+                FLATPAK_APP_ID,
+                vec![REQUIRED_GLOBAL],
+                "GlowBerry needs to create desktop overlays for live wallpapers",
+            ),
+        )
+        .await
+    {
+        Ok(reply) => {
+            // PortalResponse is (u32, a{sv}) — 0 = success
+            let response: Result<(u32, zbus::zvariant::OwnedValue), _> =
+                reply.body().deserialize();
+            match response {
+                Ok((0, _)) => true,
+                Ok((code, _)) => {
+                    tracing::debug!("Portal returned non-success code: {code}");
+                    false
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "Failed to parse portal response");
+                    false
+                }
+            }
+        }
+        Err(err) => {
+            tracing::error!(?err, "Failed to request wayland permission via portal");
+            false
+        }
+    }
 }

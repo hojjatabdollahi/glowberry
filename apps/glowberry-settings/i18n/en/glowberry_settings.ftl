@@ -73,3 +73,14 @@ about = About
 
 # Display selection
 all-displays = All Displays
+
+# Permission dialog (Flatpak)
+permission-needed-title = Wayland Permission Required
+permission-needed-body = GlowBerry needs permission to create desktop overlays for live wallpapers. Without this, the background daemon cannot display wallpapers.
+permission-denied-title = Wayland Permission Denied
+permission-denied-body = Wayland overlay access was permanently denied. The background daemon cannot display wallpapers without this permission.
+permission-denied-hint = You can reset this by revoking the permission in your compositor settings.
+permission-request-btn = Request Permission
+permission-requesting = Requesting…
+permission-continue-btn = Continue Anyway
+permission-banner = Wayland permission not granted — live wallpapers will not work.

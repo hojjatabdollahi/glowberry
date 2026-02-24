@@ -53,6 +53,9 @@ dirs = "5"
 xdg = "3"
 infer = "0.19"
 
+# D-Bus (for permission checks)
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
 # Utilities
 tracing = "0.1"
 tracing-subscriber = "0.3"
