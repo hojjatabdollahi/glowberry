@@ -254,6 +254,8 @@ pub enum Message {
     PermissionRequestResult(bool),
     /// User clicked "Continue Anyway" to dismiss the dialog
     DismissPermissionDialog,
+    /// Result of attempting to start the glowberry daemon
+    DaemonStartResult(Result<(), String>),
 }
 
 /// Default colors available in the color picker
@@ -805,6 +807,11 @@ impl cosmic::Application for GlowBerrySettings {
                     "denied" => PermissionState::Denied,
                     _ => PermissionState::NeedsPermission,
                 };
+                if self.permission_state == PermissionState::Granted {
+                    return Task::perform(ensure_daemon_running(), |result| {
+                        cosmic::Action::App(Message::DaemonStartResult(result))
+                    });
+                }
             }
 
             Message::RequestPermission => {
@@ -818,6 +825,9 @@ impl cosmic::Application for GlowBerrySettings {
             Message::PermissionRequestResult(granted) => {
                 if granted {
                     self.permission_state = PermissionState::Granted;
+                    return Task::perform(ensure_daemon_running(), |result| {
+                        cosmic::Action::App(Message::DaemonStartResult(result))
+                    });
                 } else {
                     // Re-check the actual state — the portal call may have
                     // failed for a non-denial reason (timeout, parse error).
@@ -831,6 +841,13 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::DismissPermissionDialog => {
                 self.permission_state = PermissionState::Dismissed;
+            }
+
+            Message::DaemonStartResult(result) => {
+                match &result {
+                    Ok(()) => tracing::info!("GlowBerry daemon started successfully"),
+                    Err(e) => tracing::warn!("Failed to start GlowBerry daemon: {e}"),
+                }
             }
         }
 
@@ -927,22 +944,10 @@ impl cosmic::Application for GlowBerrySettings {
         .height(Length::Fill);
 
         // Apply custom background with opacity
-        let opacity = self.window_opacity;
         container(scrollable_content)
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(cosmic::theme::Container::custom(move |theme| {
-                let cosmic = theme.cosmic();
-                let mut bg_color: cosmic::iced::Color = cosmic.background.base.into();
-                bg_color.a = opacity;
-                cosmic::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(bg_color)),
-                    icon_color: Some(cosmic.background.on.into()),
-                    text_color: Some(cosmic.background.on.into()),
-                    border: cosmic::iced::Border::default(),
-                    shadow: cosmic::iced::Shadow::default(),
-                }
-            }))
+            .class(Self::opacity_background_class(self.window_opacity))
             .into()
     }
 
@@ -995,6 +1000,23 @@ impl cosmic::Application for GlowBerrySettings {
 }
 
 impl GlowBerrySettings {
+    /// Container style that applies the window background color with configurable opacity.
+    /// Used by both the main view and the permission dialog to get a consistent appearance.
+    fn opacity_background_class(opacity: f32) -> cosmic::theme::Container<'static> {
+        cosmic::theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            let mut bg_color: cosmic::iced::Color = cosmic.background.base.into();
+            bg_color.a = opacity;
+            cosmic::widget::container::Style {
+                background: Some(cosmic::iced::Background::Color(bg_color)),
+                icon_color: Some(cosmic.background.on.into()),
+                text_color: Some(cosmic.background.on.into()),
+                border: cosmic::iced::Border::default(),
+                shadow: cosmic::iced::Shadow::default(),
+            }
+        })
+    }
+
     /// Permission dialog shown when the Flatpak hasn't been granted layer-shell access.
     fn view_permission_dialog(&self) -> Element<'_, Message> {
         use cosmic::iced::widget::column;
@@ -1037,12 +1059,18 @@ impl GlowBerrySettings {
             .primary_action(request_btn)
             .secondary_action(dismiss_btn);
 
-        container(dialog)
+        let dialog_container = container(dialog)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Alignment::Center)
             .align_y(Alignment::Center)
-            .padding(40)
+            .padding(40);
+
+        // Apply the same opacity background as the main view
+        container(dialog_container)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .class(Self::opacity_background_class(self.window_opacity))
             .into()
     }
 
@@ -2237,4 +2265,64 @@ async fn request_wayland_permission() -> bool {
             false
         }
     }
+}
+
+/// Ensure the glowberry daemon is running. If not, spawn it.
+///
+/// This is called after permission is granted in a Flatpak environment.
+/// The daemon needs to be running to render wallpapers once it has layer-shell access.
+///
+/// Note: This uses blocking `/proc` reads, but they're effectively instantaneous on Linux.
+/// It runs inside `Task::perform` which executes on a background thread.
+async fn ensure_daemon_running() -> Result<(), String> {
+    use std::process::Command;
+
+    // Check if the daemon is already running by scanning /proc.
+    // We avoid pgrep since it may not be available in all Flatpak runtimes.
+    let already_running = std::fs::read_dir("/proc")
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|entry| {
+                // Only check numeric directories (PIDs)
+                let name = entry.file_name();
+                if !name.to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
+                    return false;
+                }
+                // Read the comm file to get the process name (max 15 chars).
+                // "glowberry" is 9 chars so it won't be truncated.
+                // "glowberry-settings" would appear as "glowberry-setti" — no false match.
+                let comm_path = entry.path().join("comm");
+                std::fs::read_to_string(comm_path)
+                    .map(|comm| comm.trim() == "glowberry")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or_else(|e| {
+            tracing::debug!("Cannot read /proc, assuming daemon not running: {e}");
+            false
+        });
+
+    if already_running {
+        tracing::info!("GlowBerry daemon is already running");
+        return Ok(());
+    }
+
+    tracing::info!("Starting GlowBerry daemon after permission grant");
+
+    // Spawn the daemon as a detached process with null stdio.
+    let child = Command::new("glowberry")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn glowberry daemon: {e}"))?;
+
+    // Reap the child in a background thread to prevent zombie processes.
+    // The daemon is long-running so this thread will block until the daemon exits,
+    // but it consumes minimal resources.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+
+    Ok(())
 }
