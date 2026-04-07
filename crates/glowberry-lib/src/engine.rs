@@ -872,7 +872,9 @@ impl GlowBerry {
                 canvas.update_resolution(gpu.queue(), physical_width, physical_height);
 
                 // Render the first frame immediately to avoid showing default wallpaper
-                if let wgpu::CurrentSurfaceTexture::Success(surface_texture) = surface.get_current_texture() {
+                if let wgpu::CurrentSurfaceTexture::Success(surface_texture) =
+                    surface.get_current_texture()
+                {
                     let view = surface_texture
                         .texture
                         .create_view(&wgpu::TextureViewDescriptor::default());

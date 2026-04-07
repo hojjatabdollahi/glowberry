@@ -32,43 +32,46 @@ pub fn wallpapers(current_dir: PathBuf) -> Subscription<WallpaperEvent> {
 }
 
 fn async_stream(current_dir: &PathBuf) -> Pin<Box<dyn Send + Stream<Item = WallpaperEvent>>> {
-    Box::pin(futures_lite::stream::unfold(LoadState::Init(current_dir.clone()), |state| async move {
-        match state {
-            LoadState::Init(path) => Some((WallpaperEvent::Loading, LoadState::Loading(path))),
-            LoadState::Loading(path) => {
-                let stream = load_wallpapers_from_path(path).await;
-                // Get first item or signal done
-                let mut stream = stream;
-                if let Some((path, display, selection)) = stream.next().await {
-                    Some((
-                        WallpaperEvent::Load {
-                            path,
-                            display,
-                            selection,
-                        },
-                        LoadState::Streaming(stream),
-                    ))
-                } else {
-                    Some((WallpaperEvent::Loaded, LoadState::Done))
+    Box::pin(futures_lite::stream::unfold(
+        LoadState::Init(current_dir.clone()),
+        |state| async move {
+            match state {
+                LoadState::Init(path) => Some((WallpaperEvent::Loading, LoadState::Loading(path))),
+                LoadState::Loading(path) => {
+                    let stream = load_wallpapers_from_path(path).await;
+                    // Get first item or signal done
+                    let mut stream = stream;
+                    if let Some((path, display, selection)) = stream.next().await {
+                        Some((
+                            WallpaperEvent::Load {
+                                path,
+                                display,
+                                selection,
+                            },
+                            LoadState::Streaming(stream),
+                        ))
+                    } else {
+                        Some((WallpaperEvent::Loaded, LoadState::Done))
+                    }
                 }
-            }
-            LoadState::Streaming(mut stream) => {
-                if let Some((path, display, selection)) = stream.next().await {
-                    Some((
-                        WallpaperEvent::Load {
-                            path,
-                            display,
-                            selection,
-                        },
-                        LoadState::Streaming(stream),
-                    ))
-                } else {
-                    Some((WallpaperEvent::Loaded, LoadState::Done))
+                LoadState::Streaming(mut stream) => {
+                    if let Some((path, display, selection)) = stream.next().await {
+                        Some((
+                            WallpaperEvent::Load {
+                                path,
+                                display,
+                                selection,
+                            },
+                            LoadState::Streaming(stream),
+                        ))
+                    } else {
+                        Some((WallpaperEvent::Loaded, LoadState::Done))
+                    }
                 }
+                LoadState::Done => None,
             }
-            LoadState::Done => None,
-        }
-    }))
+        },
+    ))
 }
 
 enum LoadState {
