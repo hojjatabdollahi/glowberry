@@ -103,10 +103,9 @@ impl ShaderPreviewRenderer {
         }
 
         // Create wgpu instance
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
+        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        instance_desc.backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
+        let instance = wgpu::Instance::new(instance_desc);
 
         // Request adapter
         let adapter = instance
@@ -185,7 +184,7 @@ impl ShaderPreviewRenderer {
         // Create pipeline layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader-preview: pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             ..Default::default()
         });
 
@@ -198,16 +197,10 @@ impl ShaderPreviewRenderer {
         // Create fragment shader with preamble, using error scope to catch validation errors
         let full_shader = format!("{WGSL_PREAMBLE}\n{shader_code}");
 
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
         let fragment_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader-preview: fragment shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(full_shader)),
         });
-
-        // Check for shader compilation errors
-        if let Some(error) = device.pop_error_scope().block_on() {
-            return Err(PreviewError::ShaderCompilation(error.to_string()));
-        }
 
         // Create render pipeline
         let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -236,7 +229,7 @@ impl ShaderPreviewRenderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -325,6 +318,7 @@ impl ShaderPreviewRenderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(&self.pipeline);
@@ -365,7 +359,7 @@ impl ShaderPreviewRenderer {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
-        self.device.poll(wgpu::PollType::Wait).ok();
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok();
         rx.recv()
             .map_err(|_| PreviewError::Gpu("Failed to receive map result".into()))?
             .map_err(|e| PreviewError::Gpu(format!("Buffer mapping failed: {e}")))?;

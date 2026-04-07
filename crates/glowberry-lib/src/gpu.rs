@@ -28,10 +28,9 @@ impl GpuRenderer {
     ///
     /// Panics if no suitable GPU adapter is found.
     pub fn new() -> Self {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
+        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        instance_desc.backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
+        let instance = wgpu::Instance::new(instance_desc);
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -85,7 +84,7 @@ impl GpuRenderer {
         unsafe {
             self.instance
                 .create_surface_unsafe(SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle,
+                    raw_display_handle: Some(raw_display_handle),
                     raw_window_handle,
                 })
                 .expect("Failed to create GPU surface")

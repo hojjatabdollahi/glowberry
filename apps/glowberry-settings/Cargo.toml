@@ -31,7 +31,7 @@ cosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", d
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "fs"] }
 
 # GPU rendering for shader previews
-wgpu = { version = "26.0", default-features = false, features = [
+wgpu = { version = "29.0", default-features = false, features = [
   "vulkan",
   "wgsl",
 ] }
@@ -44,12 +44,12 @@ image = { version = "0.25", default-features = false, features = [
   "jpeg",
   "webp",
 ] }
-fast_image_resize = { version = "5.1", features = ["image"] }
+fast_image_resize = { version = "6.0", features = ["image"] }
 jxl-oxide = { version = "0.12", features = ["image"] }
 
 # File system
 walkdir = "2.5"
-dirs = "5"
+dirs = "6"
 xdg = "3"
 infer = "0.19"
 
