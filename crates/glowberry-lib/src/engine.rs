@@ -872,7 +872,9 @@ impl GlowBerry {
                 canvas.update_resolution(gpu.queue(), physical_width, physical_height);
 
                 // Render the first frame immediately to avoid showing default wallpaper
-                if let Ok(surface_texture) = surface.get_current_texture() {
+                if let wgpu::CurrentSurfaceTexture::Success(surface_texture) =
+                    surface.get_current_texture()
+                {
                     let view = surface_texture
                         .texture
                         .create_view(&wgpu::TextureViewDescriptor::default());
@@ -983,7 +985,8 @@ impl CompositorHandler for GlowBerry {
                             if let Some(gpu) = &self.gpu_renderer {
                                 // Get current texture
                                 match gpu_state.surface.get_current_texture() {
-                                    Ok(surface_texture) => {
+                                    wgpu::CurrentSurfaceTexture::Success(surface_texture)
+                                    | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
                                         let view = surface_texture
                                             .texture
                                             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1013,12 +1016,11 @@ impl CompositorHandler for GlowBerry {
 
                                         gpu_state.canvas.mark_frame_rendered();
                                     }
-                                    Err(wgpu::SurfaceError::Timeout) => {
+                                    wgpu::CurrentSurfaceTexture::Timeout => {
                                         tracing::warn!("GPU surface timeout");
                                     }
-                                    Err(
-                                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated,
-                                    ) => {
+                                    wgpu::CurrentSurfaceTexture::Lost
+                                    | wgpu::CurrentSurfaceTexture::Outdated => {
                                         let width = gpu_state.surface_config.width;
                                         let height = gpu_state.surface_config.height;
                                         gpu_state.surface_config = gpu.configure_surface(
@@ -1035,11 +1037,8 @@ impl CompositorHandler for GlowBerry {
                                             "GPU surface lost or outdated; reconfigured surface"
                                         );
                                     }
-                                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                                        tracing::error!("GPU out of memory");
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(?err, "GPU surface error");
+                                    other => {
+                                        tracing::warn!(?other, "GPU surface error");
                                     }
                                 }
                             }

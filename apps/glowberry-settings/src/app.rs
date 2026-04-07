@@ -807,7 +807,7 @@ impl cosmic::Application for GlowBerrySettings {
             Some(Category::Wallpapers) => self.view_wallpaper_grid(),
             Some(Category::Colors) => self.view_color_grid(),
             Some(Category::Shaders) => self.view_shader_grid(),
-            None => widget::Space::new(0, 0).into(),
+            None => widget::Space::new().into(),
         };
         children.push(
             container(grid)
@@ -842,6 +842,7 @@ impl cosmic::Application for GlowBerrySettings {
                     text_color: Some(cosmic.background.on.into()),
                     border: cosmic::iced::Border::default(),
                     shadow: cosmic::iced::Shadow::default(),
+                    snap: false,
                 }
             }))
             .into()
@@ -881,13 +882,13 @@ impl cosmic::Application for GlowBerrySettings {
         })
     }
 
-    fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
         // Return transparent background for the window surface
         // The actual background with opacity is applied via our custom container in view()
         let theme = cosmic::theme::active();
         let cosmic_theme = theme.cosmic();
 
-        Some(cosmic::iced_runtime::Appearance {
+        Some(cosmic::iced::theme::Style {
             background_color: cosmic::iced::Color::TRANSPARENT,
             text_color: cosmic_theme.on_bg_color().into(),
             icon_color: cosmic_theme.on_bg_color().into(),
@@ -1371,6 +1372,7 @@ impl GlowBerrySettings {
                         ..Default::default()
                     },
                     shadow: cosmic::iced::Shadow::default(),
+                    snap: false,
                 }
             }))
             .width(Length::Shrink)
@@ -1582,6 +1584,7 @@ impl GlowBerrySettings {
                     ..Default::default()
                 },
                 shadow: cosmic::iced::Shadow::default(),
+                snap: false,
             }
         }))
         .into()
@@ -1692,7 +1695,7 @@ impl GlowBerrySettings {
 fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, M> {
     use cosmic::iced_core::{Background, Degrees, gradient::Linear};
 
-    container(widget::Space::new(width, height))
+    container(widget::Space::new().width(width).height(height))
         .class(cosmic::theme::Container::custom(move |theme| {
             container::Style {
                 background: Some(match &color {
@@ -1723,7 +1726,7 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
 fn shader_placeholder<'a, M: 'a>(width: u16, height: u16) -> Element<'a, M> {
     use cosmic::iced_core::{Background, Degrees, gradient::Linear};
 
-    container(widget::Space::new(width, height))
+    container(widget::Space::new().width(width).height(height))
         .class(cosmic::theme::Container::custom(|_| container::Style {
             background: Some(Background::Gradient(cosmic::iced_core::Gradient::Linear(
                 Linear::new(Degrees(135.0))

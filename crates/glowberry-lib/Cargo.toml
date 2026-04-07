@@ -8,24 +8,29 @@ license = "MPL-2.0"
 [dependencies]
 colorgrad = { workspace = true }
 glowberry-config = { path = "../../config" }
-cosmic-config = { git = "https://github.com/pop-os/libcosmic", features = ["calloop"] }
+cosmic-config = { git = "https://github.com/pop-os/libcosmic", features = [
+  "calloop",
+] }
 calloop = "0.14"
 eyre = "0.6.12"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
 futures = "0.3"
-fast_image_resize = { version = "5.1.4", features = ["image"] }
+fast_image_resize = { version = "6.0.0", features = ["image"] }
 image = { workspace = true, features = ["hdr", "jpeg", "png", "rayon", "webp"] }
 jxl-oxide = { version = "0.12.4", features = ["image"] }
 notify = "8.2.0"
 pollster = "0.4"
-rand = "0.9.2"
+rand = "0.10.0"
 raw-window-handle = "0.6"
 sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
 tracing = { workspace = true }
 walkdir = "2.5"
 wayland-backend = "0.3"
-wgpu = { version = "26.0", default-features = false, features = ["vulkan", "wgsl"] }
-naga = { version = "26.0", features = ["wgsl-in"] }
+wgpu = { version = "29.0", default-features = false, features = [
+  "vulkan",
+  "wgsl",
+] }
+naga = { version = "29.0", features = ["wgsl-in"] }
 bytemuck = "1.24"
 thiserror = "2"
