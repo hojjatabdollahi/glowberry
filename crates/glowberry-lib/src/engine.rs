@@ -3,11 +3,10 @@
 use crate::{
     fragment_canvas, gpu, img_source,
     upower::{PowerMonitorHandle, PowerStateChanged, start_power_monitor},
-    user_context::{EnvGuard, UserContext},
     wallpaper::Wallpaper,
 };
 use cosmic_config::{CosmicConfigEntry, calloop::ConfigWatchSource};
-use eyre::{Context, eyre};
+use eyre::Context;
 use glowberry_config::{
     Config,
     power_saving::{OnBatteryAction, PowerSavingConfig},
@@ -46,7 +45,6 @@ use sctk::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
-use std::thread;
 use tracing::error;
 
 /// Access glibc malloc tunables.
@@ -110,14 +108,6 @@ pub struct BackgroundEngine;
 impl BackgroundEngine {
     #[allow(clippy::too_many_lines)]
     pub fn run(config: EngineConfig) -> eyre::Result<()> {
-        Self::run_with_stop(config, None)
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn run_with_stop(
-        config: EngineConfig,
-        stop_rx: Option<calloop::channel::Channel<()>>,
-    ) -> eyre::Result<()> {
         if !config.enable_wayland {
             return Ok(());
         }
@@ -142,17 +132,6 @@ impl BackgroundEngine {
             .insert(event_loop.handle())
             .map_err(|err| err.error)
             .wrap_err("failed to insert main EventLoop into WaylandSource")?;
-
-        if let Some(stop_rx) = stop_rx {
-            event_loop
-                .handle()
-                .insert_source(stop_rx, |event, _, state| match event {
-                    calloop::channel::Event::Msg(()) | calloop::channel::Event::Closed => {
-                        state.exit = true;
-                    }
-                })
-                .map_err(|err| eyre!("failed to insert stop channel into event loop: {err}"))?;
-        }
 
         let config_context = glowberry_config::context();
 
@@ -305,7 +284,6 @@ impl BackgroundEngine {
                             }
                         }
                         w.image_queue.retain(|p| !event.paths.contains(p));
-                        // TODO maybe resort or shuffle at some point?
                     }
                 }
                 notify::EventKind::Remove(_)
@@ -403,44 +381,6 @@ impl BackgroundEngine {
     }
 }
 
-pub struct BackgroundHandle {
-    stop_tx: calloop::channel::Sender<()>,
-    join: Option<thread::JoinHandle<()>>,
-    env_guard: Option<EnvGuard>,
-}
-
-impl BackgroundHandle {
-    pub fn spawn(user: UserContext, config: EngineConfig) -> Self {
-        // Environment variables are process-wide, so keep the guard for the handle lifetime.
-        let env_guard = user.apply();
-        let (stop_tx, stop_rx) = calloop::channel::channel();
-        let join = thread::spawn(move || {
-            if let Err(err) = BackgroundEngine::run_with_stop(config, Some(stop_rx)) {
-                tracing::error!(?err, "background engine exited with error");
-            }
-        });
-
-        Self {
-            stop_tx,
-            join: Some(join),
-            env_guard: Some(env_guard),
-        }
-    }
-
-    pub fn stop(&mut self) {
-        let _ = self.stop_tx.send(());
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-        self.env_guard.take();
-    }
-}
-
-impl Drop for BackgroundHandle {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
 
 #[derive(Debug)]
 pub struct GlowBerryLayer {
@@ -1069,7 +1009,6 @@ impl CompositorHandler for GlowBerry {
         _surface: &wl_surface::WlSurface,
         _new_transform: wl_output::Transform,
     ) {
-        // TODO
     }
 
     fn surface_enter(

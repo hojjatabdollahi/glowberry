@@ -26,9 +26,6 @@ use std::{
 use tracing::error;
 use walkdir::WalkDir;
 
-// TODO filter images by whether they seem to match dark / light mode
-// Alternatively only load from light / dark subdirectories given a directory source when this is active
-
 #[derive(Debug)]
 pub struct Wallpaper {
     pub entry: Entry,

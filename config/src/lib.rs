@@ -282,7 +282,6 @@ pub enum SamplingMethod {
     Alphanumeric,
     // Rotate through images in Random order
     Random,
-    // TODO GnomeWallpapers
 }
 
 /// Image scaling mode

@@ -17,7 +17,7 @@ use cosmic_config::CosmicConfigEntry;
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use glowberry_config::state::State;
 use glowberry_config::{Color, Config, Context as ConfigContext, Entry, Gradient, Source};
-use glowberry_lib::shader_analysis::{self, Complexity};
+use crate::shader_analysis::{self, Complexity};
 use image::{ImageBuffer, Rgba};
 use slotmap::{DefaultKey, SecondaryMap, SlotMap};
 use std::borrow::Cow;
@@ -556,9 +556,6 @@ impl cosmic::Application for GlowBerrySettings {
                     if matches!(self.selection.active, Choice::Wallpaper(_)) {
                         self.cache_display_image();
                     }
-                }
-                WallpaperEvent::Error(e) => {
-                    tracing::error!("Wallpaper loading error: {}", e);
                 }
             },
 

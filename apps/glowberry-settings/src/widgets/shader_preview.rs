@@ -70,6 +70,7 @@ impl From<std::io::Error> for PreviewError {
 }
 
 /// Shader preview renderer that renders shaders to RGBA pixel data.
+#[allow(dead_code)] // resolution_buffer is read by the GPU, not Rust code
 pub struct ShaderPreviewRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,

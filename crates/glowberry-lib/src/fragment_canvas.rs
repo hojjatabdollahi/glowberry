@@ -66,15 +66,6 @@ pub enum ShaderError {
 }
 
 pub fn detect_language(source: &ShaderSource) -> ShaderLanguage {
-    if let ShaderContent::Path(path) = &source.shader {
-        if path
-            .extension()
-            .map_or(false, |ext| ext == "glsl" || ext == "frag")
-        {
-            return ShaderLanguage::Glsl;
-        }
-    }
-
     source.language
 }
 
@@ -113,18 +104,13 @@ fn build_shader_source(
     preamble: &str,
     shader_code: &str,
 ) -> Result<wgpu::ShaderSource<'static>, ShaderError> {
-    let full_shader = match language {
+    match language {
         ShaderLanguage::Wgsl => {
             let full_code = format!("{}\n{}", preamble, shader_code);
-            wgpu::ShaderSource::Wgsl(Cow::Owned(full_code))
+            Ok(wgpu::ShaderSource::Wgsl(Cow::Owned(full_code)))
         }
-        ShaderLanguage::Glsl => {
-            // GLSL would need translation to WGSL, which is not supported yet.
-            return Err(ShaderError::UnsupportedLanguage(ShaderLanguage::Glsl));
-        }
-    };
-
-    Ok(full_shader)
+        _ => Err(ShaderError::UnsupportedLanguage(language)),
+    }
 }
 
 /// A GPU-rendered fragment shader canvas for live wallpapers.
@@ -459,11 +445,6 @@ impl FragmentCanvas {
         self.configured_frame_rate
     }
 
-    /// Get the current effective frame rate.
-    pub fn current_frame_rate(&self) -> u8 {
-        (1.0 / self.frame_interval.as_secs_f64()).round() as u8
-    }
-
     /// Set a temporary frame rate override.
     /// Pass `None` to restore the configured frame rate.
     pub fn set_frame_rate_override(&mut self, frame_rate: Option<u8>) {
@@ -517,22 +498,6 @@ impl FragmentCanvas {
 
 #[cfg(test)]
 mod tests {
-    use glowberry_config::{ShaderContent, ShaderLanguage, ShaderSource};
-
-    #[test]
-    fn detects_glsl_language_for_frag_extension() {
-        let source = ShaderSource {
-            shader: ShaderContent::Path("/tmp/test.frag".into()),
-            source_path: None,
-            params: std::collections::HashMap::new(),
-            background_image: None,
-            language: ShaderLanguage::Wgsl,
-            frame_rate: 30,
-        };
-
-        assert_eq!(super::detect_language(&source), ShaderLanguage::Glsl);
-    }
-
     #[test]
     fn aligns_bytes_per_row_to_wgpu_requirement() {
         let bytes_per_pixel = 4;
@@ -553,17 +518,5 @@ mod tests {
         assert_eq!(bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         assert_eq!(rows_per_image, height);
         assert_eq!(upload_data.len(), (bytes_per_row * height) as usize);
-    }
-
-    #[test]
-    fn glsl_is_rejected_when_building_shader_source() {
-        let result = super::build_shader_source(ShaderLanguage::Glsl, "preamble", "void main(){}");
-
-        assert!(matches!(
-            result,
-            Err(super::ShaderError::UnsupportedLanguage(
-                ShaderLanguage::Glsl
-            ))
-        ));
     }
 }

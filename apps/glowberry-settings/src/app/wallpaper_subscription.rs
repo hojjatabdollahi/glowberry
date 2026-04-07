@@ -22,8 +22,6 @@ pub enum WallpaperEvent {
     },
     /// Finished loading wallpapers
     Loaded,
-    /// An error occurred
-    Error(String),
 }
 
 /// Create a subscription that loads wallpapers from the given directory

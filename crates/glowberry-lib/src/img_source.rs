@@ -16,9 +16,7 @@ where
             notify_rx,
             move |e: channel::Event<(String, Event)>, _, state| match e {
                 channel::Event::Msg((source, event)) => on_event(state, source, event),
-                channel::Event::Closed => {
-                    // TODO log drop
-                }
+                channel::Event::Closed => {}
             },
         )
         .map(|_| {})

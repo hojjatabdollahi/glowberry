@@ -11,7 +11,6 @@ pub fn fit(
     layer_width: u32,
     layer_height: u32,
 ) -> image::DynamicImage {
-    // TODO: convert color to the same format as the input image.
     let mut filled_image =
         image::ImageBuffer::from_pixel(layer_width, layer_height, *image::Rgb::from_slice(color));
 

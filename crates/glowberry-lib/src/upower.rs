@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use zbus::{Connection, proxy};
 
 /// Re-export calloop channel types for convenience.
-pub use calloop::channel::{Channel as CalloopChannel, Sender as CalloopSender};
+pub use calloop::channel::Sender as CalloopSender;
 
 /// UPower D-Bus proxy for the main UPower interface.
 #[proxy(
@@ -85,10 +85,6 @@ impl PowerMonitorHandle {
         *self.rx.borrow()
     }
 
-    /// Wait for the power state to change.
-    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
-        self.rx.changed().await
-    }
 }
 
 /// Message sent when power state changes.
@@ -98,7 +94,6 @@ pub struct PowerStateChanged;
 /// Power monitor that watches UPower D-Bus signals.
 pub struct PowerMonitor {
     tx: watch::Sender<PowerState>,
-    handle: PowerMonitorHandle,
     /// Optional sender to notify calloop when power state changes.
     notify_tx: Option<CalloopSender<PowerStateChanged>>,
 }
@@ -113,7 +108,6 @@ impl PowerMonitor {
         (
             Self {
                 tx,
-                handle: handle.clone(),
                 notify_tx: None,
             },
             handle,
@@ -125,11 +119,6 @@ impl PowerMonitor {
     pub fn with_notify(mut self, notify_tx: CalloopSender<PowerStateChanged>) -> Self {
         self.notify_tx = Some(notify_tx);
         self
-    }
-
-    /// Get a handle to query the current power state.
-    pub fn handle(&self) -> PowerMonitorHandle {
-        self.handle.clone()
     }
 
     /// Start monitoring power state changes.

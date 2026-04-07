@@ -15,17 +15,6 @@ pub enum Complexity {
     High,
 }
 
-impl Complexity {
-    /// Get a display string for the complexity level
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Complexity::Low => "Low",
-            Complexity::Medium => "Medium",
-            Complexity::High => "High",
-        }
-    }
-}
-
 /// Detailed metrics from shader analysis
 #[derive(Debug, Clone, Default)]
 pub struct ShaderMetrics {
@@ -275,14 +264,6 @@ fn analyze_statement(statement: &Statement, metrics: &mut ShaderMetrics, current
     }
 }
 
-/// Convenience function to get complexity level directly
-pub fn estimate_complexity(
-    wgsl_source: &str,
-    iteration_multiplier: Option<f32>,
-) -> Result<Complexity, String> {
-    analyze_shader(wgsl_source, iteration_multiplier).map(|m| m.complexity())
-}
-
 /// WGSL preamble for GlowBerry shaders (uniforms only, no texture)
 const GLOWBERRY_PREAMBLE: &str = r#"
 @group(0) @binding(0) var<uniform> iResolution: vec2f;
@@ -320,18 +301,6 @@ pub fn analyze_glowberry_shader(
 
     let full_source = format!("{preamble}\n{shader_body}");
     analyze_shader(&full_source, iteration_multiplier)
-}
-
-/// Estimate complexity of a GlowBerry shader body
-///
-/// Convenience wrapper around `analyze_glowberry_shader` that returns just the
-/// complexity level.
-pub fn estimate_glowberry_complexity(
-    shader_body: &str,
-    has_texture: bool,
-    iteration_multiplier: Option<f32>,
-) -> Result<Complexity, String> {
-    analyze_glowberry_shader(shader_body, has_texture, iteration_multiplier).map(|m| m.complexity())
 }
 
 #[cfg(test)]
