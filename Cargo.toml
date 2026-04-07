@@ -1,10 +1,10 @@
 [package]
 name = "glowberry"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.90"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Enhanced background/wallpaper service with live shader support"
-license = "MPL-2.0"
+license.workspace = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -25,6 +25,12 @@ walkdir = "2.5"
 
 [workspace]
 members = ["config", "crates/glowberry-lib", "apps/glowberry-settings"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MPL-2.0"
 
 [workspace.dependencies]
 colorgrad = "0.8 "

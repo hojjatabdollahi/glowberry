@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "glowberry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "color-eyre",
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "glowberry-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cosmic-config",
  "derive_setters",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "glowberry-lib"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "calloop",
@@ -2272,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "glowberry-settings"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "color-eyre",

@@ -1,9 +1,9 @@
 [package]
 name = "glowberry-config"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Configuration types for GlowBerry background service"
-license = "MPL-2.0"
+license.workspace = true
 
 [dependencies]
 derive_setters = "0.1.8"
