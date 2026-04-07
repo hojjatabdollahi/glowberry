@@ -28,11 +28,11 @@ pub enum WallpaperEvent {
 
 /// Create a subscription that loads wallpapers from the given directory
 pub fn wallpapers(current_dir: PathBuf) -> Subscription<WallpaperEvent> {
-    Subscription::run_with_id(current_dir.clone(), async_stream(current_dir))
+    Subscription::run_with(current_dir, async_stream)
 }
 
-fn async_stream(current_dir: PathBuf) -> impl Stream<Item = WallpaperEvent> {
-    futures_lite::stream::unfold(LoadState::Init(current_dir), |state| async move {
+fn async_stream(current_dir: &PathBuf) -> Pin<Box<dyn Send + Stream<Item = WallpaperEvent>>> {
+    Box::pin(futures_lite::stream::unfold(LoadState::Init(current_dir.clone()), |state| async move {
         match state {
             LoadState::Init(path) => Some((WallpaperEvent::Loading, LoadState::Loading(path))),
             LoadState::Loading(path) => {
@@ -68,7 +68,7 @@ fn async_stream(current_dir: PathBuf) -> impl Stream<Item = WallpaperEvent> {
             }
             LoadState::Done => None,
         }
-    })
+    }))
 }
 
 enum LoadState {
