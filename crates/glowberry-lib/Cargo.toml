@@ -1,9 +1,9 @@
 [package]
 name = "glowberry-lib"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Core library for GlowBerry background service"
-license = "MPL-2.0"
+license.workspace = true
 
 [dependencies]
 colorgrad = { workspace = true }
