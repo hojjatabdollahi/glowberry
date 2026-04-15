@@ -308,7 +308,7 @@ impl cosmic::Application for GlowBerrySettings {
         // About information
         let about = widget::about::About::default()
             .name(fl!("app-title"))
-            .version(env!("CARGO_PKG_VERSION"))
+            .version(glowberry_config::version_string())
             .icon(widget::icon::from_name(
                 "io.github.hojjatabdollahi.glowberry",
             ))

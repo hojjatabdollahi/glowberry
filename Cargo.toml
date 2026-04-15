@@ -27,7 +27,7 @@ walkdir = "2.5"
 members = ["config", "crates/glowberry-lib", "apps/glowberry-settings"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MPL-2.0"

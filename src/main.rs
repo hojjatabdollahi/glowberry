@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use glowberry_lib::engine::{BackgroundEngine, EngineConfig};
 use tracing_subscriber::prelude::*;
 
 /// GlowBerry - Enhanced background service with live shader support
 #[derive(Parser, Debug)]
 #[command(name = "glowberry")]
-#[command(author, version, about, long_about = None)]
+#[command(author, about, long_about = None)]
 struct Args {}
 
 fn main() -> color_eyre::Result<()> {
@@ -21,7 +21,8 @@ fn main() -> color_eyre::Result<()> {
 
     init_logger();
 
-    let _args = Args::parse();
+    let version: &'static str = glowberry_config::version_string().leak();
+    let _args = Args::command().version(version).get_matches();
 
     BackgroundEngine::run(EngineConfig::default())?;
 

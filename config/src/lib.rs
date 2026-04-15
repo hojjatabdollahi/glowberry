@@ -9,6 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashSet, path::PathBuf};
 use thiserror::Error;
 
+/// Package version from Cargo.toml.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Short git commit hash captured at build time.
+pub const GIT_HASH: &str = env!("GIT_HASH");
+
+/// Combined version string (e.g. "0.2.0 (abc1234)").
+pub fn version_string() -> String {
+    format!("{VERSION} ({GIT_HASH})")
+}
+
 /// GlowBerry config namespace
 pub const NAME: &str = "io.github.hojjatabdollahi.glowberry";
 pub const BACKGROUNDS: &str = "backgrounds";
