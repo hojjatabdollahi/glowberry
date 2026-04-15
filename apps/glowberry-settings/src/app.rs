@@ -8,7 +8,7 @@ use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::Subscription;
 use cosmic::iced::{Alignment, Length};
-use cosmic::iced_runtime::core::image::Handle as ImageHandle;
+use cosmic::iced::widget::image::Handle as ImageHandle;
 use cosmic::widget::{
     self, button, container, dropdown, segmented_button, settings, slider, tab_bar, text, toggler,
 };
@@ -1690,7 +1690,7 @@ impl GlowBerrySettings {
 // Helper functions
 
 fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, M> {
-    use cosmic::iced_core::{Background, Degrees, gradient::Linear};
+    use cosmic::iced::{Background, Border, Degrees, Gradient, gradient::Linear};
 
     container(widget::Space::new().width(width).height(height))
         .class(cosmic::theme::Container::custom(move |theme| {
@@ -1699,7 +1699,7 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
                     Color::Single([r, g, b]) => {
                         Background::Color(cosmic::iced::Color::from_rgb(*r, *g, *b))
                     }
-                    Color::Gradient(Gradient { colors, radius }) => {
+                    Color::Gradient(crate::app::Gradient { colors, radius }) => {
                         let stop_increment = 1.0 / (colors.len() - 1) as f32;
                         let mut stop = 0.0;
                         let mut linear = Linear::new(Degrees(*radius));
@@ -1707,10 +1707,10 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
                             linear = linear.add_stop(stop, cosmic::iced::Color::from_rgb(r, g, b));
                             stop += stop_increment;
                         }
-                        Background::Gradient(cosmic::iced_core::Gradient::Linear(linear))
+                        Background::Gradient(Gradient::Linear(linear))
                     }
                 }),
-                border: cosmic::iced_core::Border {
+                border: Border {
                     radius: theme.cosmic().corner_radii.radius_s.into(),
                     ..Default::default()
                 },
@@ -1721,11 +1721,11 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
 }
 
 fn shader_placeholder<'a, M: 'a>(width: u16, height: u16) -> Element<'a, M> {
-    use cosmic::iced_core::{Background, Degrees, gradient::Linear};
+    use cosmic::iced::{Background, Degrees, Gradient, gradient::Linear};
 
     container(widget::Space::new().width(width).height(height))
         .class(cosmic::theme::Container::custom(|_| container::Style {
-            background: Some(Background::Gradient(cosmic::iced_core::Gradient::Linear(
+            background: Some(Background::Gradient(Gradient::Linear(
                 Linear::new(Degrees(135.0))
                     .add_stop(0.0, cosmic::iced::Color::from_rgb(0.08, 0.02, 0.15))
                     .add_stop(0.5, cosmic::iced::Color::from_rgb(0.02, 0.08, 0.12))
