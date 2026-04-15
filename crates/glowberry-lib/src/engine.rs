@@ -355,7 +355,16 @@ impl BackgroundEngine {
         // Lazily initialize GPU renderer only if needed
         let gpu_renderer = if has_shader_source {
             tracing::info!("Initializing GPU renderer for shader wallpapers");
-            Some(gpu::GpuRenderer::new())
+            match gpu::GpuRenderer::new() {
+                Ok(renderer) => Some(renderer),
+                Err(err) => {
+                    tracing::error!(
+                        ?err,
+                        "GPU initialization failed — shader wallpapers will fall back to static color"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -783,7 +792,16 @@ impl GlowBerry {
         // Ensure GPU renderer is initialized
         if self.gpu_renderer.is_none() {
             tracing::info!("Lazily initializing GPU renderer for shader wallpaper");
-            self.gpu_renderer = Some(gpu::GpuRenderer::new());
+            match gpu::GpuRenderer::new() {
+                Ok(renderer) => self.gpu_renderer = Some(renderer),
+                Err(err) => {
+                    tracing::error!(
+                        ?err,
+                        "GPU initialization failed — cannot render shader wallpaper"
+                    );
+                    return;
+                }
+            }
         }
 
         let gpu = self.gpu_renderer.as_ref().unwrap();
