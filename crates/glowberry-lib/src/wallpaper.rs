@@ -4,7 +4,7 @@ use crate::{colored, draw, engine::GlowBerry, engine::GlowBerryLayer, scaler};
 use cosmic_config::CosmicConfigEntry;
 use eyre::eyre;
 use glowberry_config::{
-    Color, Entry, SamplingMethod, ScalingMode, ShaderSource, Source, state::State,
+    Color, Entry, SamplingMethod, ScalingMode, ShaderContent, ShaderSource, Source, state::State,
 };
 use image::{DynamicImage, ImageReader};
 use jxl_oxide::integration::JxlDecoder;
@@ -26,7 +26,6 @@ use std::{
 use tracing::error;
 use walkdir::WalkDir;
 
-#[derive(Debug)]
 pub struct Wallpaper {
     pub entry: Entry,
     pub layers: Vec<GlowBerryLayer>,
@@ -37,6 +36,17 @@ pub struct Wallpaper {
     // Cache of source image, if `current_source` is a `Source::Path`
     current_image: Option<image::DynamicImage>,
     timer_token: Option<RegistrationToken>,
+    // File watcher kept alive for source change notifications
+    _watcher: Option<RecommendedWatcher>,
+}
+
+impl std::fmt::Debug for Wallpaper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wallpaper")
+            .field("entry", &self.entry)
+            .field("layers", &self.layers.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for Wallpaper {
@@ -61,6 +71,7 @@ impl Wallpaper {
             current_image: None,
             image_queue: VecDeque::default(),
             timer_token: None,
+            _watcher: None,
             loop_handle,
             queue_handle,
         };
@@ -335,13 +346,14 @@ impl Wallpaper {
         }
     }
 
-    fn watch_source(&self, tx: calloop::channel::SyncSender<(String, notify::Event)>) {
-        // Only watch file sources for changes
-        let source = match &self.entry.source {
-            Source::Path(path) => path,
-            // For shader sources, we could watch the shader file for hot-reloading
-            // but that's a future enhancement
-            Source::Shader(_) | Source::Color(_) => return,
+    fn watch_source(&mut self, tx: calloop::channel::SyncSender<(String, notify::Event)>) {
+        let path = match &self.entry.source {
+            Source::Path(path) => path.clone(),
+            Source::Shader(shader) => match &shader.shader {
+                ShaderContent::Path(path) => path.clone(),
+                ShaderContent::Code(_) => return,
+            },
+            Source::Color(_) => return,
         };
 
         let output = self.entry.output.clone();
@@ -357,15 +369,18 @@ impl Wallpaper {
             Err(_) => return,
         };
 
-        tracing::debug!(output = self.entry.output, "watching source");
+        tracing::debug!(output = self.entry.output, path = %path.display(), "watching source");
 
-        if let Ok(m) = fs::metadata(source) {
+        if let Ok(m) = fs::metadata(&path) {
             if m.is_dir() {
-                let _ = watcher.watch(source, RecursiveMode::Recursive);
+                let _ = watcher.watch(&path, RecursiveMode::Recursive);
             } else if m.is_file() {
-                let _ = watcher.watch(source, RecursiveMode::NonRecursive);
+                let _ = watcher.watch(&path, RecursiveMode::NonRecursive);
             }
         }
+
+        // Store watcher to keep it alive
+        self._watcher = Some(watcher);
     }
 
     fn register_timer(&mut self) {

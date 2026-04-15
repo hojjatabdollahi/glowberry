@@ -8,7 +8,7 @@ use crate::{
 use cosmic_config::{CosmicConfigEntry, calloop::ConfigWatchSource};
 use eyre::Context;
 use glowberry_config::{
-    Config,
+    Config, Source,
     power_saving::{OnBatteryAction, PowerSavingConfig},
     state::State,
 };
@@ -269,6 +269,23 @@ impl BackgroundEngine {
             use notify::event::{ModifyKind, RenameMode};
 
             match event.kind {
+                // Shader file content changed — hot-reload
+                notify::EventKind::Modify(ModifyKind::Data(_)) => {
+                    for (idx, w) in state.wallpapers.iter().enumerate() {
+                        if w.entry.output != source {
+                            continue;
+                        }
+                        if matches!(w.entry.source, Source::Shader(_)) {
+                            tracing::debug!(
+                                output = source,
+                                "Shader file modified, triggering hot-reload"
+                            );
+                            state.reload_shader(idx);
+                            return;
+                        }
+                    }
+                }
+
                 notify::EventKind::Create(_)
                 | notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
                     for w in state
@@ -849,6 +866,53 @@ impl GlowBerry {
                     ?err,
                     "Failed to create fragment canvas for shader wallpaper"
                 );
+            }
+        }
+    }
+
+    /// Hot-reload a shader by rebuilding the FragmentCanvas for all layers of a wallpaper.
+    /// Keeps the existing surface and surface_config; only replaces the canvas.
+    /// On failure, keeps the previous (working) canvas.
+    fn reload_shader(&mut self, wallpaper_idx: usize) {
+        let Some(gpu) = self.gpu_renderer.as_ref() else {
+            return;
+        };
+
+        let shader_source = match &self.wallpapers[wallpaper_idx].entry.source {
+            Source::Shader(s) => s.clone(),
+            _ => return,
+        };
+
+        for layer_idx in 0..self.wallpapers[wallpaper_idx].layers.len() {
+            let layer = &mut self.wallpapers[wallpaper_idx].layers[layer_idx];
+            let Some(gpu_state) = layer.gpu_state.as_mut() else {
+                continue;
+            };
+
+            match fragment_canvas::FragmentCanvas::new(
+                gpu,
+                &shader_source,
+                gpu_state.surface_config.format,
+            ) {
+                Ok(canvas) => {
+                    canvas.update_resolution(
+                        gpu.queue(),
+                        gpu_state.surface_config.width,
+                        gpu_state.surface_config.height,
+                    );
+                    gpu_state.canvas = canvas;
+                    tracing::info!(
+                        output = ?layer.output_info.name,
+                        "Hot-reloaded shader"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        output = ?layer.output_info.name,
+                        "Shader hot-reload failed, keeping previous version"
+                    );
+                }
             }
         }
     }
