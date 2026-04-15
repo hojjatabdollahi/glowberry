@@ -404,11 +404,10 @@ impl Config {
 
         let new_value = self.outputs.iter().cloned().collect::<Vec<_>>();
 
-        if context.backgrounds() != new_value {
-            if let Err(why) = context.0.set::<Vec<String>>(BACKGROUNDS, new_value) {
+        if context.backgrounds() != new_value
+            && let Err(why) = context.0.set::<Vec<String>>(BACKGROUNDS, new_value) {
                 tracing::error!(?why, "failed to update outputs");
             }
-        }
 
         Ok(())
     }

@@ -117,11 +117,9 @@ impl ParsedShader {
                 }
             }
 
-            // Collect source body (after header or non-comment lines)
-            if header_ended || (!trimmed.starts_with("//") && !trimmed.is_empty()) {
-                if header_ended {
-                    source_lines.push(line.to_string());
-                }
+            // Collect source body (after header ends)
+            if header_ended {
+                source_lines.push(line.to_string());
             }
         }
 

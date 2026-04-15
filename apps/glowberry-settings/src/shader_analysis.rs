@@ -306,6 +306,61 @@ pub fn analyze_glowberry_shader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// Validate all example shaders parse successfully through naga with the GlowBerry preamble.
+    /// This catches syntax errors in shipped shaders before they reach users.
+    #[test]
+    fn all_example_shaders_are_valid_wgsl() {
+        let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples");
+
+        let wgsl_files: Vec<_> = std::fs::read_dir(&examples_dir)
+            .unwrap_or_else(|e| panic!("Failed to read examples dir {}: {e}", examples_dir.display()))
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("wgsl") {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !wgsl_files.is_empty(),
+            "No .wgsl files found in {}",
+            examples_dir.display()
+        );
+
+        let mut failures = Vec::new();
+        for path in &wgsl_files {
+            let content = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+
+            let has_texture = content.contains("iTexture") || content.contains("iTextureSampler");
+            let result = analyze_glowberry_shader(&content, has_texture, None);
+
+            if let Err(err) = result {
+                failures.push(format!(
+                    "  {}: {err}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "The following {} shader(s) failed validation:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 
     const SIMPLE_SHADER: &str = r#"
         @fragment

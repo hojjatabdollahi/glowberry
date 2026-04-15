@@ -5,7 +5,7 @@
 use cosmic::iced::Subscription;
 use cosmic::iced::futures::{Stream, StreamExt as _};
 use image::{ImageBuffer, Rgba, RgbaImage};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use walkdir::WalkDir;
 
@@ -29,6 +29,7 @@ pub fn wallpapers(current_dir: PathBuf) -> Subscription<WallpaperEvent> {
     Subscription::run_with(current_dir, async_stream)
 }
 
+#[allow(clippy::ptr_arg)]
 fn async_stream(current_dir: &PathBuf) -> Pin<Box<dyn Send + Stream<Item = WallpaperEvent>>> {
     Box::pin(futures_lite::stream::unfold(
         LoadState::Init(current_dir.clone()),
@@ -102,7 +103,7 @@ async fn load_wallpapers_from_path(
     Box::pin(stream)
 }
 
-fn is_image_file(path: &PathBuf) -> bool {
+fn is_image_file(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
@@ -121,13 +122,9 @@ async fn load_image_with_thumbnail(path: PathBuf) -> Option<(PathBuf, RgbaImage,
         .flatten()
 }
 
-fn load_image_with_thumbnail_sync(
-    path: &PathBuf,
-) -> Option<(
-    PathBuf,
-    ImageBuffer<Rgba<u8>, Vec<u8>>,
-    ImageBuffer<Rgba<u8>, Vec<u8>>,
-)> {
+type ImageTuple = (PathBuf, ImageBuffer<Rgba<u8>, Vec<u8>>, ImageBuffer<Rgba<u8>, Vec<u8>>);
+
+fn load_image_with_thumbnail_sync(path: &Path) -> Option<ImageTuple> {
     // Try to load the image
     let image = if path.extension().is_some_and(|e| e == "jxl") {
         decode_jpegxl(path).ok()?
@@ -147,7 +144,7 @@ fn load_image_with_thumbnail_sync(
     );
     round(&mut selection_thumbnail, [8, 8, 8, 8]);
 
-    Some((path.clone(), display_thumbnail, selection_thumbnail))
+    Some((path.to_path_buf(), display_thumbnail, selection_thumbnail))
 }
 
 fn resize_thumbnail(img: &image::DynamicImage, new_width: u32, new_height: u32) -> RgbaImage {
@@ -175,7 +172,7 @@ fn resize_thumbnail(img: &image::DynamicImage, new_width: u32, new_height: u32) 
     new_image.to_rgba8()
 }
 
-fn decode_jpegxl(path: &PathBuf) -> eyre::Result<image::DynamicImage> {
+fn decode_jpegxl(path: &Path) -> eyre::Result<image::DynamicImage> {
     use jxl_oxide::integration::JxlDecoder;
     use std::fs::File;
 
@@ -264,7 +261,7 @@ fn border_radius(img: &mut RgbaImage, r: u32, coordinates: impl Fn(u32, u32) -> 
                 x += 1;
                 p += (2 * x + 2) as i32;
             } else {
-                if y % 16 == 0 {
+                if y.is_multiple_of(16) {
                     draw(img, alpha, x / 16, y / 16);
                     draw(img, alpha, y / 16, x / 16);
                     skip_draw = true;

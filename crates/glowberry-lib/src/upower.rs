@@ -54,6 +54,7 @@ trait UPowerDevice {
 
 /// Current power state snapshot.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub struct PowerState {
     /// Whether the system is running on battery power.
     pub on_battery: bool,
@@ -63,15 +64,6 @@ pub struct PowerState {
     pub lid_is_closed: bool,
 }
 
-impl Default for PowerState {
-    fn default() -> Self {
-        Self {
-            on_battery: false,
-            battery_percentage: None,
-            lid_is_closed: false,
-        }
-    }
-}
 
 /// Handle to the power monitor, providing access to current state.
 #[derive(Clone)]

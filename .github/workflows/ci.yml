@@ -2,6 +2,9 @@ name: Continuous Integration
 
 on: [push, pull_request]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   formatting:
     runs-on: ubuntu-24.04
@@ -12,3 +15,55 @@ jobs:
           components: rustfmt
       - name: Run rustfmt
         run: cargo +nightly fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev \
+            libseat-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libinput-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libexpat1-dev \
+            libvulkan-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev \
+            libseat-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libinput-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libexpat1-dev \
+            libvulkan-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace

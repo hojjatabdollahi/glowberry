@@ -199,14 +199,12 @@ impl BackgroundEngine {
 
                                 _ => {
                                     tracing::debug!(key, "key modified");
-                                    if let Some(output) = key.strip_prefix("output.") {
-                                        if let Ok(new_entry) = conf_context.entry(key) {
-                                            if let Some(existing) = state.config.entry_mut(output) {
+                                    if let Some(output) = key.strip_prefix("output.")
+                                        && let Ok(new_entry) = conf_context.entry(key)
+                                            && let Some(existing) = state.config.entry_mut(output) {
                                                 *existing = new_entry;
                                                 changes_applied = true;
                                             }
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -459,9 +457,9 @@ impl GlowBerry {
         }
 
         // Check low battery (only when on battery, not when plugged in)
-        if config.pause_on_low_battery && power_state.on_battery {
-            if let Some(percentage) = power_state.battery_percentage {
-                if percentage <= config.low_battery_threshold as f64 {
+        if config.pause_on_low_battery && power_state.on_battery
+            && let Some(percentage) = power_state.battery_percentage
+                && percentage <= config.low_battery_threshold as f64 {
                     tracing::debug!(
                         percentage,
                         threshold = config.low_battery_threshold,
@@ -469,8 +467,6 @@ impl GlowBerry {
                     );
                     return true;
                 }
-            }
-        }
 
         // Check on battery action
         if power_state.on_battery {
@@ -921,8 +917,8 @@ impl CompositorHandler for GlowBerry {
                     // so we can resume when power state changes
                     if !should_pause {
                         // Check if we should render this frame (frame rate limiting)
-                        if gpu_state.canvas.should_render() {
-                            if let Some(gpu) = &self.gpu_renderer {
+                        if gpu_state.canvas.should_render()
+                            && let Some(gpu) = &self.gpu_renderer {
                                 // Get current texture
                                 match gpu_state.surface.get_current_texture() {
                                     wgpu::CurrentSurfaceTexture::Success(surface_texture)
@@ -982,7 +978,6 @@ impl CompositorHandler for GlowBerry {
                                     }
                                 }
                             }
-                        }
                     }
 
                     // Request next frame callback to continue animation

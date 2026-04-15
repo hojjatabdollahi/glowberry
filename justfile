@@ -69,6 +69,10 @@ build-release *args: (build-debug '--release' args)
 # Compiles release profile with vendored dependencies
 build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
 
+# Run all tests
+test *args:
+    cargo test --workspace {{args}}
+
 # Runs a clippy check
 check *args:
     cargo clippy --all-features {{args}} -- -W clippy::pedantic

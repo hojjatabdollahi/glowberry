@@ -115,7 +115,7 @@ impl Wallpaper {
 
             if cur_resized_img
                 .as_ref()
-                .map_or(true, |img| img.width() != width || img.height() != height)
+                .is_none_or(|img| img.width() != width || img.height() != height)
             {
                 let Some(source) = self.current_source.as_ref() else {
                     tracing::info!("No source for wallpaper");
@@ -126,7 +126,7 @@ impl Wallpaper {
                     Source::Path(path) => {
                         if self.current_image.is_none() {
                             self.current_image = Some(match path.extension() {
-                                Some(ext) if ext == "jxl" => match decode_jpegxl(&path) {
+                                Some(ext) if ext == "jxl" => match decode_jpegxl(path) {
                                     Ok(image) => image,
                                     Err(why) => {
                                         tracing::warn!(
@@ -138,7 +138,7 @@ impl Wallpaper {
                                     }
                                 },
 
-                                _ => match ImageReader::open(&path) {
+                                _ => match ImageReader::open(path) {
                                     Ok(img) => {
                                         match img
                                             .with_guessed_format()
@@ -285,8 +285,8 @@ impl Wallpaper {
                     };
 
                     // If a wallpaper from this slideshow was previously set, resume with that wallpaper.
-                    if let Some(Source::Path(last_path)) = current_image(&self.entry.output) {
-                        if image_queue.contains(&last_path) {
+                    if let Some(Source::Path(last_path)) = current_image(&self.entry.output)
+                        && image_queue.contains(&last_path) {
                             while let Some(path) = image_queue.pop_front() {
                                 if path == last_path {
                                     image_queue.push_front(path);
@@ -296,13 +296,12 @@ impl Wallpaper {
                                 image_queue.push_back(path);
                             }
                         }
-                    }
                 }
 
-                image_queue.pop_front().map(|current_image_path| {
+                if let Some(current_image_path) = image_queue.pop_front() {
                     self.current_source = Some(Source::Path(current_image_path.clone()));
                     image_queue.push_back(current_image_path);
-                });
+                }
             }
 
             Source::Color(ref c) => {
@@ -389,7 +388,7 @@ impl Wallpaper {
                             return TimeoutAction::Drop; // Drop if no item found for this timer
                         };
 
-                        while let Some(next) = item.image_queue.pop_front() {
+                        if let Some(next) = item.image_queue.pop_front() {
                             item.current_source = Some(Source::Path(next.clone()));
                             if let Err(err) = item.save_state() {
                                 error!("{err}");

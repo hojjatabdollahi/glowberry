@@ -393,7 +393,7 @@ impl ShaderPreviewRenderer {
 fn aligned_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
     let unpadded = width.saturating_mul(bytes_per_pixel);
     let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    ((unpadded + alignment - 1) / alignment) * alignment
+    unpadded.div_ceil(alignment) * alignment
 }
 
 /// Render a single preview frame for a shader.
