@@ -264,19 +264,10 @@ fn analyze_statement(statement: &Statement, metrics: &mut ShaderMetrics, current
     }
 }
 
-/// WGSL preamble for GlowBerry shaders (uniforms only, no texture)
-const GLOWBERRY_PREAMBLE: &str = r#"
-@group(0) @binding(0) var<uniform> iResolution: vec2f;
-@group(0) @binding(1) var<uniform> iTime: f32;
-"#;
-
-/// WGSL preamble for GlowBerry shaders with texture support
-const GLOWBERRY_PREAMBLE_WITH_TEXTURE: &str = r#"
-@group(0) @binding(0) var<uniform> iResolution: vec2f;
-@group(0) @binding(1) var<uniform> iTime: f32;
-@group(0) @binding(2) var iTexture: texture_2d<f32>;
-@group(0) @binding(3) var iTextureSampler: sampler;
-"#;
+use glowberry_lib::shader_defs::{
+    WGSL_PREAMBLE as GLOWBERRY_PREAMBLE,
+    WGSL_PREAMBLE_WITH_TEXTURE as GLOWBERRY_PREAMBLE_WITH_TEXTURE,
+};
 
 /// Analyze a GlowBerry shader body (without preamble)
 ///

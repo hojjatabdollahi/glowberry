@@ -5,6 +5,7 @@ pub(crate) mod fragment_canvas;
 pub(crate) mod gpu;
 pub(crate) mod img_source;
 pub(crate) mod scaler;
+pub mod shader_defs;
 pub(crate) mod upower;
 pub mod wallpaper;
 

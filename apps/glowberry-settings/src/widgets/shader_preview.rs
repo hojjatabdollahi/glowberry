@@ -9,36 +9,8 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::time::Instant;
 
+use glowberry_lib::shader_defs::{VERTEX_SHADER, WGSL_PREAMBLE, aligned_bytes_per_row};
 use pollster::FutureExt;
-
-/// WGSL preamble prepended to user shaders (must match glowberry).
-const WGSL_PREAMBLE: &str = r#"
-// GlowBerry live wallpaper uniforms
-@group(0) @binding(0) var<uniform> iResolution: vec2f;
-@group(0) @binding(1) var<uniform> iTime: f32;
-"#;
-
-/// Full-screen vertex shader.
-const VERTEX_SHADER: &str = r#"
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Full-screen triangle strip
-    var positions = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>( 1.0,  1.0),
-    );
-
-    var out: VertexOutput;
-    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-    return out;
-}
-"#;
 
 /// Error type for shader preview rendering.
 #[derive(Debug)]
@@ -389,12 +361,6 @@ impl ShaderPreviewRenderer {
     }
 }
 
-/// Calculate aligned bytes per row for wgpu buffer operations.
-fn aligned_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
-    let unpadded = width.saturating_mul(bytes_per_pixel);
-    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    unpadded.div_ceil(alignment) * alignment
-}
 
 /// Render a single preview frame for a shader.
 ///

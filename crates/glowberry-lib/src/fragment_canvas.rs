@@ -13,44 +13,7 @@ use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use crate::gpu::GpuRenderer;
-
-/// WGSL preamble prepended to user shaders.
-const WGSL_PREAMBLE: &str = r#"
-// GlowBerry live wallpaper uniforms
-@group(0) @binding(0) var<uniform> iResolution: vec2f;
-@group(0) @binding(1) var<uniform> iTime: f32;
-"#;
-
-/// WGSL preamble with texture support.
-const WGSL_PREAMBLE_WITH_TEXTURE: &str = r#"
-// GlowBerry live wallpaper uniforms
-@group(0) @binding(0) var<uniform> iResolution: vec2f;
-@group(0) @binding(1) var<uniform> iTime: f32;
-@group(0) @binding(2) var iTexture: texture_2d<f32>;
-@group(0) @binding(3) var iTextureSampler: sampler;
-"#;
-
-/// Full-screen vertex shader.
-const VERTEX_SHADER: &str = r#"
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Full-screen triangle strip
-    var positions = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>( 1.0,  1.0),
-    );
-
-    var out: VertexOutput;
-    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-    return out;
-}
-"#;
+use crate::shader_defs::{VERTEX_SHADER, WGSL_PREAMBLE, WGSL_PREAMBLE_WITH_TEXTURE};
 
 /// Error when loading or compiling a shader.
 #[derive(Debug, thiserror::Error)]
@@ -69,14 +32,9 @@ pub fn detect_language(source: &ShaderSource) -> ShaderLanguage {
     source.language
 }
 
-fn aligned_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
-    let unpadded = width.saturating_mul(bytes_per_pixel);
-    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-
-    unpadded.div_ceil(alignment) * alignment
-}
-
 fn texture_upload_data(rgba: &[u8], width: u32, height: u32) -> (Cow<'_, [u8]>, u32, u32) {
+    use crate::shader_defs::aligned_bytes_per_row;
+
     let bytes_per_pixel = 4;
     let unpadded_bytes_per_row = width.saturating_mul(bytes_per_pixel);
     let bytes_per_row = aligned_bytes_per_row(width, bytes_per_pixel);
@@ -498,14 +456,6 @@ impl FragmentCanvas {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn aligns_bytes_per_row_to_wgpu_requirement() {
-        let bytes_per_pixel = 4;
-        let aligned = super::aligned_bytes_per_row(1, bytes_per_pixel);
-
-        assert_eq!(aligned, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    }
-
     #[test]
     fn pads_texture_upload_rows_when_needed() {
         let width = 1;
