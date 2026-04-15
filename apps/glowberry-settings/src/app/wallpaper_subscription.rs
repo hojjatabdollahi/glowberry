@@ -122,7 +122,11 @@ async fn load_image_with_thumbnail(path: PathBuf) -> Option<(PathBuf, RgbaImage,
         .flatten()
 }
 
-type ImageTuple = (PathBuf, ImageBuffer<Rgba<u8>, Vec<u8>>, ImageBuffer<Rgba<u8>, Vec<u8>>);
+type ImageTuple = (
+    PathBuf,
+    ImageBuffer<Rgba<u8>, Vec<u8>>,
+    ImageBuffer<Rgba<u8>, Vec<u8>>,
+);
 
 fn load_image_with_thumbnail_sync(path: &Path) -> Option<ImageTuple> {
     // Try to load the image

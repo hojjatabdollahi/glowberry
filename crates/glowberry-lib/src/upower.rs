@@ -53,8 +53,7 @@ trait UPowerDevice {
 }
 
 /// Current power state snapshot.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PowerState {
     /// Whether the system is running on battery power.
     pub on_battery: bool,
@@ -63,7 +62,6 @@ pub struct PowerState {
     /// Whether the lid is closed (always false if no lid).
     pub lid_is_closed: bool,
 }
-
 
 /// Handle to the power monitor, providing access to current state.
 #[derive(Clone)]
@@ -76,7 +74,6 @@ impl PowerMonitorHandle {
     pub fn current(&self) -> PowerState {
         *self.rx.borrow()
     }
-
 }
 
 /// Message sent when power state changes.

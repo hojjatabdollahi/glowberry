@@ -286,16 +286,17 @@ impl Wallpaper {
 
                     // If a wallpaper from this slideshow was previously set, resume with that wallpaper.
                     if let Some(Source::Path(last_path)) = current_image(&self.entry.output)
-                        && image_queue.contains(&last_path) {
-                            while let Some(path) = image_queue.pop_front() {
-                                if path == last_path {
-                                    image_queue.push_front(path);
-                                    break;
-                                }
-
-                                image_queue.push_back(path);
+                        && image_queue.contains(&last_path)
+                    {
+                        while let Some(path) = image_queue.pop_front() {
+                            if path == last_path {
+                                image_queue.push_front(path);
+                                break;
                             }
+
+                            image_queue.push_back(path);
                         }
+                    }
                 }
 
                 if let Some(current_image_path) = image_queue.pop_front() {

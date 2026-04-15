@@ -28,12 +28,7 @@ pub fn gradient(
     let mut colors = Vec::with_capacity(gradient.colors.len());
 
     for &[r, g, b] in &*gradient.colors {
-        colors.push(colorgrad::Color::from_linear_rgba(
-            r,
-            g,
-            b,
-            1.0,
-        ));
+        colors.push(colorgrad::Color::from_linear_rgba(r, g, b, 1.0));
     }
 
     let grad = colorgrad::GradientBuilder::new()

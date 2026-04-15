@@ -311,7 +311,12 @@ mod tests {
             .join("examples");
 
         let wgsl_files: Vec<_> = std::fs::read_dir(&examples_dir)
-            .unwrap_or_else(|e| panic!("Failed to read examples dir {}: {e}", examples_dir.display()))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to read examples dir {}: {e}",
+                    examples_dir.display()
+                )
+            })
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let path = entry.path();

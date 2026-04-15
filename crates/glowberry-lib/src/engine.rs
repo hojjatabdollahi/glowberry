@@ -379,7 +379,6 @@ impl BackgroundEngine {
     }
 }
 
-
 #[derive(Debug)]
 pub struct GlowBerryLayer {
     pub(crate) layer: LayerSurface,
@@ -457,16 +456,18 @@ impl GlowBerry {
         }
 
         // Check low battery (only when on battery, not when plugged in)
-        if config.pause_on_low_battery && power_state.on_battery
+        if config.pause_on_low_battery
+            && power_state.on_battery
             && let Some(percentage) = power_state.battery_percentage
-                && percentage <= config.low_battery_threshold as f64 {
-                    tracing::debug!(
-                        percentage,
-                        threshold = config.low_battery_threshold,
-                        "Pausing animation: low battery"
-                    );
-                    return true;
-                }
+            && percentage <= config.low_battery_threshold as f64
+        {
+            tracing::debug!(
+                percentage,
+                threshold = config.low_battery_threshold,
+                "Pausing animation: low battery"
+            );
+            return true;
+        }
 
         // Check on battery action
         if power_state.on_battery {
@@ -918,66 +919,60 @@ impl CompositorHandler for GlowBerry {
                     if !should_pause {
                         // Check if we should render this frame (frame rate limiting)
                         if gpu_state.canvas.should_render()
-                            && let Some(gpu) = &self.gpu_renderer {
-                                // Get current texture
-                                match gpu_state.surface.get_current_texture() {
-                                    wgpu::CurrentSurfaceTexture::Success(surface_texture)
-                                    | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
-                                        let view = surface_texture
-                                            .texture
-                                            .create_view(&wgpu::TextureViewDescriptor::default());
+                            && let Some(gpu) = &self.gpu_renderer
+                        {
+                            // Get current texture
+                            match gpu_state.surface.get_current_texture() {
+                                wgpu::CurrentSurfaceTexture::Success(surface_texture)
+                                | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
+                                    let view = surface_texture
+                                        .texture
+                                        .create_view(&wgpu::TextureViewDescriptor::default());
 
-                                        // Update resolution for this specific layer's surface
-                                        let width = gpu_state.surface_config.width;
-                                        let height = gpu_state.surface_config.height;
+                                    // Update resolution for this specific layer's surface
+                                    let width = gpu_state.surface_config.width;
+                                    let height = gpu_state.surface_config.height;
 
-                                        tracing::trace!(
-                                            output = ?layer.output_info.name,
-                                            width,
-                                            height,
-                                            "Rendering shader frame"
-                                        );
+                                    tracing::trace!(
+                                        output = ?layer.output_info.name,
+                                        width,
+                                        height,
+                                        "Rendering shader frame"
+                                    );
 
-                                        gpu_state.canvas.update_resolution(
-                                            gpu.queue(),
-                                            width,
-                                            height,
-                                        );
+                                    gpu_state
+                                        .canvas
+                                        .update_resolution(gpu.queue(), width, height);
 
-                                        // Render the shader
-                                        gpu_state.canvas.render(gpu, &view);
+                                    // Render the shader
+                                    gpu_state.canvas.render(gpu, &view);
 
-                                        // Present
-                                        surface_texture.present();
+                                    // Present
+                                    surface_texture.present();
 
-                                        gpu_state.canvas.mark_frame_rendered();
-                                    }
-                                    wgpu::CurrentSurfaceTexture::Timeout => {
-                                        tracing::warn!("GPU surface timeout");
-                                    }
-                                    wgpu::CurrentSurfaceTexture::Lost
-                                    | wgpu::CurrentSurfaceTexture::Outdated => {
-                                        let width = gpu_state.surface_config.width;
-                                        let height = gpu_state.surface_config.height;
-                                        gpu_state.surface_config = gpu.configure_surface(
-                                            &gpu_state.surface,
-                                            width,
-                                            height,
-                                        );
-                                        gpu_state.canvas.update_resolution(
-                                            gpu.queue(),
-                                            width,
-                                            height,
-                                        );
-                                        tracing::warn!(
-                                            "GPU surface lost or outdated; reconfigured surface"
-                                        );
-                                    }
-                                    other => {
-                                        tracing::warn!(?other, "GPU surface error");
-                                    }
+                                    gpu_state.canvas.mark_frame_rendered();
+                                }
+                                wgpu::CurrentSurfaceTexture::Timeout => {
+                                    tracing::warn!("GPU surface timeout");
+                                }
+                                wgpu::CurrentSurfaceTexture::Lost
+                                | wgpu::CurrentSurfaceTexture::Outdated => {
+                                    let width = gpu_state.surface_config.width;
+                                    let height = gpu_state.surface_config.height;
+                                    gpu_state.surface_config =
+                                        gpu.configure_surface(&gpu_state.surface, width, height);
+                                    gpu_state
+                                        .canvas
+                                        .update_resolution(gpu.queue(), width, height);
+                                    tracing::warn!(
+                                        "GPU surface lost or outdated; reconfigured surface"
+                                    );
+                                }
+                                other => {
+                                    tracing::warn!(?other, "GPU surface error");
                                 }
                             }
+                        }
                     }
 
                     // Request next frame callback to continue animation

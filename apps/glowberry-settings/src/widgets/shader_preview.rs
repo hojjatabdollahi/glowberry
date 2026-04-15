@@ -361,7 +361,6 @@ impl ShaderPreviewRenderer {
     }
 }
 
-
 /// Render a single preview frame for a shader.
 ///
 /// This is a convenience function that creates a temporary renderer,

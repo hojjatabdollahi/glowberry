@@ -19,8 +19,7 @@ pub fn canvas(
     height: i32,
     stride: i32,
 ) -> Result<Buffer, CreateBufferError> {
-    let (buffer, canvas) =
-        pool.create_buffer(width, height, stride, wl_shm::Format::Xrgb8888)?;
+    let (buffer, canvas) = pool.create_buffer(width, height, stride, wl_shm::Format::Xrgb8888)?;
 
     xrgb888_canvas(canvas, image);
 
