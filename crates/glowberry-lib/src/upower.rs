@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use zbus::{Connection, proxy};
 
 /// Re-export calloop channel types for convenience.
-pub use calloop::channel::{Channel as CalloopChannel, Sender as CalloopSender};
+pub use calloop::channel::Sender as CalloopSender;
 
 /// UPower D-Bus proxy for the main UPower interface.
 #[proxy(
@@ -53,7 +53,7 @@ trait UPowerDevice {
 }
 
 /// Current power state snapshot.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PowerState {
     /// Whether the system is running on battery power.
     pub on_battery: bool,
@@ -61,16 +61,6 @@ pub struct PowerState {
     pub battery_percentage: Option<f64>,
     /// Whether the lid is closed (always false if no lid).
     pub lid_is_closed: bool,
-}
-
-impl Default for PowerState {
-    fn default() -> Self {
-        Self {
-            on_battery: false,
-            battery_percentage: None,
-            lid_is_closed: false,
-        }
-    }
 }
 
 /// Handle to the power monitor, providing access to current state.
@@ -84,11 +74,6 @@ impl PowerMonitorHandle {
     pub fn current(&self) -> PowerState {
         *self.rx.borrow()
     }
-
-    /// Wait for the power state to change.
-    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
-        self.rx.changed().await
-    }
 }
 
 /// Message sent when power state changes.
@@ -98,7 +83,6 @@ pub struct PowerStateChanged;
 /// Power monitor that watches UPower D-Bus signals.
 pub struct PowerMonitor {
     tx: watch::Sender<PowerState>,
-    handle: PowerMonitorHandle,
     /// Optional sender to notify calloop when power state changes.
     notify_tx: Option<CalloopSender<PowerStateChanged>>,
 }
@@ -113,7 +97,6 @@ impl PowerMonitor {
         (
             Self {
                 tx,
-                handle: handle.clone(),
                 notify_tx: None,
             },
             handle,
@@ -125,11 +108,6 @@ impl PowerMonitor {
     pub fn with_notify(mut self, notify_tx: CalloopSender<PowerStateChanged>) -> Self {
         self.notify_tx = Some(notify_tx);
         self
-    }
-
-    /// Get a handle to query the current power state.
-    pub fn handle(&self) -> PowerMonitorHandle {
-        self.handle.clone()
     }
 
     /// Start monitoring power state changes.

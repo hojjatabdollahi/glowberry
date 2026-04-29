@@ -69,6 +69,10 @@ build-release *args: (build-debug '--release' args)
 # Compiles release profile with vendored dependencies
 build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
 
+# Run all tests
+test *args:
+    cargo test --workspace {{args}}
+
 # Runs a clippy check
 check *args:
     cargo clippy --all-features {{args}} -- -W clippy::pedantic
@@ -85,7 +89,7 @@ run-settings *args:
     env RUST_LOG=debug RUST_BACKTRACE=1 cargo run --release -p glowberry-settings {{args}}
 
 # Installs all files (daemon + settings app)
-install: install-daemon install-settings
+install: _check-sudo install-daemon install-settings
     @echo ""
     @echo "=========================================="
     @echo "  GlowBerry installed successfully!"
@@ -119,6 +123,20 @@ install-settings:
 
 # Uninstalls all installed files
 uninstall: _check-glowberry-disabled uninstall-daemon uninstall-settings
+
+# Warn if running with sudo since local install works without it
+_check-sudo:
+    #!/usr/bin/env bash
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "WARNING: You are running 'just install' as root (sudo)."
+        echo "GlowBerry installs to ~/.local by default and does not need sudo."
+        echo ""
+        read -p "Are you sure you want to continue as root? [y/N] " answer
+        if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
+            echo "Aborted. Run without sudo: just install"
+            exit 1
+        fi
+    fi
 
 # Check if GlowBerry override is disabled before uninstalling
 _check-glowberry-disabled:

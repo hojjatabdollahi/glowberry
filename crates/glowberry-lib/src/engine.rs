@@ -3,13 +3,12 @@
 use crate::{
     fragment_canvas, gpu, img_source,
     upower::{PowerMonitorHandle, PowerStateChanged, start_power_monitor},
-    user_context::{EnvGuard, UserContext},
     wallpaper::Wallpaper,
 };
 use cosmic_config::{CosmicConfigEntry, calloop::ConfigWatchSource};
-use eyre::{Context, eyre};
+use eyre::Context;
 use glowberry_config::{
-    Config,
+    Config, Source,
     power_saving::{OnBatteryAction, PowerSavingConfig},
     state::State,
 };
@@ -46,7 +45,6 @@ use sctk::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
-use std::thread;
 use tracing::error;
 
 /// Access glibc malloc tunables.
@@ -110,14 +108,6 @@ pub struct BackgroundEngine;
 impl BackgroundEngine {
     #[allow(clippy::too_many_lines)]
     pub fn run(config: EngineConfig) -> eyre::Result<()> {
-        Self::run_with_stop(config, None)
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn run_with_stop(
-        config: EngineConfig,
-        stop_rx: Option<calloop::channel::Channel<()>>,
-    ) -> eyre::Result<()> {
         if !config.enable_wayland {
             return Ok(());
         }
@@ -142,17 +132,6 @@ impl BackgroundEngine {
             .insert(event_loop.handle())
             .map_err(|err| err.error)
             .wrap_err("failed to insert main EventLoop into WaylandSource")?;
-
-        if let Some(stop_rx) = stop_rx {
-            event_loop
-                .handle()
-                .insert_source(stop_rx, |event, _, state| match event {
-                    calloop::channel::Event::Msg(()) | calloop::channel::Event::Closed => {
-                        state.exit = true;
-                    }
-                })
-                .map_err(|err| eyre!("failed to insert stop channel into event loop: {err}"))?;
-        }
 
         let config_context = glowberry_config::context();
 
@@ -220,14 +199,12 @@ impl BackgroundEngine {
 
                                 _ => {
                                     tracing::debug!(key, "key modified");
-                                    if let Some(output) = key.strip_prefix("output.") {
-                                        if let Ok(new_entry) = conf_context.entry(key) {
-                                            if let Some(existing) = state.config.entry_mut(output) {
+                                    if let Some(output) = key.strip_prefix("output.")
+                                        && let Ok(new_entry) = conf_context.entry(key)
+                                            && let Some(existing) = state.config.entry_mut(output) {
                                                 *existing = new_entry;
                                                 changes_applied = true;
                                             }
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -292,6 +269,23 @@ impl BackgroundEngine {
             use notify::event::{ModifyKind, RenameMode};
 
             match event.kind {
+                // Shader file content changed — hot-reload
+                notify::EventKind::Modify(ModifyKind::Data(_)) => {
+                    for (idx, w) in state.wallpapers.iter().enumerate() {
+                        if w.entry.output != source {
+                            continue;
+                        }
+                        if matches!(w.entry.source, Source::Shader(_)) {
+                            tracing::debug!(
+                                output = source,
+                                "Shader file modified, triggering hot-reload"
+                            );
+                            state.reload_shader(idx);
+                            return;
+                        }
+                    }
+                }
+
                 notify::EventKind::Create(_)
                 | notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
                     for w in state
@@ -305,7 +299,6 @@ impl BackgroundEngine {
                             }
                         }
                         w.image_queue.retain(|p| !event.paths.contains(p));
-                        // TODO maybe resort or shuffle at some point?
                     }
                 }
                 notify::EventKind::Remove(_)
@@ -362,7 +355,16 @@ impl BackgroundEngine {
         // Lazily initialize GPU renderer only if needed
         let gpu_renderer = if has_shader_source {
             tracing::info!("Initializing GPU renderer for shader wallpapers");
-            Some(gpu::GpuRenderer::new())
+            match gpu::GpuRenderer::new() {
+                Ok(renderer) => Some(renderer),
+                Err(err) => {
+                    tracing::error!(
+                        ?err,
+                        "GPU initialization failed — shader wallpapers will fall back to static color"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -400,45 +402,6 @@ impl BackgroundEngine {
         }
 
         Ok(())
-    }
-}
-
-pub struct BackgroundHandle {
-    stop_tx: calloop::channel::Sender<()>,
-    join: Option<thread::JoinHandle<()>>,
-    env_guard: Option<EnvGuard>,
-}
-
-impl BackgroundHandle {
-    pub fn spawn(user: UserContext, config: EngineConfig) -> Self {
-        // Environment variables are process-wide, so keep the guard for the handle lifetime.
-        let env_guard = user.apply();
-        let (stop_tx, stop_rx) = calloop::channel::channel();
-        let join = thread::spawn(move || {
-            if let Err(err) = BackgroundEngine::run_with_stop(config, Some(stop_rx)) {
-                tracing::error!(?err, "background engine exited with error");
-            }
-        });
-
-        Self {
-            stop_tx,
-            join: Some(join),
-            env_guard: Some(env_guard),
-        }
-    }
-
-    pub fn stop(&mut self) {
-        let _ = self.stop_tx.send(());
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-        self.env_guard.take();
-    }
-}
-
-impl Drop for BackgroundHandle {
-    fn drop(&mut self) {
-        self.stop();
     }
 }
 
@@ -519,17 +482,17 @@ impl GlowBerry {
         }
 
         // Check low battery (only when on battery, not when plugged in)
-        if config.pause_on_low_battery && power_state.on_battery {
-            if let Some(percentage) = power_state.battery_percentage {
-                if percentage <= config.low_battery_threshold as f64 {
-                    tracing::debug!(
-                        percentage,
-                        threshold = config.low_battery_threshold,
-                        "Pausing animation: low battery"
-                    );
-                    return true;
-                }
-            }
+        if config.pause_on_low_battery
+            && power_state.on_battery
+            && let Some(percentage) = power_state.battery_percentage
+            && percentage <= config.low_battery_threshold as f64
+        {
+            tracing::debug!(
+                percentage,
+                threshold = config.low_battery_threshold,
+                "Pausing animation: low battery"
+            );
+            return true;
         }
 
         // Check on battery action
@@ -829,7 +792,16 @@ impl GlowBerry {
         // Ensure GPU renderer is initialized
         if self.gpu_renderer.is_none() {
             tracing::info!("Lazily initializing GPU renderer for shader wallpaper");
-            self.gpu_renderer = Some(gpu::GpuRenderer::new());
+            match gpu::GpuRenderer::new() {
+                Ok(renderer) => self.gpu_renderer = Some(renderer),
+                Err(err) => {
+                    tracing::error!(
+                        ?err,
+                        "GPU initialization failed — cannot render shader wallpaper"
+                    );
+                    return;
+                }
+            }
         }
 
         let gpu = self.gpu_renderer.as_ref().unwrap();
@@ -915,6 +887,53 @@ impl GlowBerry {
             }
         }
     }
+
+    /// Hot-reload a shader by rebuilding the FragmentCanvas for all layers of a wallpaper.
+    /// Keeps the existing surface and surface_config; only replaces the canvas.
+    /// On failure, keeps the previous (working) canvas.
+    fn reload_shader(&mut self, wallpaper_idx: usize) {
+        let Some(gpu) = self.gpu_renderer.as_ref() else {
+            return;
+        };
+
+        let shader_source = match &self.wallpapers[wallpaper_idx].entry.source {
+            Source::Shader(s) => s.clone(),
+            _ => return,
+        };
+
+        for layer_idx in 0..self.wallpapers[wallpaper_idx].layers.len() {
+            let layer = &mut self.wallpapers[wallpaper_idx].layers[layer_idx];
+            let Some(gpu_state) = layer.gpu_state.as_mut() else {
+                continue;
+            };
+
+            match fragment_canvas::FragmentCanvas::new(
+                gpu,
+                &shader_source,
+                gpu_state.surface_config.format,
+            ) {
+                Ok(canvas) => {
+                    canvas.update_resolution(
+                        gpu.queue(),
+                        gpu_state.surface_config.width,
+                        gpu_state.surface_config.height,
+                    );
+                    gpu_state.canvas = canvas;
+                    tracing::info!(
+                        output = ?layer.output_info.name,
+                        "Hot-reloaded shader"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        output = ?layer.output_info.name,
+                        "Shader hot-reload failed, keeping previous version"
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl CompositorHandler for GlowBerry {
@@ -981,65 +1000,58 @@ impl CompositorHandler for GlowBerry {
                     // so we can resume when power state changes
                     if !should_pause {
                         // Check if we should render this frame (frame rate limiting)
-                        if gpu_state.canvas.should_render() {
-                            if let Some(gpu) = &self.gpu_renderer {
-                                // Get current texture
-                                match gpu_state.surface.get_current_texture() {
-                                    wgpu::CurrentSurfaceTexture::Success(surface_texture)
-                                    | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
-                                        let view = surface_texture
-                                            .texture
-                                            .create_view(&wgpu::TextureViewDescriptor::default());
+                        if gpu_state.canvas.should_render()
+                            && let Some(gpu) = &self.gpu_renderer
+                        {
+                            // Get current texture
+                            match gpu_state.surface.get_current_texture() {
+                                wgpu::CurrentSurfaceTexture::Success(surface_texture)
+                                | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
+                                    let view = surface_texture
+                                        .texture
+                                        .create_view(&wgpu::TextureViewDescriptor::default());
 
-                                        // Update resolution for this specific layer's surface
-                                        let width = gpu_state.surface_config.width;
-                                        let height = gpu_state.surface_config.height;
+                                    // Update resolution for this specific layer's surface
+                                    let width = gpu_state.surface_config.width;
+                                    let height = gpu_state.surface_config.height;
 
-                                        tracing::trace!(
-                                            output = ?layer.output_info.name,
-                                            width,
-                                            height,
-                                            "Rendering shader frame"
-                                        );
+                                    tracing::trace!(
+                                        output = ?layer.output_info.name,
+                                        width,
+                                        height,
+                                        "Rendering shader frame"
+                                    );
 
-                                        gpu_state.canvas.update_resolution(
-                                            gpu.queue(),
-                                            width,
-                                            height,
-                                        );
+                                    gpu_state
+                                        .canvas
+                                        .update_resolution(gpu.queue(), width, height);
 
-                                        // Render the shader
-                                        gpu_state.canvas.render(gpu, &view);
+                                    // Render the shader
+                                    gpu_state.canvas.render(gpu, &view);
 
-                                        // Present
-                                        surface_texture.present();
+                                    // Present
+                                    surface_texture.present();
 
-                                        gpu_state.canvas.mark_frame_rendered();
-                                    }
-                                    wgpu::CurrentSurfaceTexture::Timeout => {
-                                        tracing::warn!("GPU surface timeout");
-                                    }
-                                    wgpu::CurrentSurfaceTexture::Lost
-                                    | wgpu::CurrentSurfaceTexture::Outdated => {
-                                        let width = gpu_state.surface_config.width;
-                                        let height = gpu_state.surface_config.height;
-                                        gpu_state.surface_config = gpu.configure_surface(
-                                            &gpu_state.surface,
-                                            width,
-                                            height,
-                                        );
-                                        gpu_state.canvas.update_resolution(
-                                            gpu.queue(),
-                                            width,
-                                            height,
-                                        );
-                                        tracing::warn!(
-                                            "GPU surface lost or outdated; reconfigured surface"
-                                        );
-                                    }
-                                    other => {
-                                        tracing::warn!(?other, "GPU surface error");
-                                    }
+                                    gpu_state.canvas.mark_frame_rendered();
+                                }
+                                wgpu::CurrentSurfaceTexture::Timeout => {
+                                    tracing::warn!("GPU surface timeout");
+                                }
+                                wgpu::CurrentSurfaceTexture::Lost
+                                | wgpu::CurrentSurfaceTexture::Outdated => {
+                                    let width = gpu_state.surface_config.width;
+                                    let height = gpu_state.surface_config.height;
+                                    gpu_state.surface_config =
+                                        gpu.configure_surface(&gpu_state.surface, width, height);
+                                    gpu_state
+                                        .canvas
+                                        .update_resolution(gpu.queue(), width, height);
+                                    tracing::warn!(
+                                        "GPU surface lost or outdated; reconfigured surface"
+                                    );
+                                }
+                                other => {
+                                    tracing::warn!(?other, "GPU surface error");
                                 }
                             }
                         }
@@ -1069,7 +1081,6 @@ impl CompositorHandler for GlowBerry {
         _surface: &wl_surface::WlSurface,
         _new_transform: wl_output::Transform,
     ) {
-        // TODO
     }
 
     fn surface_enter(

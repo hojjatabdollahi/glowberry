@@ -21,13 +21,21 @@ pub struct GpuRenderer {
     queue: wgpu::Queue,
 }
 
+/// Error when initializing the GPU renderer.
+#[derive(Debug, thiserror::Error)]
+pub enum GpuError {
+    #[error("No suitable GPU adapter found: {0}")]
+    NoAdapter(#[from] wgpu::RequestAdapterError),
+    #[error("Failed to create GPU device: {0}")]
+    DeviceCreation(#[from] wgpu::RequestDeviceError),
+}
+
 impl GpuRenderer {
     /// Create a new GPU renderer.
     ///
-    /// # Panics
-    ///
-    /// Panics if no suitable GPU adapter is found.
-    pub fn new() -> Self {
+    /// Returns an error if no GPU adapter is available or device creation fails.
+    /// Callers should fall back to the SHM rendering path on failure.
+    pub fn new() -> Result<Self, GpuError> {
         let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
         instance_desc.backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
         let instance = wgpu::Instance::new(instance_desc);
@@ -39,7 +47,7 @@ impl GpuRenderer {
                 compatible_surface: None,
             })
             .block_on()
-            .expect("Failed to find GPU adapter for live wallpapers");
+            .map_err(GpuError::NoAdapter)?;
 
         tracing::info!(
             "GPU renderer using: {} ({:?})",
@@ -49,15 +57,14 @@ impl GpuRenderer {
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
-            .block_on()
-            .expect("Failed to create GPU device");
+            .block_on()?;
 
-        Self {
+        Ok(Self {
             instance,
             adapter,
             device,
             queue,
-        }
+        })
     }
 
     /// Create a wgpu surface from a Wayland surface.
@@ -140,11 +147,5 @@ impl GpuRenderer {
     #[inline]
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
-    }
-}
-
-impl Default for GpuRenderer {
-    fn default() -> Self {
-        Self::new()
     }
 }

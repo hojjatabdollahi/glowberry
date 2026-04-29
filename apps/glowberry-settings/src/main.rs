@@ -5,6 +5,7 @@
 mod app;
 mod i18n;
 mod pages;
+mod shader_analysis;
 mod shader_params;
 mod widgets;
 

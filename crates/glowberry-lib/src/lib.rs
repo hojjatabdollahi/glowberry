@@ -1,22 +1,15 @@
-pub mod colored;
-pub mod draw;
+pub(crate) mod colored;
+pub(crate) mod draw;
 pub mod engine;
-pub mod external_surface;
-pub mod fragment_canvas;
-pub mod gpu;
-pub mod img_source;
-pub mod scaler;
-pub mod shader_analysis;
-pub mod upower;
-pub mod user_context;
+pub(crate) mod fragment_canvas;
+pub(crate) mod gpu;
+pub(crate) mod img_source;
+pub(crate) mod scaler;
+pub mod shader_defs;
+pub(crate) mod upower;
 pub mod wallpaper;
 
-pub use engine::{BackgroundEngine, BackgroundHandle, EngineConfig, GlowBerry, GlowBerryLayer};
-pub use external_surface::{
-    BackgroundSource, ExternalSurfaceError, has_shader_background, load_background_image,
-    load_background_source, load_shader_source,
-};
-pub use user_context::{EnvGuard, UserContext};
+pub use engine::{BackgroundEngine, EngineConfig, GlowBerry, GlowBerryLayer};
 pub use wallpaper::Wallpaper;
 
 #[cfg(test)]

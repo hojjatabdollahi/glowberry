@@ -3,12 +3,13 @@
 //! Main application state and logic for GlowBerry Settings
 
 use crate::fl;
+use crate::shader_analysis::{self, Complexity};
 use crate::shader_params::{ParamType, ParamValue, ParsedShader};
 use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::Subscription;
+use cosmic::iced::widget::image::Handle as ImageHandle;
 use cosmic::iced::{Alignment, Length};
-use cosmic::iced_runtime::core::image::Handle as ImageHandle;
 use cosmic::widget::{
     self, button, container, dropdown, segmented_button, settings, slider, tab_bar, text, toggler,
 };
@@ -17,7 +18,6 @@ use cosmic_config::CosmicConfigEntry;
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use glowberry_config::state::State;
 use glowberry_config::{Color, Config, Context as ConfigContext, Entry, Gradient, Source};
-use glowberry_lib::shader_analysis::{self, Complexity};
 use image::{ImageBuffer, Rgba};
 use slotmap::{DefaultKey, SecondaryMap, SlotMap};
 use std::borrow::Cow;
@@ -308,7 +308,7 @@ impl cosmic::Application for GlowBerrySettings {
         // About information
         let about = widget::about::About::default()
             .name(fl!("app-title"))
-            .version(env!("CARGO_PKG_VERSION"))
+            .version(glowberry_config::version_string())
             .icon(widget::icon::from_name(
                 "io.github.hojjatabdollahi.glowberry",
             ))
@@ -442,21 +442,17 @@ impl cosmic::Application for GlowBerrySettings {
             Message::ChangeCategory(category) => {
                 self.categories.selected = Some(category.clone());
 
-                match category {
-                    Category::Shaders => {
-                        // Load shaders if needed
-                        if self.available_shaders.is_empty() {
-                            self.available_shaders = discover_shaders();
-                            let placeholder = create_shader_placeholder(158, 105);
-                            self.shader_thumbnails =
-                                vec![placeholder; self.available_shaders.len()];
-                        }
-                        // Always try to load real thumbnails when switching to shaders
-                        if !self.available_shaders.is_empty() {
-                            return self.load_shader_thumbnails();
-                        }
+                if category == Category::Shaders {
+                    // Load shaders if needed
+                    if self.available_shaders.is_empty() {
+                        self.available_shaders = discover_shaders();
+                        let placeholder = create_shader_placeholder(158, 105);
+                        self.shader_thumbnails = vec![placeholder; self.available_shaders.len()];
                     }
-                    _ => {}
+                    // Always try to load real thumbnails when switching to shaders
+                    if !self.available_shaders.is_empty() {
+                        return self.load_shader_thumbnails();
+                    }
                 }
             }
 
@@ -481,10 +477,10 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ShaderThumbnail(idx, handle) => {
-                if let Some(handle) = handle {
-                    if idx < self.shader_thumbnails.len() {
-                        self.shader_thumbnails[idx] = handle;
-                    }
+                if let Some(handle) = handle
+                    && idx < self.shader_thumbnails.len()
+                {
+                    self.shader_thumbnails[idx] = handle;
                 }
             }
 
@@ -535,19 +531,19 @@ impl cosmic::Application for GlowBerrySettings {
 
                     // Only select a wallpaper if config source is a Path
                     // Don't override if user has a Color or Shader selected
-                    if let Some(entry) = entry {
-                        if let Source::Path(config_path) = &entry.source {
-                            // Find the wallpaper that matches the config path
-                            if let Some((key, _)) =
-                                self.selection.paths.iter().find(|(_, p)| *p == config_path)
-                            {
+                    if let Some(entry) = entry
+                        && let Source::Path(config_path) = &entry.source
+                    {
+                        // Find the wallpaper that matches the config path
+                        if let Some((key, _)) =
+                            self.selection.paths.iter().find(|(_, p)| *p == config_path)
+                        {
+                            self.selection.active = Choice::Wallpaper(key);
+                            self.categories.selected = Some(Category::Wallpapers);
+                        } else {
+                            // Config path not found in loaded wallpapers, pick first one
+                            if let Some((key, _)) = self.selection.paths.iter().next() {
                                 self.selection.active = Choice::Wallpaper(key);
-                                self.categories.selected = Some(Category::Wallpapers);
-                            } else {
-                                // Config path not found in loaded wallpapers, pick first one
-                                if let Some((key, _)) = self.selection.paths.iter().next() {
-                                    self.selection.active = Choice::Wallpaper(key);
-                                }
                             }
                         }
                     }
@@ -556,9 +552,6 @@ impl cosmic::Application for GlowBerrySettings {
                     if matches!(self.selection.active, Choice::Wallpaper(_)) {
                         self.cache_display_image();
                     }
-                }
-                WallpaperEvent::Error(e) => {
-                    tracing::error!("Wallpaper loading error: {}", e);
                 }
             },
 
@@ -612,21 +605,21 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::ConfigOrStateChanged(maybe_config) => {
                 // Update config if provided and different
-                if let Some(config) = maybe_config {
-                    if self.config != config {
-                        tracing::debug!("Config changed externally, reloading");
-                        self.config = config;
-                        self.init_from_config();
+                if let Some(config) = maybe_config
+                    && self.config != config
+                {
+                    tracing::debug!("Config changed externally, reloading");
+                    self.config = config;
+                    self.init_from_config();
 
-                        // Update prefer_low_power from config
-                        if let Some(ctx) = &self.config_context {
-                            self.prefer_low_power = ctx.prefer_low_power();
-                        }
+                    // Update prefer_low_power from config
+                    if let Some(ctx) = &self.config_context {
+                        self.prefer_low_power = ctx.prefer_low_power();
+                    }
 
-                        // Re-cache display image if needed
-                        if matches!(self.selection.active, Choice::Wallpaper(_)) {
-                            self.cache_display_image();
-                        }
+                    // Re-cache display image if needed
+                    if matches!(self.selection.active, Choice::Wallpaper(_)) {
+                        self.cache_display_image();
                     }
                 }
 
@@ -663,7 +656,7 @@ impl cosmic::Application for GlowBerrySettings {
                 // Store the new value in memory only (don't write to config yet)
                 self.shader_param_values
                     .entry(shader_idx)
-                    .or_insert_with(HashMap::new)
+                    .or_default()
                     .insert(param_name, value);
                 // UI will update to show new value, but config is not written
             }
@@ -684,10 +677,10 @@ impl cosmic::Application for GlowBerrySettings {
                 self.shader_param_values.remove(&shader_idx);
 
                 // Re-apply the shader with default parameters
-                if let Choice::Shader(idx) = self.selection.active {
-                    if idx == shader_idx {
-                        self.apply_selection();
-                    }
+                if let Choice::Shader(idx) = self.selection.active
+                    && idx == shader_idx
+                {
+                    self.apply_selection();
                 }
             }
 
@@ -1019,14 +1012,14 @@ impl GlowBerrySettings {
     fn cache_display_image(&mut self) {
         self.cached_display_handle = None;
 
-        if let Choice::Wallpaper(id) = self.selection.active {
-            if let Some(image) = self.selection.display_images.get(id) {
-                self.cached_display_handle = Some(ImageHandle::from_rgba(
-                    image.width(),
-                    image.height(),
-                    image.to_vec(),
-                ));
-            }
+        if let Choice::Wallpaper(id) = self.selection.active
+            && let Some(image) = self.selection.display_images.get(id)
+        {
+            self.cached_display_handle = Some(ImageHandle::from_rgba(
+                image.width(),
+                image.height(),
+                image.to_vec(),
+            ));
         }
     }
 
@@ -1144,7 +1137,7 @@ impl GlowBerrySettings {
                 // Determine which path to use for matching:
                 // - If source_path is set (customized shader), use that
                 // - Otherwise use the path from ShaderContent::Path
-                let match_path = shader_source.source_path.as_ref().or_else(|| {
+                let match_path = shader_source.source_path.as_ref().or({
                     if let glowberry_config::ShaderContent::Path(p) = &shader_source.shader {
                         Some(p)
                     } else {
@@ -1164,15 +1157,14 @@ impl GlowBerrySettings {
                         matched_idx = Some(idx);
                     } else {
                         // Fall back to filename match (in case paths differ due to XDG_DATA_DIRS)
-                        if let Some(config_filename) = config_path.file_name() {
-                            if let Some(idx) = self
+                        if let Some(config_filename) = config_path.file_name()
+                            && let Some(idx) = self
                                 .available_shaders
                                 .iter()
                                 .position(|s| s.path.file_name() == Some(config_filename))
-                            {
-                                self.selection.active = Choice::Shader(idx);
-                                matched_idx = Some(idx);
-                            }
+                        {
+                            self.selection.active = Choice::Shader(idx);
+                            matched_idx = Some(idx);
                         }
                     }
 
@@ -1188,28 +1180,28 @@ impl GlowBerrySettings {
                 }
 
                 // Load parameter values from config
-                if let Some(idx) = matched_idx {
-                    if !shader_source.params.is_empty() {
-                        // Convert f64 values back to ParamValue based on shader's param definitions
-                        let mut param_values: HashMap<String, ParamValue> = HashMap::new();
+                if let Some(idx) = matched_idx
+                    && !shader_source.params.is_empty()
+                {
+                    // Convert f64 values back to ParamValue based on shader's param definitions
+                    let mut param_values: HashMap<String, ParamValue> = HashMap::new();
 
-                        if let Some(shader_info) = self.available_shaders.get(idx) {
-                            if let Some(parsed) = &shader_info.parsed {
-                                for param in &parsed.params {
-                                    if let Some(&value) = shader_source.params.get(&param.name) {
-                                        let param_value = match param.param_type {
-                                            ParamType::F32 => ParamValue::F32(value as f32),
-                                            ParamType::I32 => ParamValue::I32(value as i32),
-                                        };
-                                        param_values.insert(param.name.clone(), param_value);
-                                    }
-                                }
+                    if let Some(shader_info) = self.available_shaders.get(idx)
+                        && let Some(parsed) = &shader_info.parsed
+                    {
+                        for param in &parsed.params {
+                            if let Some(&value) = shader_source.params.get(&param.name) {
+                                let param_value = match param.param_type {
+                                    ParamType::F32 => ParamValue::F32(value as f32),
+                                    ParamType::I32 => ParamValue::I32(value as i32),
+                                };
+                                param_values.insert(param.name.clone(), param_value);
                             }
                         }
+                    }
 
-                        if !param_values.is_empty() {
-                            self.shader_param_values.insert(idx, param_values);
-                        }
+                    if !param_values.is_empty() {
+                        self.shader_param_values.insert(idx, param_values);
                     }
                 }
 
@@ -1426,145 +1418,144 @@ impl GlowBerrySettings {
             );
 
             // Collapsible details section
-            if self.shader_details_expanded {
-                if let Some(shader_info) = self.available_shaders.get(shader_idx) {
-                    if let Some(parsed) = &shader_info.parsed {
-                        let metadata = &parsed.metadata;
+            if self.shader_details_expanded
+                && let Some(shader_info) = self.available_shaders.get(shader_idx)
+                && let Some(parsed) = &shader_info.parsed
+            {
+                let metadata = &parsed.metadata;
 
-                        // Author
-                        if !metadata.author.is_empty() {
+                // Author
+                if !metadata.author.is_empty() {
+                    list = list.add(settings::item(
+                        fl!("shader-author"),
+                        widget::text(&metadata.author),
+                    ));
+                }
+
+                // Source (as a clickable link if it looks like a URL)
+                if !metadata.source.is_empty() {
+                    let source_url = metadata.source.clone();
+                    let source_widget: Element<'_, Message> = if metadata.source.starts_with("http")
+                    {
+                        widget::button::link(source_url.clone())
+                            .on_press(Message::OpenUrl(source_url))
+                            .into()
+                    } else {
+                        widget::text(&metadata.source).into()
+                    };
+                    list = list.add(settings::item(fl!("shader-source"), source_widget));
+                }
+
+                // License
+                if !metadata.license.is_empty() {
+                    list = list.add(settings::item(
+                        fl!("shader-license"),
+                        widget::text(&metadata.license),
+                    ));
+                }
+
+                // Resource usage estimate using naga-based analysis
+                let param_values = self.shader_param_values.get(&shader_idx);
+                let iteration_multiplier =
+                    calculate_iteration_multiplier(&parsed.params, param_values);
+                let has_texture = parsed.source_body.contains("iTexture")
+                    || parsed.source_body.contains("textureSample");
+
+                let complexity = shader_analysis::analyze_glowberry_shader(
+                    &parsed.source_body,
+                    has_texture,
+                    Some(iteration_multiplier),
+                )
+                .map(|m| m.complexity())
+                .unwrap_or(Complexity::Medium); // Default to medium if parsing fails
+
+                let usage_label = match complexity {
+                    Complexity::Low => fl!("resource-low"),
+                    Complexity::Medium => fl!("resource-medium"),
+                    Complexity::High => fl!("resource-high"),
+                };
+                list = list.add(settings::item(
+                    fl!("shader-resource-usage"),
+                    widget::text(usage_label),
+                ));
+
+                // Shader parameters
+                for param in &parsed.params {
+                    let current_values = self.shader_param_values.get(&shader_idx);
+                    let current = current_values
+                        .and_then(|v| v.get(&param.name))
+                        .copied()
+                        .unwrap_or(param.default);
+
+                    let param_name = param.name.clone();
+                    let idx = shader_idx;
+
+                    match param.param_type {
+                        ParamType::F32 => {
+                            let min = param.min.as_f32();
+                            let max = param.max.as_f32();
+                            let step = param.step.as_f32();
+                            let value = current.as_f32();
+
                             list = list.add(settings::item(
-                                fl!("shader-author"),
-                                widget::text(&metadata.author),
+                                &param.label,
+                                widget::row::with_children(vec![
+                                    slider(min..=max, value, move |v| {
+                                        Message::ShaderParamChanged(
+                                            idx,
+                                            param_name.clone(),
+                                            ParamValue::F32(v),
+                                        )
+                                    })
+                                    .on_release(Message::ShaderParamReleased)
+                                    .step(step)
+                                    .width(Length::Fixed(150.0))
+                                    .into(),
+                                    widget::text(format!("{:.2}", value))
+                                        .width(Length::Fixed(50.0))
+                                        .into(),
+                                ])
+                                .spacing(8)
+                                .align_y(Alignment::Center),
                             ));
                         }
+                        ParamType::I32 => {
+                            let min = param.min.as_i32() as f32;
+                            let max = param.max.as_i32() as f32;
+                            let step = param.step.as_i32() as f32;
+                            let value = current.as_i32() as f32;
 
-                        // Source (as a clickable link if it looks like a URL)
-                        if !metadata.source.is_empty() {
-                            let source_url = metadata.source.clone();
-                            let source_widget: Element<'_, Message> =
-                                if metadata.source.starts_with("http") {
-                                    widget::button::link(source_url.clone())
-                                        .on_press(Message::OpenUrl(source_url))
-                                        .into()
-                                } else {
-                                    widget::text(&metadata.source).into()
-                                };
-                            list = list.add(settings::item(fl!("shader-source"), source_widget));
-                        }
-
-                        // License
-                        if !metadata.license.is_empty() {
+                            let param_name_clone = param_name.clone();
                             list = list.add(settings::item(
-                                fl!("shader-license"),
-                                widget::text(&metadata.license),
+                                &param.label,
+                                widget::row::with_children(vec![
+                                    slider(min..=max, value, move |v| {
+                                        Message::ShaderParamChanged(
+                                            idx,
+                                            param_name_clone.clone(),
+                                            ParamValue::I32(v as i32),
+                                        )
+                                    })
+                                    .on_release(Message::ShaderParamReleased)
+                                    .step(step)
+                                    .width(Length::Fixed(150.0))
+                                    .into(),
+                                    widget::text(format!("{}", current.as_i32()))
+                                        .width(Length::Fixed(50.0))
+                                        .into(),
+                                ])
+                                .spacing(8)
+                                .align_y(Alignment::Center),
                             ));
                         }
-
-                        // Resource usage estimate using naga-based analysis
-                        let param_values = self.shader_param_values.get(&shader_idx);
-                        let iteration_multiplier =
-                            calculate_iteration_multiplier(&parsed.params, param_values);
-                        let has_texture = parsed.source_body.contains("iTexture")
-                            || parsed.source_body.contains("textureSample");
-
-                        let complexity = shader_analysis::analyze_glowberry_shader(
-                            &parsed.source_body,
-                            has_texture,
-                            Some(iteration_multiplier),
-                        )
-                        .map(|m| m.complexity())
-                        .unwrap_or(Complexity::Medium); // Default to medium if parsing fails
-
-                        let usage_label = match complexity {
-                            Complexity::Low => fl!("resource-low"),
-                            Complexity::Medium => fl!("resource-medium"),
-                            Complexity::High => fl!("resource-high"),
-                        };
-                        list = list.add(settings::item(
-                            fl!("shader-resource-usage"),
-                            widget::text(usage_label),
-                        ));
-
-                        // Shader parameters
-                        for param in &parsed.params {
-                            let current_values = self.shader_param_values.get(&shader_idx);
-                            let current = current_values
-                                .and_then(|v| v.get(&param.name))
-                                .copied()
-                                .unwrap_or(param.default);
-
-                            let param_name = param.name.clone();
-                            let idx = shader_idx;
-
-                            match param.param_type {
-                                ParamType::F32 => {
-                                    let min = param.min.as_f32();
-                                    let max = param.max.as_f32();
-                                    let step = param.step.as_f32();
-                                    let value = current.as_f32();
-
-                                    list = list.add(settings::item(
-                                        &param.label,
-                                        widget::row::with_children(vec![
-                                            slider(min..=max, value, move |v| {
-                                                Message::ShaderParamChanged(
-                                                    idx,
-                                                    param_name.clone(),
-                                                    ParamValue::F32(v),
-                                                )
-                                            })
-                                            .on_release(Message::ShaderParamReleased)
-                                            .step(step)
-                                            .width(Length::Fixed(150.0))
-                                            .into(),
-                                            widget::text(format!("{:.2}", value))
-                                                .width(Length::Fixed(50.0))
-                                                .into(),
-                                        ])
-                                        .spacing(8)
-                                        .align_y(Alignment::Center),
-                                    ));
-                                }
-                                ParamType::I32 => {
-                                    let min = param.min.as_i32() as f32;
-                                    let max = param.max.as_i32() as f32;
-                                    let step = param.step.as_i32() as f32;
-                                    let value = current.as_i32() as f32;
-
-                                    let param_name_clone = param_name.clone();
-                                    list = list.add(settings::item(
-                                        &param.label,
-                                        widget::row::with_children(vec![
-                                            slider(min..=max, value, move |v| {
-                                                Message::ShaderParamChanged(
-                                                    idx,
-                                                    param_name_clone.clone(),
-                                                    ParamValue::I32(v as i32),
-                                                )
-                                            })
-                                            .on_release(Message::ShaderParamReleased)
-                                            .step(step)
-                                            .width(Length::Fixed(150.0))
-                                            .into(),
-                                            widget::text(format!("{}", current.as_i32()))
-                                                .width(Length::Fixed(50.0))
-                                                .into(),
-                                        ])
-                                        .spacing(8)
-                                        .align_y(Alignment::Center),
-                                    ));
-                                }
-                            }
-                        }
-
-                        // Reset to defaults button
-                        list = list.add(
-                            widget::button::destructive(fl!("reset-to-defaults"))
-                                .on_press(Message::ResetShaderParams(shader_idx)),
-                        );
                     }
                 }
+
+                // Reset to defaults button
+                list = list.add(
+                    widget::button::destructive(fl!("reset-to-defaults"))
+                        .on_press(Message::ResetShaderParams(shader_idx)),
+                );
             }
         }
 
@@ -1693,7 +1684,7 @@ impl GlowBerrySettings {
 // Helper functions
 
 fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, M> {
-    use cosmic::iced_core::{Background, Degrees, gradient::Linear};
+    use cosmic::iced::{Background, Border, Degrees, Gradient, gradient::Linear};
 
     container(widget::Space::new().width(width).height(height))
         .class(cosmic::theme::Container::custom(move |theme| {
@@ -1702,7 +1693,7 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
                     Color::Single([r, g, b]) => {
                         Background::Color(cosmic::iced::Color::from_rgb(*r, *g, *b))
                     }
-                    Color::Gradient(Gradient { colors, radius }) => {
+                    Color::Gradient(crate::app::Gradient { colors, radius }) => {
                         let stop_increment = 1.0 / (colors.len() - 1) as f32;
                         let mut stop = 0.0;
                         let mut linear = Linear::new(Degrees(*radius));
@@ -1710,10 +1701,10 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
                             linear = linear.add_stop(stop, cosmic::iced::Color::from_rgb(r, g, b));
                             stop += stop_increment;
                         }
-                        Background::Gradient(cosmic::iced_core::Gradient::Linear(linear))
+                        Background::Gradient(Gradient::Linear(linear))
                     }
                 }),
-                border: cosmic::iced_core::Border {
+                border: Border {
                     radius: theme.cosmic().corner_radii.radius_s.into(),
                     ..Default::default()
                 },
@@ -1724,11 +1715,11 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
 }
 
 fn shader_placeholder<'a, M: 'a>(width: u16, height: u16) -> Element<'a, M> {
-    use cosmic::iced_core::{Background, Degrees, gradient::Linear};
+    use cosmic::iced::{Background, Degrees, Gradient, gradient::Linear};
 
     container(widget::Space::new().width(width).height(height))
         .class(cosmic::theme::Container::custom(|_| container::Style {
-            background: Some(Background::Gradient(cosmic::iced_core::Gradient::Linear(
+            background: Some(Background::Gradient(Gradient::Linear(
                 Linear::new(Degrees(135.0))
                     .add_stop(0.0, cosmic::iced::Color::from_rgb(0.08, 0.02, 0.15))
                     .add_stop(0.5, cosmic::iced::Color::from_rgb(0.02, 0.08, 0.12))

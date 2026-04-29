@@ -13,44 +13,7 @@ use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use crate::gpu::GpuRenderer;
-
-/// WGSL preamble prepended to user shaders.
-const WGSL_PREAMBLE: &str = r#"
-// GlowBerry live wallpaper uniforms
-@group(0) @binding(0) var<uniform> iResolution: vec2f;
-@group(0) @binding(1) var<uniform> iTime: f32;
-"#;
-
-/// WGSL preamble with texture support.
-const WGSL_PREAMBLE_WITH_TEXTURE: &str = r#"
-// GlowBerry live wallpaper uniforms
-@group(0) @binding(0) var<uniform> iResolution: vec2f;
-@group(0) @binding(1) var<uniform> iTime: f32;
-@group(0) @binding(2) var iTexture: texture_2d<f32>;
-@group(0) @binding(3) var iTextureSampler: sampler;
-"#;
-
-/// Full-screen vertex shader.
-const VERTEX_SHADER: &str = r#"
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Full-screen triangle strip
-    var positions = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>( 1.0,  1.0),
-    );
-
-    var out: VertexOutput;
-    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-    return out;
-}
-"#;
+use crate::shader_defs::{VERTEX_SHADER, WGSL_PREAMBLE, WGSL_PREAMBLE_WITH_TEXTURE};
 
 /// Error when loading or compiling a shader.
 #[derive(Debug, thiserror::Error)]
@@ -66,26 +29,12 @@ pub enum ShaderError {
 }
 
 pub fn detect_language(source: &ShaderSource) -> ShaderLanguage {
-    if let ShaderContent::Path(path) = &source.shader {
-        if path
-            .extension()
-            .map_or(false, |ext| ext == "glsl" || ext == "frag")
-        {
-            return ShaderLanguage::Glsl;
-        }
-    }
-
     source.language
 }
 
-fn aligned_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
-    let unpadded = width.saturating_mul(bytes_per_pixel);
-    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-
-    ((unpadded + alignment - 1) / alignment) * alignment
-}
-
 fn texture_upload_data(rgba: &[u8], width: u32, height: u32) -> (Cow<'_, [u8]>, u32, u32) {
+    use crate::shader_defs::aligned_bytes_per_row;
+
     let bytes_per_pixel = 4;
     let unpadded_bytes_per_row = width.saturating_mul(bytes_per_pixel);
     let bytes_per_row = aligned_bytes_per_row(width, bytes_per_pixel);
@@ -113,18 +62,13 @@ fn build_shader_source(
     preamble: &str,
     shader_code: &str,
 ) -> Result<wgpu::ShaderSource<'static>, ShaderError> {
-    let full_shader = match language {
+    match language {
         ShaderLanguage::Wgsl => {
             let full_code = format!("{}\n{}", preamble, shader_code);
-            wgpu::ShaderSource::Wgsl(Cow::Owned(full_code))
+            Ok(wgpu::ShaderSource::Wgsl(Cow::Owned(full_code)))
         }
-        ShaderLanguage::Glsl => {
-            // GLSL would need translation to WGSL, which is not supported yet.
-            return Err(ShaderError::UnsupportedLanguage(ShaderLanguage::Glsl));
-        }
-    };
-
-    Ok(full_shader)
+        _ => Err(ShaderError::UnsupportedLanguage(language)),
+    }
 }
 
 /// A GPU-rendered fragment shader canvas for live wallpapers.
@@ -459,11 +403,6 @@ impl FragmentCanvas {
         self.configured_frame_rate
     }
 
-    /// Get the current effective frame rate.
-    pub fn current_frame_rate(&self) -> u8 {
-        (1.0 / self.frame_interval.as_secs_f64()).round() as u8
-    }
-
     /// Set a temporary frame rate override.
     /// Pass `None` to restore the configured frame rate.
     pub fn set_frame_rate_override(&mut self, frame_rate: Option<u8>) {
@@ -517,30 +456,6 @@ impl FragmentCanvas {
 
 #[cfg(test)]
 mod tests {
-    use glowberry_config::{ShaderContent, ShaderLanguage, ShaderSource};
-
-    #[test]
-    fn detects_glsl_language_for_frag_extension() {
-        let source = ShaderSource {
-            shader: ShaderContent::Path("/tmp/test.frag".into()),
-            source_path: None,
-            params: std::collections::HashMap::new(),
-            background_image: None,
-            language: ShaderLanguage::Wgsl,
-            frame_rate: 30,
-        };
-
-        assert_eq!(super::detect_language(&source), ShaderLanguage::Glsl);
-    }
-
-    #[test]
-    fn aligns_bytes_per_row_to_wgpu_requirement() {
-        let bytes_per_pixel = 4;
-        let aligned = super::aligned_bytes_per_row(1, bytes_per_pixel);
-
-        assert_eq!(aligned, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    }
-
     #[test]
     fn pads_texture_upload_rows_when_needed() {
         let width = 1;
@@ -553,17 +468,5 @@ mod tests {
         assert_eq!(bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         assert_eq!(rows_per_image, height);
         assert_eq!(upload_data.len(), (bytes_per_row * height) as usize);
-    }
-
-    #[test]
-    fn glsl_is_rejected_when_building_shader_source() {
-        let result = super::build_shader_source(ShaderLanguage::Glsl, "preamble", "void main(){}");
-
-        assert!(matches!(
-            result,
-            Err(super::ShaderError::UnsupportedLanguage(
-                ShaderLanguage::Glsl
-            ))
-        ));
     }
 }

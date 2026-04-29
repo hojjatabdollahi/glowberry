@@ -28,12 +28,7 @@ pub fn gradient(
     let mut colors = Vec::with_capacity(gradient.colors.len());
 
     for &[r, g, b] in &*gradient.colors {
-        colors.push(colorgrad::Color::from_linear_rgba(
-            f32::from(r),
-            f32::from(g),
-            f32::from(b),
-            1.0,
-        ));
+        colors.push(colorgrad::Color::from_linear_rgba(r, g, b, 1.0));
     }
 
     let grad = colorgrad::GradientBuilder::new()
@@ -79,7 +74,7 @@ pub fn gradient(
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
         let Color { r, g, b, .. } = grad.at(positioner(x, y) as f32);
 
-        *pixel = image::Rgb([r as f32, g as f32, b as f32]);
+        *pixel = image::Rgb([r, g, b]);
     }
 
     Ok(imgbuf)
