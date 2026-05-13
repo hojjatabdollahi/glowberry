@@ -9,6 +9,7 @@ use cosmic::iced::core::{
     Shell, Size, Widget,
 };
 use cosmic::iced::core::{Point, layout, mouse, renderer};
+use cosmic::iced::widget::image::Handle as ImageHandle;
 
 const PADDING: f32 = 40.0;
 const MONITOR_BORDER_WIDTH: f32 = 2.0;
@@ -16,6 +17,7 @@ const MONITOR_CORNER_RADIUS: f32 = 4.0;
 
 pub struct ExtendEditor<'a, Message> {
     monitors: &'a [MonitorGeometry],
+    image_handle: Option<&'a ImageHandle>,
     image_size: (u32, u32),
     offset_x: f64,
     offset_y: f64,
@@ -27,8 +29,10 @@ pub struct ExtendEditor<'a, Message> {
 }
 
 impl<'a, Message> ExtendEditor<'a, Message> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         monitors: &'a [MonitorGeometry],
+        image_handle: Option<&'a ImageHandle>,
         image_size: (u32, u32),
         offset_x: f64,
         offset_y: f64,
@@ -38,6 +42,7 @@ impl<'a, Message> ExtendEditor<'a, Message> {
     ) -> Self {
         Self {
             monitors,
+            image_handle,
             image_size,
             offset_x,
             offset_y,
@@ -55,7 +60,6 @@ struct State {
     dragging: bool,
     drag_start: Point,
     offset_at_drag_start: (f64, f64),
-    /// Computed each layout: transforms virtual-desktop coords to widget coords
     view_scale: f32,
     view_origin: (f32, f32),
 }
@@ -80,7 +84,6 @@ impl State {
     }
 }
 
-/// Compute the bounding box of all monitors in virtual desktop coordinates.
 fn virtual_desktop_bounds(monitors: &[MonitorGeometry]) -> (f64, f64, f64, f64) {
     if monitors.is_empty() {
         return (0.0, 0.0, 1920.0, 1080.0);
@@ -130,10 +133,8 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
         let limits = limits.width(self.width).height(self.height);
         let size = limits.resolve(self.width, self.height, Size::ZERO);
 
-        // Compute view transform: fit the virtual desktop + image bounds into widget
         let (vd_x, vd_y, vd_w, vd_h) = virtual_desktop_bounds(self.monitors);
 
-        // Also include the image rect in the bounds we need to show
         let img_w = self.image_size.0 as f64 * self.img_scale;
         let img_h = self.image_size.1 as f64 * self.img_scale;
         let scene_min_x = vd_x.min(self.offset_x);
@@ -276,7 +277,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
             core::Background::Color(cosmic_theme.palette.neutral_2.into()),
         );
 
-        // Draw image rectangle (semi-transparent blue)
+        // Compute image rectangle in widget coordinates
         let img_w = self.image_size.0 as f64 * self.img_scale;
         let img_h = self.image_size.1 as f64 * self.img_scale;
         let (ix, iy) = state.virtual_to_widget(self.offset_x, self.offset_y);
@@ -290,8 +291,24 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
             height: ih,
         };
 
-        // Clip image rect to widget bounds
-        if let Some(clipped) = img_rect.intersection(&bounds) {
+        // Draw the actual image thumbnail if available
+        if let Some(handle) = self.image_handle {
+            use core::image::Renderer as ImageRenderer;
+            ImageRenderer::draw_image(
+                renderer,
+                core::Image {
+                    handle: handle.clone(),
+                    filter_method: core::image::FilterMethod::Linear,
+                    rotation: core::Radians(0.0),
+                    border_radius: Default::default(),
+                    opacity: 0.85,
+                    snap: true,
+                },
+                img_rect,
+                bounds,
+            );
+        } else if let Some(clipped) = img_rect.intersection(&bounds) {
+            // Fallback: draw colored rectangle if no image handle
             let mut img_color = cosmic_theme.accent_color();
             img_color.alpha = 0.25;
             renderer.fill_quad(
@@ -309,7 +326,24 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
             );
         }
 
-        // Draw monitor rectangles
+        // Draw a thin border around the image rect so it's visible
+        if let Some(clipped) = img_rect.intersection(&bounds) {
+            renderer.fill_quad(
+                Quad {
+                    bounds: clipped,
+                    border: Border {
+                        color: cosmic_theme.accent_color().into(),
+                        radius: 0.0.into(),
+                        width: 1.5,
+                    },
+                    shadow: Default::default(),
+                    snap: true,
+                },
+                core::Background::Color(core::Color::TRANSPARENT),
+            );
+        }
+
+        // Draw monitor rectangles on top of the image
         for (i, monitor) in self.monitors.iter().enumerate() {
             let (mx, my) =
                 state.virtual_to_widget(monitor.position.0 as f64, monitor.position.1 as f64);
@@ -323,12 +357,12 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 height: mh,
             };
 
-            // Check if image overlaps this monitor
             let has_overlap = img_rect.intersection(&mon_rect).is_some();
 
             let (bg_color, border_color) = if has_overlap {
+                // Mostly transparent so the image shows through
                 let mut accent = cosmic_theme.accent_color();
-                accent.alpha = 0.15;
+                accent.alpha = 0.08;
                 (accent, cosmic_theme.accent_color())
             } else {
                 let mut neutral = cosmic_theme.palette.neutral_4;
@@ -352,12 +386,30 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
 
             // Draw monitor label
             let label = format!("{}", i + 1);
-            let label_bounds = Rectangle {
-                x: mon_rect.x + mon_rect.width / 2.0 - 16.0,
-                y: mon_rect.y + mon_rect.height / 2.0 - 12.0,
-                width: 32.0,
-                height: 24.0,
+            let label_bg = Rectangle {
+                x: mon_rect.x + mon_rect.width / 2.0 - 12.0,
+                y: mon_rect.y + mon_rect.height / 2.0 - 10.0,
+                width: 24.0,
+                height: 20.0,
             };
+
+            // Label background pill for readability over image
+            renderer.fill_quad(
+                Quad {
+                    bounds: label_bg,
+                    border: Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    shadow: Default::default(),
+                    snap: true,
+                },
+                core::Background::Color({
+                    let mut c = cosmic_theme.palette.neutral_1;
+                    c.alpha = 0.8;
+                    c.into()
+                }),
+            );
 
             core::text::Renderer::fill_text(
                 renderer,
@@ -366,7 +418,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     size: core::Pixels(14.0),
                     line_height: core::text::LineHeight::Relative(1.2),
                     font: cosmic::font::bold(),
-                    bounds: label_bounds.size(),
+                    bounds: label_bg.size(),
                     align_x: cosmic::iced::core::text::Alignment::Center,
                     align_y: cosmic::iced::core::alignment::Vertical::Center,
                     shaping: core::text::Shaping::Basic,
@@ -374,8 +426,8 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     ellipsize: core::text::Ellipsize::None,
                 },
                 core::Point {
-                    x: label_bounds.center_x(),
-                    y: label_bounds.center_y(),
+                    x: label_bg.center_x(),
+                    y: label_bg.center_y(),
                 },
                 cosmic_theme.palette.neutral_10.into(),
                 bounds,

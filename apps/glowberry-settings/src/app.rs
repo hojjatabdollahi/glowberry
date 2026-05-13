@@ -129,6 +129,8 @@ pub struct GlowBerrySettings {
     extend_scale: f64,
     /// Natural size of the selected image for extend mode
     extend_image_size: (u32, u32),
+    /// Image handle for the extend editor preview
+    extend_image_handle: Option<ImageHandle>,
 }
 
 /// Information about an available shader
@@ -398,6 +400,7 @@ impl cosmic::Application for GlowBerrySettings {
             extend_offset: (0.0, 0.0),
             extend_scale: 1.0,
             extend_image_size: (0, 0),
+            extend_image_handle: None,
         };
 
         // Load prefer_low_power, power saving, extend config, and window opacity from config
@@ -799,12 +802,17 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::OpenExtendEditor => {
-                // Load the selected image dimensions for extend mode
+                // Load the selected image for extend mode
                 if let Choice::Wallpaper(key) = self.selection.active {
+                    // Use the display image as the editor thumbnail
                     if let Some(img) = self.selection.display_images.get(key) {
-                        self.extend_image_size = (img.width(), img.height());
+                        self.extend_image_handle = Some(ImageHandle::from_rgba(
+                            img.width(),
+                            img.height(),
+                            img.to_vec(),
+                        ));
                     }
-                    // Also load the full-resolution image size
+                    // Load the full-resolution image dimensions
                     if let Some(path) = self.selection.paths.get(key)
                         && let Ok(dims) = image::image_dimensions(path)
                     {
@@ -1831,6 +1839,7 @@ impl GlowBerrySettings {
         // Editor widget
         let editor = crate::widgets::extend_editor::ExtendEditor::new(
             &self.monitor_geometry,
+            self.extend_image_handle.as_ref(),
             self.extend_image_size,
             self.extend_offset.0,
             self.extend_offset.1,
