@@ -123,14 +123,22 @@ pub struct GlowBerrySettings {
     monitor_geometry: Vec<crate::monitor_query::MonitorGeometry>,
     /// Whether the extend editor page is open
     extend_editor_open: bool,
-    /// Image offset in virtual desktop coordinates
-    extend_offset: (f64, f64),
-    /// Image scale factor
-    extend_scale: f64,
-    /// Natural size of the selected image for extend mode
-    extend_image_size: (u32, u32),
-    /// Image handle for the extend editor preview
-    extend_image_handle: Option<ImageHandle>,
+    /// Image layers on the virtual desktop canvas
+    extend_layers: SlotMap<DefaultKey, ExtendLayerState>,
+    /// Currently selected layer
+    extend_selected_layer: Option<DefaultKey>,
+    /// Next z-index to assign
+    extend_next_z: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ExtendLayerState {
+    source_path: PathBuf,
+    image_handle: Option<ImageHandle>,
+    image_size: (u32, u32),
+    offset: (f64, f64),
+    scale: f64,
+    z_index: usize,
 }
 
 /// Information about an available shader
@@ -240,16 +248,26 @@ pub enum Message {
     CloseExtendEditor,
     /// Monitor geometry loaded from cosmic-randr
     MonitorsLoaded(Vec<crate::monitor_query::MonitorGeometry>),
-    /// Image offset changed in extend editor
-    ExtendOffsetChanged(f64, f64),
-    /// Image scale changed in extend editor
-    ExtendScaleChanged(f64),
-    /// Apply extend configuration (crop and save)
-    ApplyExtend,
-    /// Extend crops completed
-    ExtendApplied(Result<Vec<(String, PathBuf)>, String>),
-    /// Center the image on the virtual desktop
+    /// Add a wallpaper as a new layer (wallpaper key from selection)
+    ExtendAddLayer(DefaultKey),
+    /// Remove a layer
+    ExtendRemoveLayer(DefaultKey),
+    /// Layer moved in the editor
+    ExtendLayerMoved(DefaultKey, f64, f64),
+    /// Layer scaled in the editor
+    ExtendLayerScaled(DefaultKey, f64),
+    /// Layer selected/deselected
+    ExtendLayerSelected(Option<DefaultKey>),
+    /// Move selected layer up in z-order
+    ExtendLayerUp,
+    /// Move selected layer down in z-order
+    ExtendLayerDown,
+    /// Center the selected layer on the virtual desktop
     ExtendCenter,
+    /// Apply extend configuration (composite and save)
+    ApplyExtend,
+    /// Extend compositing completed
+    ExtendApplied(Result<Vec<(String, PathBuf)>, String>),
 }
 
 /// Default colors available in the color picker
@@ -397,10 +415,9 @@ impl cosmic::Application for GlowBerrySettings {
             extend_config: ExtendConfig::default(),
             monitor_geometry: Vec::new(),
             extend_editor_open: false,
-            extend_offset: (0.0, 0.0),
-            extend_scale: 1.0,
-            extend_image_size: (0, 0),
-            extend_image_handle: None,
+            extend_layers: SlotMap::new(),
+            extend_selected_layer: None,
+            extend_next_z: 0,
         };
 
         // Load prefer_low_power, power saving, extend config, and window opacity from config
@@ -409,11 +426,6 @@ impl cosmic::Application for GlowBerrySettings {
             app.power_saving = ctx.power_saving_config();
             app.window_opacity = ctx.window_opacity();
             app.extend_config = ctx.extend_config();
-            app.extend_offset = (
-                app.extend_config.img_offset_x,
-                app.extend_config.img_offset_y,
-            );
-            app.extend_scale = app.extend_config.img_scale;
 
             // Set dropdown indices based on loaded config
             app.selected_on_battery_action = match app.power_saving.on_battery_action {
@@ -802,25 +814,6 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::OpenExtendEditor => {
-                // Load the selected image for extend mode
-                if let Choice::Wallpaper(key) = self.selection.active {
-                    // Use the display image as the editor thumbnail
-                    if let Some(img) = self.selection.display_images.get(key) {
-                        self.extend_image_handle = Some(ImageHandle::from_rgba(
-                            img.width(),
-                            img.height(),
-                            img.to_vec(),
-                        ));
-                    }
-                    // Load the full-resolution image dimensions
-                    if let Some(path) = self.selection.paths.get(key)
-                        && let Ok(dims) = image::image_dimensions(path)
-                    {
-                        self.extend_image_size = dims;
-                    }
-                }
-
-                // Spawn monitor query
                 return Task::perform(crate::monitor_query::query_monitors(), |result| {
                     cosmic::Action::App(Message::MonitorsLoaded(result.unwrap_or_default()))
                 });
@@ -829,10 +822,9 @@ impl cosmic::Application for GlowBerrySettings {
             Message::MonitorsLoaded(monitors) => {
                 self.monitor_geometry = monitors;
                 self.extend_editor_open = true;
-
-                // Auto-center if offset is at origin and image has valid size
-                if self.extend_offset == (0.0, 0.0) && self.extend_image_size != (0, 0) {
-                    self.auto_center_extend_image();
+                // Restore layers from saved config if we have none loaded
+                if self.extend_layers.is_empty() && !self.extend_config.layers.is_empty() {
+                    self.restore_extend_layers_from_config();
                 }
             }
 
@@ -840,22 +832,101 @@ impl cosmic::Application for GlowBerrySettings {
                 self.extend_editor_open = false;
             }
 
-            Message::ExtendOffsetChanged(x, y) => {
-                self.extend_offset = (x, y);
+            Message::ExtendAddLayer(wp_key) => {
+                let Some(path) = self.selection.paths.get(wp_key).cloned() else {
+                    return Task::none();
+                };
+                let image_handle = self
+                    .selection
+                    .display_images
+                    .get(wp_key)
+                    .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
+                let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
+
+                let z = self.extend_next_z;
+                self.extend_next_z += 1;
+
+                let mut layer = ExtendLayerState {
+                    source_path: path,
+                    image_handle,
+                    image_size,
+                    offset: (0.0, 0.0),
+                    scale: 1.0,
+                    z_index: z,
+                };
+                self.auto_center_layer(&mut layer);
+                let key = self.extend_layers.insert(layer);
+                self.extend_selected_layer = Some(key);
             }
 
-            Message::ExtendScaleChanged(scale) => {
-                self.extend_scale = scale;
+            Message::ExtendRemoveLayer(key) => {
+                self.extend_layers.remove(key);
+                if self.extend_selected_layer == Some(key) {
+                    self.extend_selected_layer = None;
+                }
+                self.renormalize_z_indices();
+            }
+
+            Message::ExtendLayerMoved(key, x, y) => {
+                if let Some(layer) = self.extend_layers.get_mut(key) {
+                    layer.offset = (x, y);
+                }
+            }
+
+            Message::ExtendLayerScaled(key, scale) => {
+                if let Some(layer) = self.extend_layers.get_mut(key) {
+                    layer.scale = scale;
+                }
+            }
+
+            Message::ExtendLayerSelected(maybe_key) => {
+                self.extend_selected_layer = maybe_key;
+            }
+
+            Message::ExtendLayerUp => {
+                if let Some(sel_key) = self.extend_selected_layer {
+                    let sel_z = self.extend_layers[sel_key].z_index;
+                    if let Some((swap_key, _)) = self
+                        .extend_layers
+                        .iter()
+                        .filter(|(k, l)| *k != sel_key && l.z_index > sel_z)
+                        .min_by_key(|(_, l)| l.z_index)
+                    {
+                        let swap_z = self.extend_layers[swap_key].z_index;
+                        self.extend_layers[sel_key].z_index = swap_z;
+                        self.extend_layers[swap_key].z_index = sel_z;
+                    }
+                }
+            }
+
+            Message::ExtendLayerDown => {
+                if let Some(sel_key) = self.extend_selected_layer {
+                    let sel_z = self.extend_layers[sel_key].z_index;
+                    if let Some((swap_key, _)) = self
+                        .extend_layers
+                        .iter()
+                        .filter(|(k, l)| *k != sel_key && l.z_index < sel_z)
+                        .max_by_key(|(_, l)| l.z_index)
+                    {
+                        let swap_z = self.extend_layers[swap_key].z_index;
+                        self.extend_layers[sel_key].z_index = swap_z;
+                        self.extend_layers[swap_key].z_index = sel_z;
+                    }
+                }
             }
 
             Message::ExtendCenter => {
-                self.auto_center_extend_image();
+                if let Some(sel_key) = self.extend_selected_layer {
+                    let mut layer = self.extend_layers[sel_key].clone();
+                    self.auto_center_layer(&mut layer);
+                    self.extend_layers[sel_key] = layer;
+                }
             }
 
             Message::ApplyExtend => {
-                let Some(source_path) = self.get_extend_source_path() else {
+                if self.extend_layers.is_empty() {
                     return Task::none();
-                };
+                }
 
                 let monitors: Vec<glowberry_lib::extend_crop::MonitorInfo> = self
                     .monitor_geometry
@@ -869,26 +940,40 @@ impl cosmic::Application for GlowBerrySettings {
                     })
                     .collect();
 
-                let offset = self.extend_offset;
-                let scale = self.extend_scale;
+                let mut layer_infos: Vec<glowberry_lib::extend_crop::LayerInfo> = self
+                    .extend_layers
+                    .values()
+                    .map(|l| glowberry_lib::extend_crop::LayerInfo {
+                        source_path: l.source_path.clone(),
+                        offset: l.offset,
+                        img_scale: l.scale,
+                        z_index: l.z_index,
+                    })
+                    .collect();
+
                 let cache_dir = glowberry_lib::extend_crop::cache_dir();
 
                 // Save extend config
-                self.extend_config.source_path = Some(source_path.clone());
-                self.extend_config.img_offset_x = offset.0;
-                self.extend_config.img_offset_y = offset.1;
-                self.extend_config.img_scale = scale;
+                self.extend_config.layers = self
+                    .extend_layers
+                    .values()
+                    .map(|l| glowberry_config::extend::ExtendLayer {
+                        source_path: l.source_path.clone(),
+                        img_offset_x: l.offset.0,
+                        img_offset_y: l.offset.1,
+                        img_scale: l.scale,
+                        z_index: l.z_index,
+                    })
+                    .collect();
                 if let Some(ctx) = &self.config_context {
                     let _ = ctx.save_extend_config(&self.extend_config);
                 }
 
                 return Task::perform(
                     async move {
-                        glowberry_lib::extend_crop::crop_for_monitors(
-                            &source_path,
+                        glowberry_lib::extend_crop::composite_for_monitors(
+                            &mut layer_infos,
                             &monitors,
-                            offset,
-                            scale,
                             &cache_dir,
                         )
                         .map_err(|e| e.to_string())
@@ -910,7 +995,7 @@ impl cosmic::Application for GlowBerrySettings {
                     tracing::info!("Extended wallpapers applied successfully");
                 }
                 Err(e) => {
-                    tracing::error!("Failed to crop extended wallpapers: {}", e);
+                    tracing::error!("Failed to composite extended wallpapers: {}", e);
                 }
             },
         }
@@ -1439,12 +1524,11 @@ impl GlowBerrySettings {
         }
     }
 
-    fn auto_center_extend_image(&mut self) {
-        if self.monitor_geometry.is_empty() || self.extend_image_size == (0, 0) {
+    fn auto_center_layer(&self, layer: &mut ExtendLayerState) {
+        if self.monitor_geometry.is_empty() || layer.image_size == (0, 0) {
             return;
         }
 
-        // Compute virtual desktop bounding box
         let mut min_x = i32::MAX;
         let mut min_y = i32::MAX;
         let mut max_x = i32::MIN;
@@ -1461,21 +1545,67 @@ impl GlowBerrySettings {
         let vd_cx = min_x as f64 + vd_w / 2.0;
         let vd_cy = min_y as f64 + vd_h / 2.0;
 
-        // Scale image to cover the virtual desktop
-        let img_w = self.extend_image_size.0 as f64;
-        let img_h = self.extend_image_size.1 as f64;
+        let img_w = layer.image_size.0 as f64;
+        let img_h = layer.image_size.1 as f64;
         let scale = (vd_w / img_w).max(vd_h / img_h);
-        self.extend_scale = scale;
-
-        // Center the image on the virtual desktop
-        self.extend_offset = (vd_cx - img_w * scale / 2.0, vd_cy - img_h * scale / 2.0);
+        layer.scale = scale;
+        layer.offset = (vd_cx - img_w * scale / 2.0, vd_cy - img_h * scale / 2.0);
     }
 
-    fn get_extend_source_path(&self) -> Option<PathBuf> {
-        if let Choice::Wallpaper(key) = self.selection.active {
-            self.selection.paths.get(key).cloned()
-        } else {
-            None
+    fn renormalize_z_indices(&mut self) {
+        let mut sorted: Vec<(DefaultKey, usize)> = self
+            .extend_layers
+            .iter()
+            .map(|(k, l)| (k, l.z_index))
+            .collect();
+        sorted.sort_by_key(|(_, z)| *z);
+        for (i, (key, _)) in sorted.into_iter().enumerate() {
+            self.extend_layers[key].z_index = i;
+        }
+        self.extend_next_z = self.extend_layers.len();
+    }
+
+    fn restore_extend_layers_from_config(&mut self) {
+        self.extend_layers.clear();
+        self.extend_next_z = 0;
+        for config_layer in &self.extend_config.layers {
+            let image_handle = self
+                .selection
+                .display_images
+                .iter()
+                .find(|(_, _)| {
+                    // Try to match by path
+                    false
+                })
+                .map(|(_, img)| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
+            // Try to load the image handle from the path directly
+            let image_handle = image_handle.or_else(|| {
+                image::open(&config_layer.source_path).ok().map(|img| {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = (rgba.width(), rgba.height());
+                    // Resize to a reasonable thumbnail size
+                    let thumb = image::imageops::resize(
+                        &rgba,
+                        w.min(400),
+                        h.min(300),
+                        image::imageops::FilterType::Triangle,
+                    );
+                    ImageHandle::from_rgba(thumb.width(), thumb.height(), thumb.into_vec())
+                })
+            });
+            let image_size =
+                image::image_dimensions(&config_layer.source_path).unwrap_or((800, 600));
+
+            let z = config_layer.z_index;
+            self.extend_next_z = self.extend_next_z.max(z + 1);
+            self.extend_layers.insert(ExtendLayerState {
+                source_path: config_layer.source_path.clone(),
+                image_handle,
+                image_size,
+                offset: (config_layer.img_offset_x, config_layer.img_offset_y),
+                scale: config_layer.img_scale,
+                z_index: z,
+            });
         }
     }
 
@@ -1818,105 +1948,185 @@ impl GlowBerrySettings {
     }
 
     fn view_extend_editor(&self) -> Element<'_, Message> {
-        let mut children: Vec<Element<'_, Message>> = Vec::with_capacity(6);
+        use crate::widgets::extend_editor::{ExtendEditor, LayerView};
 
-        // Back button
-        children.push(
+        // Left panel: scrollable wallpaper thumbnail strip
+        let thumbnails: Vec<Element<'_, Message>> = self
+            .selection
+            .selection_handles
+            .iter()
+            .filter_map(|(key, handle)| {
+                // Only show wallpapers that have a path
+                if self.selection.paths.contains_key(key) {
+                    Some(
+                        button::image(handle.clone())
+                            .width(Length::Fixed(100.0))
+                            .height(Length::Fixed(64.0))
+                            .on_press(Message::ExtendAddLayer(key))
+                            .into(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let thumb_strip = widget::scrollable(
+            widget::column::with_children(thumbnails)
+                .spacing(6)
+                .padding(4),
+        )
+        .width(Length::Fixed(116.0))
+        .height(Length::Fill);
+
+        // Right panel: canvas + controls
+        let mut layer_views: Vec<LayerView<'_>> = self
+            .extend_layers
+            .iter()
+            .map(|(key, layer)| LayerView {
+                id: key,
+                image_handle: layer.image_handle.as_ref(),
+                image_size: layer.image_size,
+                offset_x: layer.offset.0,
+                offset_y: layer.offset.1,
+                img_scale: layer.scale,
+                z_index: layer.z_index,
+                selected: self.extend_selected_layer == Some(key),
+            })
+            .collect();
+        layer_views.sort_by_key(|l| l.z_index);
+
+        let editor = ExtendEditor::new(
+            &self.monitor_geometry,
+            layer_views,
+            Message::ExtendLayerMoved,
+            Message::ExtendLayerScaled,
+            Message::ExtendLayerSelected,
+        );
+
+        // Back + title row
+        let header = widget::row::with_children(vec![
             button::text(fl!("extend-back"))
                 .leading_icon(widget::icon::from_name("go-previous-symbolic").size(16))
                 .on_press(Message::CloseExtendEditor)
                 .into(),
-        );
-
-        // Title
-        children.push(
             text::heading(fl!("extend-editor-title"))
                 .align_x(Alignment::Center)
                 .width(Length::Fill)
                 .into(),
-        );
-
-        // Editor widget
-        let editor = crate::widgets::extend_editor::ExtendEditor::new(
-            &self.monitor_geometry,
-            self.extend_image_handle.as_ref(),
-            self.extend_image_size,
-            self.extend_offset.0,
-            self.extend_offset.1,
-            self.extend_scale,
-            Message::ExtendOffsetChanged,
-            Message::ExtendScaleChanged,
-        );
-        children.push(
-            container(editor)
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
-                .into(),
-        );
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
 
         // Hint text
-        children.push(
+        let hint: Element<'_, Message> = if self.extend_layers.is_empty() {
+            text::body(fl!("extend-no-layers"))
+                .align_x(Alignment::Center)
+                .width(Length::Fill)
+                .into()
+        } else {
             text::body(fl!("extend-hint"))
                 .align_x(Alignment::Center)
                 .width(Length::Fill)
-                .into(),
-        );
+                .into()
+        };
 
-        // Scale slider
-        children.push(
-            settings::item(
-                fl!("extend-scale"),
-                widget::row::with_children(vec![
-                    slider(0.05..=10.0, self.extend_scale as f32, |v| {
-                        Message::ExtendScaleChanged(v as f64)
-                    })
-                    .step(0.01)
-                    .width(Length::Fixed(200.0))
+        // Controls row
+        let has_selection = self.extend_selected_layer.is_some();
+        let mut controls: Vec<Element<'_, Message>> = Vec::new();
+
+        if has_selection {
+            // Z-order buttons
+            controls.push(
+                widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+                    .on_press(Message::ExtendLayerUp)
                     .into(),
-                    widget::text(format!("{:.0}%", self.extend_scale * 100.0))
-                        .width(Length::Fixed(60.0))
-                        .into(),
-                ])
-                .spacing(8)
-                .align_y(Alignment::Center),
-            )
-            .into(),
-        );
+            );
+            controls.push(
+                widget::button::icon(widget::icon::from_name("go-down-symbolic"))
+                    .on_press(Message::ExtendLayerDown)
+                    .into(),
+            );
+            controls.push(
+                widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                    .on_press(Message::ExtendRemoveLayer(
+                        self.extend_selected_layer.unwrap(),
+                    ))
+                    .class(cosmic::theme::Button::Destructive)
+                    .into(),
+            );
 
-        // Center + Apply buttons
-        let buttons = widget::row::with_children(vec![
-            button::text(fl!("extend-center"))
-                .on_press(Message::ExtendCenter)
-                .into(),
+            // Scale slider for selected layer
+            if let Some(key) = self.extend_selected_layer
+                && let Some(layer) = self.extend_layers.get(key)
+            {
+                let layer_key = key;
+                controls.push(
+                    widget::row::with_children(vec![
+                        widget::text(fl!("extend-scale")).into(),
+                        slider(0.05..=10.0, layer.scale as f32, move |v| {
+                            Message::ExtendLayerScaled(layer_key, v as f64)
+                        })
+                        .step(0.01)
+                        .width(Length::Fixed(120.0))
+                        .into(),
+                        widget::text(format!("{:.0}%", layer.scale * 100.0))
+                            .width(Length::Fixed(50.0))
+                            .into(),
+                    ])
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .into(),
+                );
+            }
+
+            controls.push(
+                button::text(fl!("extend-center"))
+                    .on_press(Message::ExtendCenter)
+                    .into(),
+            );
+        }
+
+        controls.push(
             button::text(fl!("extend-apply"))
                 .on_press(Message::ApplyExtend)
                 .class(cosmic::theme::Button::Suggested)
                 .into(),
-        ])
-        .spacing(12)
-        .align_y(Alignment::Center);
+        );
 
-        children.push(
-            container(buttons)
+        let controls_row = widget::row::with_children(controls)
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+        // Right column: header, canvas, hint, controls
+        let right_panel = widget::column::with_children(vec![
+            header.into(),
+            container(editor)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            hint,
+            container(controls_row)
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .into(),
-        );
-
-        let opacity = self.window_opacity;
-        let scrollable_content = widget::scrollable(
-            widget::column::with_children(children)
-                .spacing(16)
-                .padding(20)
-                .width(Length::Fill)
-                .align_x(Alignment::Center),
-        )
+        ])
+        .spacing(8)
+        .padding(12)
         .width(Length::Fill)
         .height(Length::Fill);
 
-        container(scrollable_content)
+        // Main layout: thumbnail strip | canvas area
+        let main_row = widget::row::with_children(vec![thumb_strip.into(), right_panel.into()])
+            .spacing(4)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        let opacity = self.window_opacity;
+        container(main_row)
             .width(Length::Fill)
             .height(Length::Fill)
+            .padding(8)
             .class(cosmic::theme::Container::custom(move |theme| {
                 let cosmic = theme.cosmic();
                 let mut bg_color: cosmic::iced::Color = cosmic.background.base.into();
