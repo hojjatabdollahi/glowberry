@@ -319,7 +319,6 @@ impl Entry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub same_on_all: bool,
-    pub extend_on_all: bool,
     pub outputs: HashSet<String>,
     pub backgrounds: Vec<Entry>,
     pub default_background: Entry,
@@ -329,7 +328,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             same_on_all: true,
-            extend_on_all: false,
             outputs: HashSet::new(),
             backgrounds: Vec::new(),
             default_background: Entry::fallback(),
@@ -347,11 +345,6 @@ impl Config {
         let same_on_all = context.same_on_all();
         let mut config = Self {
             same_on_all,
-            extend_on_all: if same_on_all {
-                false
-            } else {
-                context.extend_on_all()
-            },
             ..Default::default()
         };
 

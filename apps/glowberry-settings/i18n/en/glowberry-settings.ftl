@@ -74,13 +74,14 @@ about = About
 # Display selection
 all-displays = All Displays
 
-# Extend on all screens
-extend-on-all = Extend on all screens
-configure-extended = Configure Extended...
-extend-editor-title = Extended Wallpaper
+# Multi-monitor wallpaper
 extend-apply = Apply
-extend-back = Back
-extend-scale = Scale
-extend-center = Center
-extend-hint = Drag to move, scroll to resize. Use arrows to change layer order.
-extend-no-layers = Click a wallpaper thumbnail on the left to add a layer.
+extend-hint = Drag to move, scroll to resize. Use side buttons to change layer order.
+extend-no-layers = Click a wallpaper below to add it to the preview.
+clear-all = Clear All
+
+# Wallpaper placement popup
+wp-customize = Customize in preview
+wp-duplicate-all = Duplicate on all screens
+wp-span-all = Span across all screens
+wp-show-on = Show on
