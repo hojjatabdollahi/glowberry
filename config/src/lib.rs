@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+pub mod extend;
 pub mod power_saving;
 pub mod state;
 
@@ -318,6 +319,7 @@ impl Entry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub same_on_all: bool,
+    pub extend_on_all: bool,
     pub outputs: HashSet<String>,
     pub backgrounds: Vec<Entry>,
     pub default_background: Entry,
@@ -327,6 +329,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             same_on_all: true,
+            extend_on_all: false,
             outputs: HashSet::new(),
             backgrounds: Vec::new(),
             default_background: Entry::fallback(),
@@ -341,8 +344,14 @@ impl Config {
     ///
     /// Fails if invalid iter are stored within cosmic-config at time of parsing them.
     pub fn load(context: &Context) -> Result<Self, cosmic_config::Error> {
+        let same_on_all = context.same_on_all();
         let mut config = Self {
-            same_on_all: context.same_on_all(),
+            same_on_all,
+            extend_on_all: if same_on_all {
+                false
+            } else {
+                context.extend_on_all()
+            },
             ..Default::default()
         };
 

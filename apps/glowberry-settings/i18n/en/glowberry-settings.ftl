@@ -73,3 +73,13 @@ about = About
 
 # Display selection
 all-displays = All Displays
+
+# Extend on all screens
+extend-on-all = Extend on all screens
+configure-extended = Configure Extended...
+extend-editor-title = Extended Wallpaper
+extend-apply = Apply
+extend-back = Back
+extend-scale = Image Scale
+extend-center = Center
+extend-hint = Drag to position the image. Scroll to zoom.
