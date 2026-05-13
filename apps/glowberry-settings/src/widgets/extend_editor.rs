@@ -16,6 +16,8 @@ const PADDING: f32 = 20.0;
 const MONITOR_BORDER_WIDTH: f32 = 2.0;
 const MONITOR_CORNER_RADIUS: f32 = 4.0;
 const SELECTION_BORDER_WIDTH: f32 = 2.5;
+const HANDLE_SIZE: f32 = 12.0;
+const HANDLE_HIT_SIZE: f32 = 16.0;
 
 #[derive(Clone, Debug)]
 pub struct LayerView<'a> {
@@ -59,11 +61,22 @@ impl<'a, Message> ExtendEditor<'a, Message> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragMode {
+    Move,
+    ResizeNW,
+    ResizeNE,
+    ResizeSW,
+    ResizeSE,
+}
+
 #[derive(Default)]
 struct State {
+    drag_mode: Option<DragMode>,
     dragging_layer: Option<DefaultKey>,
     drag_start: Point,
     offset_at_drag_start: (f64, f64),
+    scale_at_drag_start: f64,
     view_scale: f32,
     view_origin: (f32, f32),
 }
@@ -88,10 +101,44 @@ impl State {
     }
 }
 
-fn layer_rect_virtual(layer: &LayerView) -> (f64, f64, f64, f64) {
-    let w = layer.image_size.0 as f64 * layer.img_scale;
-    let h = layer.image_size.1 as f64 * layer.img_scale;
-    (layer.offset_x, layer.offset_y, w, h)
+fn layer_widget_rect(state: &State, layer: &LayerView, bounds: &Rectangle) -> Rectangle {
+    let (lx, ly) = state.virtual_to_widget(layer.offset_x, layer.offset_y);
+    let lw = layer.image_size.0 as f64 * layer.img_scale;
+    let lh = layer.image_size.1 as f64 * layer.img_scale;
+    Rectangle {
+        x: bounds.x + lx,
+        y: bounds.y + ly,
+        width: lw as f32 * state.view_scale,
+        height: lh as f32 * state.view_scale,
+    }
+}
+
+fn corner_hit_rect(cx: f32, cy: f32) -> Rectangle {
+    Rectangle {
+        x: cx - HANDLE_HIT_SIZE / 2.0,
+        y: cy - HANDLE_HIT_SIZE / 2.0,
+        width: HANDLE_HIT_SIZE,
+        height: HANDLE_HIT_SIZE,
+    }
+}
+
+fn hit_test_handles(rect: &Rectangle, abs_pos: Point) -> Option<DragMode> {
+    let corners = [
+        (rect.x, rect.y, DragMode::ResizeNW),
+        (rect.x + rect.width, rect.y, DragMode::ResizeNE),
+        (rect.x, rect.y + rect.height, DragMode::ResizeSW),
+        (
+            rect.x + rect.width,
+            rect.y + rect.height,
+            DragMode::ResizeSE,
+        ),
+    ];
+    for (cx, cy, mode) in corners {
+        if corner_hit_rect(cx, cy).contains(abs_pos) {
+            return Some(mode);
+        }
+    }
+    None
 }
 
 fn scene_bounds(monitors: &[MonitorGeometry], layers: &[LayerView]) -> (f64, f64, f64, f64) {
@@ -110,11 +157,12 @@ fn scene_bounds(monitors: &[MonitorGeometry], layers: &[LayerView]) -> (f64, f64
     }
 
     for l in layers {
-        let (lx, ly, lw, lh) = layer_rect_virtual(l);
-        min_x = min_x.min(lx);
-        min_y = min_y.min(ly);
-        max_x = max_x.max(lx + lw);
-        max_y = max_y.max(ly + lh);
+        let w = l.image_size.0 as f64 * l.img_scale;
+        let h = l.image_size.1 as f64 * l.img_scale;
+        min_x = min_x.min(l.offset_x);
+        min_y = min_y.min(l.offset_y);
+        max_x = max_x.max(l.offset_x + w);
+        max_y = max_y.max(l.offset_y + h);
     }
 
     if min_x > max_x {
@@ -123,6 +171,34 @@ fn scene_bounds(monitors: &[MonitorGeometry], layers: &[LayerView]) -> (f64, f64
 
     (min_x, min_y, max_x - min_x, max_y - min_y)
 }
+
+fn draw_corner_handle(
+    renderer: &mut Renderer,
+    cx: f32,
+    cy: f32,
+    color: cosmic_theme::palette::Srgba,
+) {
+    renderer.fill_quad(
+        Quad {
+            bounds: Rectangle {
+                x: cx - HANDLE_SIZE / 2.0,
+                y: cy - HANDLE_SIZE / 2.0,
+                width: HANDLE_SIZE,
+                height: HANDLE_SIZE,
+            },
+            border: Border {
+                radius: (HANDLE_SIZE / 2.0).into(),
+                width: 2.0,
+                color: core::Color::WHITE,
+            },
+            shadow: Default::default(),
+            snap: true,
+        },
+        core::Background::Color(color.into()),
+    );
+}
+
+use cosmic::cosmic_theme;
 
 impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'_, Message> {
     fn tag(&self) -> tree::Tag {
@@ -189,26 +265,32 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
             core::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(position) = cursor.position_in(bounds) {
                     let state = tree.state.downcast_mut::<State>();
+                    let abs_pos = Point {
+                        x: bounds.x + position.x,
+                        y: bounds.y + position.y,
+                    };
 
-                    // Hit-test layers in reverse z-order (top-first)
+                    // First: check resize handles on the selected layer
+                    if let Some(selected) = self.layers.iter().find(|l| l.selected) {
+                        let rect = layer_widget_rect(state, selected, &bounds);
+                        if let Some(mode) = hit_test_handles(&rect, abs_pos) {
+                            state.drag_mode = Some(mode);
+                            state.dragging_layer = Some(selected.id);
+                            state.drag_start = position;
+                            state.offset_at_drag_start = (selected.offset_x, selected.offset_y);
+                            state.scale_at_drag_start = selected.img_scale;
+                            shell.capture_event();
+                            return;
+                        }
+                    }
+
+                    // Then: hit-test layers in reverse z-order for move/select
                     let mut hit = None;
                     let mut sorted: Vec<&LayerView> = self.layers.iter().collect();
                     sorted.sort_by_key(|l| std::cmp::Reverse(l.z_index));
 
                     for layer in &sorted {
-                        let (lx, ly) = state.virtual_to_widget(layer.offset_x, layer.offset_y);
-                        let lw = layer.image_size.0 as f64 * layer.img_scale;
-                        let lh = layer.image_size.1 as f64 * layer.img_scale;
-                        let rect = Rectangle {
-                            x: bounds.x + lx,
-                            y: bounds.y + ly,
-                            width: lw as f32 * state.view_scale,
-                            height: lh as f32 * state.view_scale,
-                        };
-                        let abs_pos = Point {
-                            x: bounds.x + position.x,
-                            y: bounds.y + position.y,
-                        };
+                        let rect = layer_widget_rect(state, layer, &bounds);
                         if rect.contains(abs_pos) {
                             hit = Some(layer.id);
                             break;
@@ -216,14 +298,16 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     }
 
                     if let Some(layer_id) = hit {
-                        // Find the layer's current offset for drag start
                         if let Some(layer) = self.layers.iter().find(|l| l.id == layer_id) {
+                            state.drag_mode = Some(DragMode::Move);
                             state.dragging_layer = Some(layer_id);
                             state.drag_start = position;
                             state.offset_at_drag_start = (layer.offset_x, layer.offset_y);
+                            state.scale_at_drag_start = layer.img_scale;
                         }
                         shell.publish((self.on_select)(Some(layer_id)));
                     } else {
+                        state.drag_mode = None;
                         state.dragging_layer = None;
                         shell.publish((self.on_select)(None));
                     }
@@ -234,14 +318,71 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
             core::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let state = tree.state.downcast_mut::<State>();
                 if let Some(layer_id) = state.dragging_layer
+                    && let Some(mode) = state.drag_mode
                     && let Some(position) = cursor.position_in(bounds)
                 {
                     let dx = position.x - state.drag_start.x;
                     let dy = position.y - state.drag_start.y;
-                    let (vdx, vdy) = state.widget_to_virtual_delta(dx, dy);
-                    let new_x = state.offset_at_drag_start.0 + vdx;
-                    let new_y = state.offset_at_drag_start.1 + vdy;
-                    shell.publish((self.on_move)(layer_id, new_x, new_y));
+
+                    match mode {
+                        DragMode::Move => {
+                            let (vdx, vdy) = state.widget_to_virtual_delta(dx, dy);
+                            let new_x = state.offset_at_drag_start.0 + vdx;
+                            let new_y = state.offset_at_drag_start.1 + vdy;
+                            shell.publish((self.on_move)(layer_id, new_x, new_y));
+                        }
+                        DragMode::ResizeNW
+                        | DragMode::ResizeNE
+                        | DragMode::ResizeSW
+                        | DragMode::ResizeSE => {
+                            if let Some(layer) = self.layers.iter().find(|l| l.id == layer_id) {
+                                let orig_scale = state.scale_at_drag_start;
+                                let orig_w = layer.image_size.0 as f64 * orig_scale;
+                                let orig_h = layer.image_size.1 as f64 * orig_scale;
+                                let (vdx, vdy) = state.widget_to_virtual_delta(dx, dy);
+
+                                // Compute new scale based on drag direction
+                                // Use the diagonal distance for uniform scaling
+                                let (scale_dx, scale_dy) = match mode {
+                                    DragMode::ResizeSE => (vdx, vdy),
+                                    DragMode::ResizeNW => (-vdx, -vdy),
+                                    DragMode::ResizeNE => (vdx, -vdy),
+                                    DragMode::ResizeSW => (-vdx, vdy),
+                                    _ => (0.0, 0.0),
+                                };
+
+                                // Use the axis with the larger delta for scale
+                                let ratio = if orig_w.abs() > orig_h.abs() {
+                                    (orig_w + scale_dx) / orig_w
+                                } else {
+                                    (orig_h + scale_dy) / orig_h
+                                };
+                                let new_scale = (orig_scale * ratio).clamp(0.05, 10.0);
+                                let new_w = layer.image_size.0 as f64 * new_scale;
+                                let new_h = layer.image_size.1 as f64 * new_scale;
+
+                                // Anchor the opposite corner
+                                let orig_offset = state.offset_at_drag_start;
+                                let new_offset = match mode {
+                                    DragMode::ResizeSE => orig_offset,
+                                    DragMode::ResizeNW => (
+                                        orig_offset.0 + orig_w - new_w,
+                                        orig_offset.1 + orig_h - new_h,
+                                    ),
+                                    DragMode::ResizeNE => {
+                                        (orig_offset.0, orig_offset.1 + orig_h - new_h)
+                                    }
+                                    DragMode::ResizeSW => {
+                                        (orig_offset.0 + orig_w - new_w, orig_offset.1)
+                                    }
+                                    _ => orig_offset,
+                                };
+
+                                shell.publish((self.on_scale)(layer_id, new_scale));
+                                shell.publish((self.on_move)(layer_id, new_offset.0, new_offset.1));
+                            }
+                        }
+                    }
                     shell.capture_event();
                 }
             }
@@ -250,23 +391,23 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 let state = tree.state.downcast_mut::<State>();
                 if state.dragging_layer.is_some() {
                     state.dragging_layer = None;
+                    state.drag_mode = None;
                     shell.capture_event();
                 }
             }
 
             core::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                if cursor.is_over(bounds) {
-                    // Scale the selected layer
-                    if let Some(selected) = self.layers.iter().find(|l| l.selected) {
-                        let scroll_y = match delta {
-                            mouse::ScrollDelta::Lines { y, .. } => *y,
-                            mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
-                        };
-                        let scale_factor = 1.0 + scroll_y as f64 * 0.1;
-                        let new_scale = (selected.img_scale * scale_factor).clamp(0.05, 10.0);
-                        shell.publish((self.on_scale)(selected.id, new_scale));
-                        shell.capture_event();
-                    }
+                if cursor.is_over(bounds)
+                    && let Some(selected) = self.layers.iter().find(|l| l.selected)
+                {
+                    let scroll_y = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => *y,
+                        mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
+                    };
+                    let scale_factor = 1.0 + scroll_y as f64 * 0.1;
+                    let new_scale = (selected.img_scale * scale_factor).clamp(0.05, 10.0);
+                    shell.publish((self.on_scale)(selected.id, new_scale));
+                    shell.capture_event();
                 }
             }
 
@@ -283,25 +424,38 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
         _renderer: &Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State>();
-        if state.dragging_layer.is_some() {
-            return mouse::Interaction::Grabbing;
-        }
         let bounds = layout.bounds();
+
+        // During active drag, show the appropriate cursor
+        if let Some(mode) = state.drag_mode {
+            return match mode {
+                DragMode::Move => mouse::Interaction::Grabbing,
+                DragMode::ResizeNW | DragMode::ResizeSE => {
+                    mouse::Interaction::ResizingDiagonallyDown
+                }
+                DragMode::ResizeNE | DragMode::ResizeSW => {
+                    mouse::Interaction::ResizingDiagonallyDown
+                }
+            };
+        }
+
         if let Some(position) = cursor.position_in(bounds) {
+            let abs_pos = Point {
+                x: bounds.x + position.x,
+                y: bounds.y + position.y,
+            };
+
+            // Check handles on selected layer first
+            if let Some(selected) = self.layers.iter().find(|l| l.selected) {
+                let rect = layer_widget_rect(state, selected, &bounds);
+                if hit_test_handles(&rect, abs_pos).is_some() {
+                    return mouse::Interaction::ResizingDiagonallyDown;
+                }
+            }
+
+            // Check if over any layer
             for layer in &self.layers {
-                let (lx, ly) = state.virtual_to_widget(layer.offset_x, layer.offset_y);
-                let lw = layer.image_size.0 as f64 * layer.img_scale;
-                let lh = layer.image_size.1 as f64 * layer.img_scale;
-                let rect = Rectangle {
-                    x: bounds.x + lx,
-                    y: bounds.y + ly,
-                    width: lw as f32 * state.view_scale,
-                    height: lh as f32 * state.view_scale,
-                };
-                let abs_pos = Point {
-                    x: bounds.x + position.x,
-                    y: bounds.y + position.y,
-                };
+                let rect = layer_widget_rect(state, layer, &bounds);
                 if rect.contains(abs_pos) {
                     return mouse::Interaction::Grab;
                 }
@@ -345,17 +499,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
         sorted.sort_by_key(|l| l.z_index);
 
         for layer in &sorted {
-            let (lx, ly) = state.virtual_to_widget(layer.offset_x, layer.offset_y);
-            let lw = layer.image_size.0 as f64 * layer.img_scale;
-            let lh = layer.image_size.1 as f64 * layer.img_scale;
-
-            let layer_rect = Rectangle {
-                x: bounds.x + lx,
-                y: bounds.y + ly,
-                width: lw as f32 * state.view_scale,
-                height: lh as f32 * state.view_scale,
-            };
-
+            let layer_rect = layer_widget_rect(state, layer, &bounds);
             let opacity = if layer.selected { 1.0 } else { 0.75 };
 
             if let Some(handle) = layer.image_handle {
@@ -387,23 +531,38 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 );
             }
 
-            // Selection border
-            if layer.selected
-                && let Some(clipped) = layer_rect.intersection(&bounds)
-            {
-                renderer.fill_quad(
-                    Quad {
-                        bounds: clipped,
-                        border: Border {
-                            color: cosmic_theme.accent_color().into(),
-                            radius: 0.0.into(),
-                            width: SELECTION_BORDER_WIDTH,
+            // Selection border + handles for selected layer
+            if layer.selected {
+                if let Some(clipped) = layer_rect.intersection(&bounds) {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: clipped,
+                            border: Border {
+                                color: cosmic_theme.accent_color().into(),
+                                radius: 0.0.into(),
+                                width: SELECTION_BORDER_WIDTH,
+                            },
+                            shadow: Default::default(),
+                            snap: true,
                         },
-                        shadow: Default::default(),
-                        snap: true,
-                    },
-                    core::Background::Color(core::Color::TRANSPARENT),
-                );
+                        core::Background::Color(core::Color::TRANSPARENT),
+                    );
+                }
+
+                // Draw corner resize handles
+                let accent = cosmic_theme.accent_color();
+                let corners = [
+                    (layer_rect.x, layer_rect.y),
+                    (layer_rect.x + layer_rect.width, layer_rect.y),
+                    (layer_rect.x, layer_rect.y + layer_rect.height),
+                    (
+                        layer_rect.x + layer_rect.width,
+                        layer_rect.y + layer_rect.height,
+                    ),
+                ];
+                for (cx, cy) in corners {
+                    draw_corner_handle(renderer, cx, cy, accent);
+                }
             }
         }
 
@@ -438,7 +597,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 core::Background::Color(bg.into()),
             );
 
-            // Monitor label with pill background
+            // Monitor label
             let label = format!("{}", i + 1);
             let label_bg = Rectangle {
                 x: mon_rect.x + mon_rect.width / 2.0 - 12.0,

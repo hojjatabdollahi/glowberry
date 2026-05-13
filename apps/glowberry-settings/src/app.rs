@@ -2056,30 +2056,6 @@ impl GlowBerrySettings {
                     .into(),
             );
 
-            // Scale slider for selected layer
-            if let Some(key) = self.extend_selected_layer
-                && let Some(layer) = self.extend_layers.get(key)
-            {
-                let layer_key = key;
-                controls.push(
-                    widget::row::with_children(vec![
-                        widget::text(fl!("extend-scale")).into(),
-                        slider(0.05..=10.0, layer.scale as f32, move |v| {
-                            Message::ExtendLayerScaled(layer_key, v as f64)
-                        })
-                        .step(0.01)
-                        .width(Length::Fixed(120.0))
-                        .into(),
-                        widget::text(format!("{:.0}%", layer.scale * 100.0))
-                            .width(Length::Fixed(50.0))
-                            .into(),
-                    ])
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .into(),
-                );
-            }
-
             controls.push(
                 button::text(fl!("extend-center"))
                     .on_press(Message::ExtendCenter)
