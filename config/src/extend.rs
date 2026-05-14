@@ -22,6 +22,10 @@ pub struct ExtendLayer {
     pub img_offset_y: f64,
     pub img_scale: f64,
     pub z_index: usize,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub target_output: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -55,6 +59,8 @@ impl ExtendConfig {
                 img_offset_y: offset_y,
                 img_scale: scale,
                 z_index: 0,
+                locked: false,
+                target_output: None,
             }]
         } else {
             Vec::new()

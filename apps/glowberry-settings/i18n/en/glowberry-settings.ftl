@@ -79,6 +79,12 @@ extend-apply = Apply
 extend-hint = Drag to move, scroll to resize. Use side buttons to change layer order.
 extend-no-layers = Click a wallpaper below to add it to the preview.
 clear-all = Clear All
+unlock-layer = Unlock
+
+# Canvas context menu
+ctx-bring-forward = Bring Forward
+ctx-send-back = Send Back
+ctx-remove = Remove
 
 # Wallpaper placement popup
 wp-customize = Customize in preview

@@ -123,14 +123,18 @@ pub struct GlowBerrySettings {
     extend_config: ExtendConfig,
     /// Monitor geometry (loaded when extend editor opens)
     monitor_geometry: Vec<crate::monitor_query::MonitorGeometry>,
-    /// Which wallpaper's popup menu is showing (None = no popup)
+    /// Which wallpaper's popup is open
     wallpaper_popup: Option<DefaultKey>,
+    /// Which layer's context menu is showing in the canvas
+    layer_context_menu: Option<DefaultKey>,
     /// Image layers on the virtual desktop canvas
     extend_layers: SlotMap<DefaultKey, ExtendLayerState>,
     /// Currently selected layer
     extend_selected_layer: Option<DefaultKey>,
     /// Next z-index to assign
     extend_next_z: usize,
+    /// Request the canvas to fit all content in view
+    extend_fit_view_requested: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +145,8 @@ struct ExtendLayerState {
     offset: (f64, f64),
     scale: f64,
     z_index: usize,
+    locked: bool,
+    target_output: Option<String>,
 }
 
 /// Information about an available shader
@@ -267,6 +273,8 @@ pub enum Message {
     ExtendApplied(Result<Vec<(String, PathBuf)>, String>),
     /// Clear all layers
     ExtendClearAll,
+    /// Toggle lock on a layer
+    ExtendToggleLock(DefaultKey),
 
     /// Wallpaper clicked — show placement popup
     WallpaperClicked(DefaultKey),
@@ -280,6 +288,22 @@ pub enum Message {
     WallpaperSpanAll(DefaultKey),
     /// Set wallpaper on a specific screen
     WallpaperShowOn(DefaultKey, String),
+    /// Set wallpaper on a screen by monitor index
+    WallpaperShowOnIdx(DefaultKey, usize),
+    /// Right-click on a layer in the canvas
+    ExtendLayerRightClick(DefaultKey),
+    /// Close the canvas layer context menu
+    ExtendLayerMenuClose,
+    /// Duplicate a layer's image on all screens
+    LayerDuplicateAll(DefaultKey),
+    /// Set a layer's image on a specific screen
+    LayerShowOn(DefaultKey, String),
+    /// Reset canvas camera to fit all content
+    ExtendFitView,
+    /// Bring a specific layer forward (z+1)
+    ExtendLayerBringForward(DefaultKey),
+    /// Send a specific layer back (z-1)
+    ExtendLayerSendBack(DefaultKey),
 }
 
 /// Default colors available in the color picker
@@ -427,9 +451,11 @@ impl cosmic::Application for GlowBerrySettings {
             extend_config: ExtendConfig::default(),
             monitor_geometry: Vec::new(),
             wallpaper_popup: None,
+            layer_context_menu: None,
             extend_layers: SlotMap::new(),
             extend_selected_layer: None,
             extend_next_z: 0,
+            extend_fit_view_requested: false,
         };
 
         // Load prefer_low_power, power saving, extend config, and window opacity from config
@@ -515,8 +541,13 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
+        // Clear one-shot flags
+        self.extend_fit_view_requested = false;
+
         match message {
             Message::ChangeCategory(category) => {
+                self.wallpaper_popup = None;
+                self.layer_context_menu = None;
                 self.categories.selected = Some(category.clone());
 
                 if category == Category::Shaders {
@@ -824,6 +855,7 @@ impl cosmic::Application for GlowBerrySettings {
                 if self.extend_layers.is_empty() && !self.extend_config.layers.is_empty() {
                     self.restore_extend_layers_from_config();
                 }
+                self.extend_fit_view_requested = true;
             }
 
             Message::ExtendAddLayer(wp_key) => {
@@ -847,6 +879,8 @@ impl cosmic::Application for GlowBerrySettings {
                     offset: (0.0, 0.0),
                     scale: 1.0,
                     z_index: z,
+                    locked: false,
+                    target_output: None,
                 };
                 self.auto_center_layer(&mut layer);
                 let key = self.extend_layers.insert(layer);
@@ -862,12 +896,14 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ExtendLayerMoved(key, x, y) => {
+                self.layer_context_menu = None;
                 if let Some(layer) = self.extend_layers.get_mut(key) {
                     layer.offset = (x, y);
                 }
             }
 
             Message::ExtendLayerScaled(key, scale) => {
+                self.layer_context_menu = None;
                 if let Some(layer) = self.extend_layers.get_mut(key) {
                     layer.scale = scale;
                 }
@@ -875,6 +911,7 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::ExtendLayerSelected(maybe_key) => {
                 self.extend_selected_layer = maybe_key;
+                self.layer_context_menu = None;
             }
 
             Message::ExtendLayerUp => {
@@ -922,9 +959,47 @@ impl cosmic::Application for GlowBerrySettings {
                     return Task::none();
                 }
 
-                let monitors: Vec<glowberry_lib::extend_crop::MonitorInfo> = self
+                // Ensure per-output mode is active so the daemon loads per-output wallpapers
+                self.config.same_on_all = false;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_same_on_all(false);
+                }
+
+                // 1. Save locked layers directly as per-output wallpapers
+                let mut locked_monitors: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for layer in self.extend_layers.values() {
+                    if layer.locked
+                        && let Some(ref output) = layer.target_output
+                    {
+                        let entry =
+                            Entry::new(output.clone(), Source::Path(layer.source_path.clone()));
+                        if let Some(ctx) = &self.config_context
+                            && let Err(e) = self.config.set_entry(ctx, entry)
+                        {
+                            tracing::error!("Failed to set locked wallpaper: {}", e);
+                        }
+                        locked_monitors.insert(output.clone());
+                    }
+                }
+
+                // 2. Composite unlocked layers for monitors not covered by locked layers
+                let unlocked_layers: Vec<glowberry_lib::extend_crop::LayerInfo> = self
+                    .extend_layers
+                    .values()
+                    .filter(|l| !l.locked)
+                    .map(|l| glowberry_lib::extend_crop::LayerInfo {
+                        source_path: l.source_path.clone(),
+                        offset: l.offset,
+                        img_scale: l.scale,
+                        z_index: l.z_index,
+                    })
+                    .collect();
+
+                let monitors_to_composite: Vec<glowberry_lib::extend_crop::MonitorInfo> = self
                     .monitor_geometry
                     .iter()
+                    .filter(|m| !locked_monitors.contains(&m.name))
                     .map(|m| glowberry_lib::extend_crop::MonitorInfo {
                         name: m.name.clone(),
                         position: m.position,
@@ -934,20 +1009,7 @@ impl cosmic::Application for GlowBerrySettings {
                     })
                     .collect();
 
-                let mut layer_infos: Vec<glowberry_lib::extend_crop::LayerInfo> = self
-                    .extend_layers
-                    .values()
-                    .map(|l| glowberry_lib::extend_crop::LayerInfo {
-                        source_path: l.source_path.clone(),
-                        offset: l.offset,
-                        img_scale: l.scale,
-                        z_index: l.z_index,
-                    })
-                    .collect();
-
-                let cache_dir = glowberry_lib::extend_crop::cache_dir();
-
-                // Save extend config
+                // Save config (all layers including locked)
                 self.extend_config.layers = self
                     .extend_layers
                     .values()
@@ -957,17 +1019,27 @@ impl cosmic::Application for GlowBerrySettings {
                         img_offset_y: l.offset.1,
                         img_scale: l.scale,
                         z_index: l.z_index,
+                        locked: l.locked,
+                        target_output: l.target_output.clone(),
                     })
                     .collect();
                 if let Some(ctx) = &self.config_context {
                     let _ = ctx.save_extend_config(&self.extend_config);
                 }
 
+                if unlocked_layers.is_empty() || monitors_to_composite.is_empty() {
+                    // Nothing to composite — locked layers already saved
+                    return Task::none();
+                }
+
+                let mut layer_infos = unlocked_layers;
+                let cache_dir = glowberry_lib::extend_crop::cache_dir();
+
                 return Task::perform(
                     async move {
                         glowberry_lib::extend_crop::composite_for_monitors(
                             &mut layer_infos,
-                            &monitors,
+                            &monitors_to_composite,
                             &cache_dir,
                         )
                         .map_err(|e| e.to_string())
@@ -999,6 +1071,15 @@ impl cosmic::Application for GlowBerrySettings {
                 self.extend_next_z = 0;
             }
 
+            Message::ExtendToggleLock(key) => {
+                if let Some(layer) = self.extend_layers.get_mut(key) {
+                    layer.locked = !layer.locked;
+                    if !layer.locked {
+                        layer.target_output = None;
+                    }
+                }
+            }
+
             Message::WallpaperClicked(key) => {
                 self.wallpaper_popup = if self.wallpaper_popup == Some(key) {
                     None
@@ -1013,7 +1094,6 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::WallpaperCustomize(key) => {
                 self.wallpaper_popup = None;
-                // Same logic as ExtendAddLayer
                 let Some(path) = self.selection.paths.get(key).cloned() else {
                     return Task::none();
                 };
@@ -1032,6 +1112,8 @@ impl cosmic::Application for GlowBerrySettings {
                     offset: (0.0, 0.0),
                     scale: 1.0,
                     z_index: z,
+                    locked: false,
+                    target_output: None,
                 };
                 self.auto_center_layer(&mut layer);
                 let lkey = self.extend_layers.insert(layer);
@@ -1043,11 +1125,53 @@ impl cosmic::Application for GlowBerrySettings {
                 let Some(path) = self.selection.paths.get(key).cloned() else {
                     return Task::none();
                 };
-                let entry = Entry::new("all".to_string(), Source::Path(path));
+
+                // Apply to config: set wallpaper on all screens
+                self.config.same_on_all = true;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_same_on_all(true);
+                }
+                let entry = Entry::new("all".to_string(), Source::Path(path.clone()));
                 if let Some(ctx) = &self.config_context
                     && let Err(e) = self.config.set_entry(ctx, entry)
                 {
                     tracing::error!("Failed to set wallpaper: {}", e);
+                }
+
+                // Clear existing layers and add one per monitor to show in preview
+                self.extend_layers.clear();
+                self.extend_selected_layer = None;
+                self.extend_next_z = 0;
+
+                let image_handle = self
+                    .selection
+                    .display_images
+                    .get(key)
+                    .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
+                let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
+
+                for monitor in &self.monitor_geometry {
+                    let mon_w = monitor.logical_size.0 as f64;
+                    let mon_h = monitor.logical_size.1 as f64;
+                    let img_w = image_size.0 as f64;
+                    let img_h = image_size.1 as f64;
+                    // Scale to cover each monitor (zoom mode)
+                    let scale = (mon_w / img_w).max(mon_h / img_h);
+                    let offset_x = monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0;
+                    let offset_y = monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0;
+
+                    let z = self.extend_next_z;
+                    self.extend_next_z += 1;
+                    self.extend_layers.insert(ExtendLayerState {
+                        source_path: path.clone(),
+                        image_handle: image_handle.clone(),
+                        image_size,
+                        offset: (offset_x, offset_y),
+                        scale,
+                        z_index: z,
+                        locked: true,
+                        target_output: Some(monitor.name.clone()),
+                    });
                 }
             }
 
@@ -1071,6 +1195,8 @@ impl cosmic::Application for GlowBerrySettings {
                     offset: (0.0, 0.0),
                     scale: 1.0,
                     z_index: z,
+                    locked: false,
+                    target_output: None,
                 };
                 self.auto_center_layer(&mut layer);
                 let lkey = self.extend_layers.insert(layer);
@@ -1082,11 +1208,193 @@ impl cosmic::Application for GlowBerrySettings {
                 let Some(path) = self.selection.paths.get(key).cloned() else {
                     return Task::none();
                 };
-                let entry = Entry::new(screen_name, Source::Path(path));
+
+                // Ensure per-output mode
+                self.config.same_on_all = false;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_same_on_all(false);
+                }
+
+                // Write config directly
+                let entry = Entry::new(screen_name.clone(), Source::Path(path.clone()));
                 if let Some(ctx) = &self.config_context
                     && let Err(e) = self.config.set_entry(ctx, entry)
                 {
                     tracing::error!("Failed to set wallpaper: {}", e);
+                }
+
+                // Add locked layer to preview on the target monitor
+                if let Some(monitor) = self.monitor_geometry.iter().find(|m| m.name == screen_name)
+                {
+                    let image_handle =
+                        self.selection.display_images.get(key).map(|img| {
+                            ImageHandle::from_rgba(img.width(), img.height(), img.to_vec())
+                        });
+                    let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
+                    let mon_w = monitor.logical_size.0 as f64;
+                    let mon_h = monitor.logical_size.1 as f64;
+                    let img_w = image_size.0 as f64;
+                    let img_h = image_size.1 as f64;
+                    let scale = (mon_w / img_w).max(mon_h / img_h);
+                    let offset_x = monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0;
+                    let offset_y = monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0;
+
+                    let z = self.extend_next_z;
+                    self.extend_next_z += 1;
+                    self.extend_layers.insert(ExtendLayerState {
+                        source_path: path,
+                        image_handle,
+                        image_size,
+                        offset: (offset_x, offset_y),
+                        scale,
+                        z_index: z,
+                        locked: true,
+                        target_output: Some(screen_name),
+                    });
+                }
+            }
+
+            Message::WallpaperShowOnIdx(key, idx) => {
+                if let Some(monitor) = self.monitor_geometry.get(idx) {
+                    let name = monitor.name.clone();
+                    return self.update(Message::WallpaperShowOn(key, name));
+                }
+            }
+
+            Message::LayerDuplicateAll(layer_key) => {
+                self.layer_context_menu = None;
+                let Some(layer) = self.extend_layers.get(layer_key) else {
+                    return Task::none();
+                };
+                let path = layer.source_path.clone();
+                let image_handle = layer.image_handle.clone();
+                let image_size = layer.image_size;
+
+                // Apply to config
+                self.config.same_on_all = true;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_same_on_all(true);
+                }
+                let entry = Entry::new("all".to_string(), Source::Path(path.clone()));
+                if let Some(ctx) = &self.config_context
+                    && let Err(e) = self.config.set_entry(ctx, entry)
+                {
+                    tracing::error!("Failed to set wallpaper: {}", e);
+                }
+
+                // Replace layers with locked per-monitor layers
+                self.extend_layers.clear();
+                self.extend_selected_layer = None;
+                self.extend_next_z = 0;
+                for monitor in &self.monitor_geometry {
+                    let mon_w = monitor.logical_size.0 as f64;
+                    let mon_h = monitor.logical_size.1 as f64;
+                    let img_w = image_size.0 as f64;
+                    let img_h = image_size.1 as f64;
+                    let scale = (mon_w / img_w).max(mon_h / img_h);
+                    let offset_x = monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0;
+                    let offset_y = monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0;
+                    let z = self.extend_next_z;
+                    self.extend_next_z += 1;
+                    self.extend_layers.insert(ExtendLayerState {
+                        source_path: path.clone(),
+                        image_handle: image_handle.clone(),
+                        image_size,
+                        offset: (offset_x, offset_y),
+                        scale,
+                        z_index: z,
+                        locked: true,
+                        target_output: Some(monitor.name.clone()),
+                    });
+                }
+            }
+
+            Message::LayerShowOn(layer_key, screen_name) => {
+                self.layer_context_menu = None;
+                let Some(layer) = self.extend_layers.get(layer_key) else {
+                    return Task::none();
+                };
+                let path = layer.source_path.clone();
+                let image_handle = layer.image_handle.clone();
+                let image_size = layer.image_size;
+
+                // Ensure per-output mode
+                self.config.same_on_all = false;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.set_same_on_all(false);
+                }
+                let entry = Entry::new(screen_name.clone(), Source::Path(path.clone()));
+                if let Some(ctx) = &self.config_context
+                    && let Err(e) = self.config.set_entry(ctx, entry)
+                {
+                    tracing::error!("Failed to set wallpaper: {}", e);
+                }
+
+                // Add locked layer on the target monitor
+                if let Some(monitor) = self.monitor_geometry.iter().find(|m| m.name == screen_name)
+                {
+                    let mon_w = monitor.logical_size.0 as f64;
+                    let mon_h = monitor.logical_size.1 as f64;
+                    let img_w = image_size.0 as f64;
+                    let img_h = image_size.1 as f64;
+                    let scale = (mon_w / img_w).max(mon_h / img_h);
+                    let offset_x = monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0;
+                    let offset_y = monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0;
+                    let z = self.extend_next_z;
+                    self.extend_next_z += 1;
+                    self.extend_layers.insert(ExtendLayerState {
+                        source_path: path,
+                        image_handle,
+                        image_size,
+                        offset: (offset_x, offset_y),
+                        scale,
+                        z_index: z,
+                        locked: true,
+                        target_output: Some(screen_name),
+                    });
+                }
+            }
+
+            Message::ExtendFitView => {
+                self.extend_fit_view_requested = true;
+            }
+
+            Message::ExtendLayerRightClick(key) => {
+                self.extend_selected_layer = Some(key);
+                self.layer_context_menu = Some(key);
+            }
+
+            Message::ExtendLayerMenuClose => {
+                self.layer_context_menu = None;
+            }
+
+            Message::ExtendLayerBringForward(key) => {
+                self.layer_context_menu = None;
+                let sel_z = self.extend_layers[key].z_index;
+                if let Some((swap_key, _)) = self
+                    .extend_layers
+                    .iter()
+                    .filter(|(k, l)| *k != key && l.z_index > sel_z)
+                    .min_by_key(|(_, l)| l.z_index)
+                {
+                    let swap_z = self.extend_layers[swap_key].z_index;
+                    self.extend_layers[key].z_index = swap_z;
+                    self.extend_layers[swap_key].z_index = sel_z;
+                }
+            }
+
+            Message::ExtendLayerSendBack(key) => {
+                self.layer_context_menu = None;
+                let sel_z = self.extend_layers[key].z_index;
+                if let Some((swap_key, _)) = self
+                    .extend_layers
+                    .iter()
+                    .filter(|(k, l)| *k != key && l.z_index < sel_z)
+                    .max_by_key(|(_, l)| l.z_index)
+                {
+                    let swap_z = self.extend_layers[swap_key].z_index;
+                    self.extend_layers[key].z_index = swap_z;
+                    self.extend_layers[swap_key].z_index = sel_z;
                 }
             }
         }
@@ -1099,19 +1407,22 @@ impl cosmic::Application for GlowBerrySettings {
 
         let is_wallpaper_mode = matches!(self.categories.selected, Some(Category::Wallpapers));
 
-        // 1. Preview area
+        // 1. Preview area (always slot 1)
         if is_wallpaper_mode {
-            // Multi-monitor canvas with layer controls on the right
             children.push(self.view_multi_monitor_canvas());
         } else {
-            // Old single-image preview for colors/shaders
             children.push(
                 container(self.view_display_preview())
                     .width(Length::Fill)
                     .align_x(Alignment::Center)
                     .into(),
             );
-            // Settings list (fit, frame rate, etc.) for non-wallpaper modes
+        }
+
+        // 2. Settings list (always slot 2 — empty for wallpapers)
+        if is_wallpaper_mode {
+            children.push(widget::Space::new().into());
+        } else {
             children.push(
                 container(self.view_settings_list())
                     .width(Length::Fill)
@@ -1678,6 +1989,8 @@ impl GlowBerrySettings {
                 offset: (config_layer.img_offset_x, config_layer.img_offset_y),
                 scale: config_layer.img_scale,
                 z_index: z,
+                locked: config_layer.locked,
+                target_output: config_layer.target_output.clone(),
             });
         }
     }
@@ -2002,6 +2315,7 @@ impl GlowBerrySettings {
                 img_scale: layer.scale,
                 z_index: layer.z_index,
                 selected: self.extend_selected_layer == Some(key),
+                locked: layer.locked,
             })
             .collect();
         layer_views.sort_by_key(|l| l.z_index);
@@ -2012,34 +2326,47 @@ impl GlowBerrySettings {
             Message::ExtendLayerMoved,
             Message::ExtendLayerScaled,
             Message::ExtendLayerSelected,
-        );
+        )
+        .on_right_click(Message::ExtendLayerRightClick)
+        .fit_requested(self.extend_fit_view_requested);
 
         // Side buttons (right of canvas)
-        let has_selection = self.extend_selected_layer.is_some();
         let mut side_buttons: Vec<Element<'_, Message>> = Vec::new();
 
-        if has_selection {
-            side_buttons.push(
-                widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                    .on_press(Message::ExtendLayerUp)
-                    .into(),
-            );
-            side_buttons.push(
-                widget::button::icon(widget::icon::from_name("go-down-symbolic"))
-                    .on_press(Message::ExtendLayerDown)
-                    .into(),
-            );
+        if let Some(sel_key) = self.extend_selected_layer {
+            let is_locked = self.extend_layers.get(sel_key).is_some_and(|l| l.locked);
+
+            if is_locked {
+                // Locked layer: show unlock button
+                side_buttons.push(
+                    widget::button::icon(widget::icon::from_name("changes-allow-symbolic"))
+                        .on_press(Message::ExtendToggleLock(sel_key))
+                        .into(),
+                );
+            } else {
+                // Unlocked layer: show z-order and center buttons
+                side_buttons.push(
+                    widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+                        .on_press(Message::ExtendLayerUp)
+                        .into(),
+                );
+                side_buttons.push(
+                    widget::button::icon(widget::icon::from_name("go-down-symbolic"))
+                        .on_press(Message::ExtendLayerDown)
+                        .into(),
+                );
+                side_buttons.push(
+                    widget::button::icon(widget::icon::from_name("view-pin-symbolic"))
+                        .on_press(Message::ExtendCenter)
+                        .into(),
+                );
+            }
+
+            // Delete always available
             side_buttons.push(
                 widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
-                    .on_press(Message::ExtendRemoveLayer(
-                        self.extend_selected_layer.unwrap(),
-                    ))
+                    .on_press(Message::ExtendRemoveLayer(sel_key))
                     .class(cosmic::theme::Button::Destructive)
-                    .into(),
-            );
-            side_buttons.push(
-                widget::button::icon(widget::icon::from_name("view-pin-symbolic"))
-                    .on_press(Message::ExtendCenter)
                     .into(),
             );
         }
@@ -2048,19 +2375,114 @@ impl GlowBerrySettings {
             .spacing(4)
             .align_x(Alignment::Center);
 
+        let canvas_container: Element<'_, Message> = container(editor)
+            .width(Length::Fill)
+            .height(Length::Fixed(300.0))
+            .into();
+
+        // Popover for layer right-click menu (always structurally present)
+        let mut canvas_popover = widget::popover(canvas_container);
+        if let Some(key) = self.layer_context_menu {
+            let mut menu_items: Vec<Element<'_, Message>> = Vec::new();
+
+            // Duplicate / show-on options (use Layer* messages that look up path from layer)
+            menu_items.push(
+                button::text(fl!("wp-duplicate-all"))
+                    .on_press(Message::LayerDuplicateAll(key))
+                    .width(Length::Fill)
+                    .into(),
+            );
+            for monitor in &self.monitor_geometry {
+                let name = monitor.name.clone();
+                menu_items.push(
+                    button::text(format!("{} {}", fl!("wp-show-on"), &name))
+                        .on_press(Message::LayerShowOn(key, name))
+                        .width(Length::Fill)
+                        .into(),
+                );
+            }
+
+            // Layer ordering
+            menu_items.push(widget::divider::horizontal::light().into());
+            menu_items.push(
+                button::text(fl!("ctx-bring-forward"))
+                    .on_press(Message::ExtendLayerBringForward(key))
+                    .width(Length::Fill)
+                    .into(),
+            );
+            menu_items.push(
+                button::text(fl!("ctx-send-back"))
+                    .on_press(Message::ExtendLayerSendBack(key))
+                    .width(Length::Fill)
+                    .into(),
+            );
+
+            // Unlock / Remove
+            menu_items.push(widget::divider::horizontal::light().into());
+            if self.extend_layers.get(key).is_some_and(|l| l.locked) {
+                menu_items.push(
+                    button::text(fl!("unlock-layer"))
+                        .on_press(Message::ExtendToggleLock(key))
+                        .width(Length::Fill)
+                        .into(),
+                );
+            }
+            menu_items.push(
+                button::text(fl!("ctx-remove"))
+                    .on_press(Message::ExtendRemoveLayer(key))
+                    .width(Length::Fill)
+                    .class(cosmic::theme::Button::Destructive)
+                    .into(),
+            );
+
+            let popup = container(
+                widget::column::with_children(menu_items)
+                    .spacing(2)
+                    .padding(8)
+                    .width(Length::Fixed(220.0)),
+            )
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                cosmic::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(
+                        cosmic.background.component.base.into(),
+                    )),
+                    icon_color: Some(cosmic.background.component.on.into()),
+                    text_color: Some(cosmic.background.component.on.into()),
+                    border: cosmic::iced::Border {
+                        radius: cosmic.corner_radii.radius_m.into(),
+                        width: 1.0,
+                        color: cosmic.background.component.divider.into(),
+                    },
+                    shadow: cosmic::iced::Shadow {
+                        color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                        offset: cosmic::iced::Vector::new(0.0, 2.0),
+                        blur_radius: 8.0,
+                    },
+                    snap: false,
+                }
+            }));
+
+            canvas_popover = canvas_popover
+                .popup(popup)
+                .on_close(Message::ExtendLayerMenuClose);
+        }
+
         // Canvas row: editor + side buttons
-        let canvas_row = widget::row::with_children(vec![
-            container(editor)
-                .width(Length::Fill)
-                .height(Length::Fixed(300.0))
-                .into(),
-            side_col.into(),
-        ])
-        .spacing(4)
-        .align_y(Alignment::Center);
+        let canvas_row: Element<'_, Message> =
+            widget::row::with_children(vec![canvas_popover.into(), side_col.into()])
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into();
 
         // Bottom controls: clear all + apply
         let mut bottom: Vec<Element<'_, Message>> = Vec::new();
+
+        bottom.push(
+            widget::button::icon(widget::icon::from_name("zoom-fit-best-symbolic"))
+                .on_press(Message::ExtendFitView)
+                .into(),
+        );
 
         if !self.extend_layers.is_empty() {
             bottom.push(
@@ -2095,7 +2517,7 @@ impl GlowBerrySettings {
         };
 
         widget::column::with_children(vec![
-            canvas_row.into(),
+            canvas_row,
             hint,
             container(bottom_row)
                 .width(Length::Fill)
@@ -2108,56 +2530,76 @@ impl GlowBerrySettings {
     }
 
     fn view_wallpaper_grid(&self) -> Element<'_, Message> {
+        let wallpaper_popup = self.wallpaper_popup;
+
         let buttons: Vec<Element<'_, Message>> = self
             .selection
             .selection_handles
             .iter()
             .map(|(id, handle)| {
-                let is_popup_open = self.wallpaper_popup == Some(id);
+                let is_open = wallpaper_popup == Some(id);
 
-                // Build popup content
-                let mut popup_items: Vec<Element<'_, Message>> = vec![
-                    button::text(fl!("wp-customize"))
-                        .on_press(Message::WallpaperCustomize(id))
-                        .width(Length::Fill)
-                        .into(),
-                    button::text(fl!("wp-duplicate-all"))
-                        .on_press(Message::WallpaperDuplicateAll(id))
-                        .width(Length::Fill)
-                        .into(),
-                    button::text(fl!("wp-span-all"))
-                        .on_press(Message::WallpaperSpanAll(id))
-                        .width(Length::Fill)
-                        .into(),
-                ];
-
-                // Add per-monitor options
-                for monitor in &self.monitor_geometry {
-                    let name = monitor.name.clone();
-                    let wp_key = id;
-                    popup_items.push(
-                        button::text(format!("{} {}", fl!("wp-show-on"), &name))
-                            .on_press(Message::WallpaperShowOn(wp_key, name))
-                            .width(Length::Fill)
-                            .into(),
-                    );
-                }
-
-                let popup_content = widget::column::with_children(popup_items)
-                    .spacing(4)
-                    .padding(8)
-                    .width(Length::Fixed(220.0));
-
+                // Image button: left-click = customize, secondary button = show menu
                 let img_button: Element<'_, Message> = widget::button::image(handle.clone())
-                    .selected(is_popup_open)
-                    .on_press(Message::WallpaperClicked(id))
+                    .on_press(Message::WallpaperCustomize(id))
+                    .selected(is_open)
+                    .on_remove(Message::WallpaperClicked(id))
                     .into();
 
+                // Popover with placement options (always structurally present)
                 let mut popover = widget::popover(img_button);
-                if is_popup_open {
-                    popover = popover
-                        .popup(popup_content)
-                        .on_close(Message::WallpaperPopupClose);
+                if is_open {
+                    let mut menu_items: Vec<Element<'_, Message>> = vec![
+                        button::text(fl!("wp-customize"))
+                            .on_press(Message::WallpaperCustomize(id))
+                            .width(Length::Fill)
+                            .into(),
+                        button::text(fl!("wp-duplicate-all"))
+                            .on_press(Message::WallpaperDuplicateAll(id))
+                            .width(Length::Fill)
+                            .into(),
+                        button::text(fl!("wp-span-all"))
+                            .on_press(Message::WallpaperSpanAll(id))
+                            .width(Length::Fill)
+                            .into(),
+                    ];
+                    for monitor in &self.monitor_geometry {
+                        let name = monitor.name.clone();
+                        menu_items.push(
+                            button::text(format!("{} {}", fl!("wp-show-on"), &name))
+                                .on_press(Message::WallpaperShowOn(id, name))
+                                .width(Length::Fill)
+                                .into(),
+                        );
+                    }
+                    let popup = container(
+                        widget::column::with_children(menu_items)
+                            .spacing(2)
+                            .padding(8)
+                            .width(Length::Fixed(220.0)),
+                    )
+                    .class(cosmic::theme::Container::custom(|theme| {
+                        let cosmic = theme.cosmic();
+                        cosmic::widget::container::Style {
+                            background: Some(cosmic::iced::Background::Color(
+                                cosmic.background.component.base.into(),
+                            )),
+                            icon_color: Some(cosmic.background.component.on.into()),
+                            text_color: Some(cosmic.background.component.on.into()),
+                            border: cosmic::iced::Border {
+                                radius: cosmic.corner_radii.radius_m.into(),
+                                width: 1.0,
+                                color: cosmic.background.component.divider.into(),
+                            },
+                            shadow: cosmic::iced::Shadow {
+                                color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                                offset: cosmic::iced::Vector::new(0.0, 2.0),
+                                blur_radius: 8.0,
+                            },
+                            snap: false,
+                        }
+                    }));
+                    popover = popover.popup(popup).on_close(Message::WallpaperPopupClose);
                 }
                 popover.into()
             })
