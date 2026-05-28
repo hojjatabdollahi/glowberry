@@ -1206,6 +1206,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmetics"
+version = "0.1.0"
+source = "git+https://github.com/hojjatabdollahi/cosmetics.git#2dbe7c9866f2b0295f40be020af677a67412077d"
+dependencies = [
+ "libcosmic",
+ "num-traits",
+]
+
+[[package]]
 name = "cosmic-client-toolkit"
 version = "0.2.0"
 source = "git+https://github.com/pop-os/cosmic-protocols?rev=160b086#160b086abe03cd34a8a375d7fbe47b24308d1f38"
@@ -2267,6 +2276,7 @@ version = "0.3.0"
 dependencies = [
  "bytemuck",
  "color-eyre",
+ "cosmetics",
  "cosmic-config",
  "dirs",
  "eyre",

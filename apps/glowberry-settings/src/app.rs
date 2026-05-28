@@ -191,8 +191,10 @@ pub enum Category {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Message {
-    /// Category changed
+    /// Category changed (from dropdown)
     ChangeCategory(Category),
+    /// Category toggle changed (from header toggle, index: 0=wallpapers, 1=colors, 2=shaders)
+    CategoryToggle(usize),
     /// Wallpaper selected
     Select(DefaultKey),
     /// Color selected
@@ -513,7 +515,11 @@ impl cosmic::Application for GlowBerrySettings {
         app.init_from_config();
 
         // Set the window title and start loading shader thumbnails
-        let title_task = app.set_window_title(fl!("app-title"));
+        let title_task = if let Some(id) = app.core.main_window_id() {
+            app.set_window_title(fl!("app-title"), id)
+        } else {
+            Task::none()
+        };
 
         let shader_task = if !app.available_shaders.is_empty() {
             app.load_shader_thumbnails()
@@ -568,6 +574,15 @@ impl cosmic::Application for GlowBerrySettings {
         self.extend_fit_view_requested = false;
 
         match message {
+            Message::CategoryToggle(index) => {
+                let category = match index {
+                    0 => Category::Wallpapers,
+                    1 => Category::Colors,
+                    _ => Category::Shaders,
+                };
+                return self.update(Message::ChangeCategory(category));
+            }
+
             Message::ChangeCategory(category) => {
                 self.layer_context_menu = None;
                 self.categories.selected = Some(category.clone());
@@ -1547,15 +1562,8 @@ impl cosmic::Application for GlowBerrySettings {
             );
         }
 
-        // Category dropdown
-        let category_dropdown =
-            dropdown::multi::dropdown(&self.categories, Message::ChangeCategory);
-        children.push(
-            container(category_dropdown)
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
-                .into(),
-        );
+        // Slot 3 (category selector moved to header toggle)
+        children.push(widget::Space::new().into());
 
         // Selection grid
         let grid = match self.categories.selected {
@@ -1604,7 +1612,22 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
-        vec![]
+        let selected = match self.categories.selected {
+            Some(Category::Wallpapers) => 0,
+            Some(Category::Colors) => 1,
+            Some(Category::Shaders) => 2,
+            None => 0,
+        };
+        vec![
+            cosmetics::widgets::toggle::toggle3(
+                "preferences-desktop-wallpaper-symbolic",
+                "applications-graphics-symbolic",
+                "applications-multimedia-symbolic",
+                selected,
+            )
+            .on_select(Message::CategoryToggle)
+            .into(),
+        ]
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
