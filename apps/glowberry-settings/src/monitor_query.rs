@@ -23,6 +23,7 @@ pub struct MonitorGeometry {
     pub logical_size: (u32, u32),
     pub physical_size: (u32, u32),
     pub scale: f64,
+    pub bezel: glowberry_config::extend::Bezel,
 }
 
 pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError> {
@@ -146,6 +147,7 @@ pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError>
             logical_size: (logical_w, logical_h),
             physical_size: (phys_w, phys_h),
             scale,
+            bezel: glowberry_config::extend::Bezel::default(),
         });
     }
 

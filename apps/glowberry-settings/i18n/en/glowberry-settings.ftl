@@ -87,6 +87,13 @@ ctx-bring-forward = Bring Forward
 ctx-send-back = Send Back
 ctx-remove = Remove
 
+# Bezel settings
+bezels = Bezels
+bezel-top = Top
+bezel-bottom = Bottom
+bezel-left = Left
+bezel-right = Right
+
 # Wallpaper placement popup
 wp-customize = Customize in preview
 wp-duplicate-all = Duplicate on all screens

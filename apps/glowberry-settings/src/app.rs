@@ -249,6 +249,11 @@ pub enum Message {
     /// Window opacity slider released (save to config)
     WindowOpacityReleased,
 
+    /// Bezel changed for a monitor (monitor_index, top, bottom, left, right)
+    SetBezel(usize, f64, f64, f64, f64),
+    /// Bezel slider released — save to config
+    BezelReleased,
+
     /// Monitor geometry loaded from cosmic-randr
     MonitorsLoaded(Vec<crate::monitor_query::MonitorGeometry>),
     /// Add a wallpaper as a new layer (wallpaper key from selection)
@@ -880,6 +885,27 @@ impl cosmic::Application for GlowBerrySettings {
                 self.window_opacity = value.clamp(0.0, 1.0);
             }
 
+            Message::SetBezel(idx, top, bottom, left, right) => {
+                if let Some(mon) = self.monitor_geometry.get_mut(idx) {
+                    mon.bezel = glowberry_config::extend::Bezel {
+                        top,
+                        bottom,
+                        left,
+                        right,
+                    };
+                }
+            }
+
+            Message::BezelReleased => {
+                if let Some(ctx) = &self.config_context {
+                    let mut bezels = glowberry_config::extend::ExtendConfig::load_bezels(ctx);
+                    for mon in &self.monitor_geometry {
+                        bezels.insert(mon.name.clone(), mon.bezel.clone());
+                    }
+                    let _ = glowberry_config::extend::ExtendConfig::save_bezels(ctx, &bezels);
+                }
+            }
+
             Message::WindowOpacityReleased => {
                 // Save the opacity value to config when slider is released
                 if let Some(ctx) = &self.config_context {
@@ -887,7 +913,16 @@ impl cosmic::Application for GlowBerrySettings {
                 }
             }
 
-            Message::MonitorsLoaded(monitors) => {
+            Message::MonitorsLoaded(mut monitors) => {
+                // Apply saved bezel config per monitor
+                if let Some(ctx) = &self.config_context {
+                    let bezels = glowberry_config::extend::ExtendConfig::load_bezels(ctx);
+                    for mon in &mut monitors {
+                        if let Some(bezel) = bezels.get(&mon.name) {
+                            mon.bezel = bezel.clone();
+                        }
+                    }
+                }
                 self.monitor_geometry = monitors;
                 // Load layers for this specific display configuration
                 if self.extend_layers.is_empty() {
@@ -1784,6 +1819,97 @@ impl GlowBerrySettings {
                     .align_y(Alignment::Center),
                 ));
 
+        // Build bezel section (one group of sliders per monitor)
+        let mut bezel_section = widget::settings::section().title(fl!("bezels"));
+
+        for (idx, monitor) in self.monitor_geometry.iter().enumerate() {
+            let bz = &monitor.bezel;
+            let mon_name = monitor.name.clone();
+
+            bezel_section = bezel_section.add(widget::text::heading(mon_name));
+
+            let i = idx;
+            let top = bz.top;
+            let bottom = bz.bottom;
+            let left = bz.left;
+            let right = bz.right;
+
+            bezel_section = bezel_section.add(settings::item(
+                fl!("bezel-top"),
+                widget::row::with_children(vec![
+                    slider(0.0..=60.0, top as f32, move |v| {
+                        Message::SetBezel(i, v as f64, bottom, left, right)
+                    })
+                    .on_release(Message::BezelReleased)
+                    .step(1.0)
+                    .width(Length::Fixed(120.0))
+                    .into(),
+                    widget::text(format!("{:.0}", top))
+                        .width(Length::Fixed(30.0))
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ));
+
+            let top = bz.top;
+            bezel_section = bezel_section.add(settings::item(
+                fl!("bezel-bottom"),
+                widget::row::with_children(vec![
+                    slider(0.0..=60.0, bottom as f32, move |v| {
+                        Message::SetBezel(i, top, v as f64, left, right)
+                    })
+                    .on_release(Message::BezelReleased)
+                    .step(1.0)
+                    .width(Length::Fixed(120.0))
+                    .into(),
+                    widget::text(format!("{:.0}", bottom))
+                        .width(Length::Fixed(30.0))
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ));
+
+            let bottom = bz.bottom;
+            bezel_section = bezel_section.add(settings::item(
+                fl!("bezel-left"),
+                widget::row::with_children(vec![
+                    slider(0.0..=30.0, left as f32, move |v| {
+                        Message::SetBezel(i, top, bottom, v as f64, right)
+                    })
+                    .on_release(Message::BezelReleased)
+                    .step(1.0)
+                    .width(Length::Fixed(120.0))
+                    .into(),
+                    widget::text(format!("{:.0}", left))
+                        .width(Length::Fixed(30.0))
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ));
+
+            let left = bz.left;
+            bezel_section = bezel_section.add(settings::item(
+                fl!("bezel-right"),
+                widget::row::with_children(vec![
+                    slider(0.0..=30.0, right as f32, move |v| {
+                        Message::SetBezel(i, top, bottom, left, v as f64)
+                    })
+                    .on_release(Message::BezelReleased)
+                    .step(1.0)
+                    .width(Length::Fixed(120.0))
+                    .into(),
+                    widget::text(format!("{:.0}", right))
+                        .width(Length::Fixed(30.0))
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ));
+        }
+
         widget::settings::view_column(vec![
             // Default background service section
             bg_service_section.into(),
@@ -1799,6 +1925,8 @@ impl GlowBerrySettings {
                 .into(),
             // Power saving section
             power_saving_section.into(),
+            // Bezel section
+            bezel_section.into(),
         ])
         .into()
     }

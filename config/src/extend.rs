@@ -30,6 +30,31 @@ pub struct ExtendConfig {
     pub layers: Vec<ExtendLayer>,
 }
 
+/// Per-monitor bezel sizes in virtual desktop pixels
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bezel {
+    pub top: f64,
+    pub bottom: f64,
+    pub left: f64,
+    pub right: f64,
+}
+
+impl Default for Bezel {
+    fn default() -> Self {
+        Self {
+            top: 24.0,
+            bottom: 32.0,
+            left: 10.0,
+            right: 10.0,
+        }
+    }
+}
+
+/// Per-monitor bezel config keyed by monitor name
+pub type BezelConfig = HashMap<String, Bezel>;
+
+pub const BEZEL_CONFIG: &str = "bezel-config";
+
 /// Map from display-set key (sorted monitor names joined by "+") to layer config
 pub type DisplayProfiles = HashMap<String, Vec<ExtendLayer>>;
 
@@ -100,6 +125,20 @@ impl ExtendConfig {
             .0
             .get::<Vec<ExtendLayer>>(EXTEND_LAYERS)
             .unwrap_or_default()
+    }
+
+    pub fn load_bezels(context: &Context) -> BezelConfig {
+        context
+            .0
+            .get::<BezelConfig>(BEZEL_CONFIG)
+            .unwrap_or_default()
+    }
+
+    pub fn save_bezels(
+        context: &Context,
+        bezels: &BezelConfig,
+    ) -> Result<(), cosmic_config::Error> {
+        context.0.set(BEZEL_CONFIG, bezels)
     }
 
     /// Save the layer config for a specific display configuration.

@@ -738,12 +738,29 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
 
         // Monitor outlines in a separate layer so they're always on top
         renderer.with_layer(bounds, |renderer| {
-            for (i, monitor) in self.monitors.iter().enumerate() {
+            let bezel_color = core::Color::BLACK;
+
+            for monitor in self.monitors.iter() {
                 let (mx, my) =
                     state.virtual_to_widget(monitor.position.0 as f64, monitor.position.1 as f64);
                 let mw = monitor.logical_size.0 as f32 * state.camera_zoom;
                 let mh = monitor.logical_size.1 as f32 * state.camera_zoom;
 
+                let bz = &monitor.bezel;
+                let bt = bz.top as f32 * state.camera_zoom;
+                let bb = bz.bottom as f32 * state.camera_zoom;
+                let bl = bz.left as f32 * state.camera_zoom;
+                let br = bz.right as f32 * state.camera_zoom;
+
+                // Outer rect including bezels
+                let outer_rect = Rectangle {
+                    x: bounds.x + mx - bl,
+                    y: bounds.y + my - bt,
+                    width: mw + bl + br,
+                    height: mh + bt + bb,
+                };
+
+                // Inner rect (the screen area)
                 let mon_rect = Rectangle {
                     x: bounds.x + mx,
                     y: bounds.y + my,
@@ -751,19 +768,83 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     height: mh,
                 };
 
-                renderer.fill_quad(
-                    Quad {
-                        bounds: mon_rect,
-                        border: Border {
-                            color: cosmic_theme.accent_color().into(),
-                            radius: MONITOR_CORNER_RADIUS.into(),
-                            width: MONITOR_BORDER_WIDTH,
+                // Draw four bezel rectangles (top, bottom, left, right)
+                // Top bezel
+                if bt > 0.0 {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle {
+                                x: outer_rect.x,
+                                y: outer_rect.y,
+                                width: outer_rect.width,
+                                height: bt,
+                            },
+                            border: Border {
+                                radius: [MONITOR_CORNER_RADIUS, MONITOR_CORNER_RADIUS, 0.0, 0.0]
+                                    .into(),
+                                ..Default::default()
+                            },
+                            shadow: Default::default(),
+                            snap: true,
                         },
-                        shadow: Default::default(),
-                        snap: true,
-                    },
-                    core::Background::Color(core::Color::TRANSPARENT),
-                );
+                        core::Background::Color(bezel_color),
+                    );
+                }
+                // Bottom bezel
+                if bb > 0.0 {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle {
+                                x: outer_rect.x,
+                                y: mon_rect.y + mh,
+                                width: outer_rect.width,
+                                height: bb,
+                            },
+                            border: Border {
+                                radius: [0.0, 0.0, MONITOR_CORNER_RADIUS, MONITOR_CORNER_RADIUS]
+                                    .into(),
+                                ..Default::default()
+                            },
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        core::Background::Color(bezel_color),
+                    );
+                }
+                // Left bezel
+                if bl > 0.0 {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle {
+                                x: outer_rect.x,
+                                y: mon_rect.y,
+                                width: bl,
+                                height: mh,
+                            },
+                            border: Border::default(),
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        core::Background::Color(bezel_color),
+                    );
+                }
+                // Right bezel
+                if br > 0.0 {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle {
+                                x: mon_rect.x + mw,
+                                y: mon_rect.y,
+                                width: br,
+                                height: mh,
+                            },
+                            border: Border::default(),
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        core::Background::Color(bezel_color),
+                    );
+                }
 
                 let label = monitor.name.clone();
                 let label_w = (label.len() as f32 * 7.0 + 12.0).min(mon_rect.width - 4.0);
