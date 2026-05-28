@@ -23,6 +23,8 @@ pub fn version_string() -> String {
 
 /// GlowBerry config namespace
 pub const NAME: &str = "io.github.hojjatabdollahi.glowberry";
+/// cosmic-bg config namespace (for lock screen export)
+pub const COSMIC_BG_NAME: &str = "com.system76.CosmicBackground";
 pub const BACKGROUNDS: &str = "backgrounds";
 pub const DEFAULT_BACKGROUND: &str = "all";
 pub const SAME_ON_ALL: &str = "same-on-all";
@@ -43,6 +45,10 @@ pub enum ConfigError {
 /// Fails if config paths are missing or cannot be created.
 pub fn context() -> Result<Context, cosmic_config::Error> {
     CosmicConfig::new(NAME, 1).map(Context)
+}
+
+pub fn cosmic_bg_context() -> Result<Context, cosmic_config::Error> {
+    CosmicConfig::new(COSMIC_BG_NAME, 1).map(Context)
 }
 
 #[derive(Clone, Debug)]

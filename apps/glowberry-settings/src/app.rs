@@ -14,7 +14,7 @@ use cosmic::widget::{
     self, button, container, dropdown, segmented_button, settings, slider, text, toggler,
 };
 use cosmic::{ApplicationExt, Element};
-use cosmic_config::CosmicConfigEntry;
+use cosmic_config::{ConfigSet, CosmicConfigEntry};
 use glowberry_config::extend::ExtendConfig;
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use glowberry_config::state::State;
@@ -300,6 +300,10 @@ pub enum Message {
     LayerShowOn(DefaultKey, String),
     /// Reset canvas camera to fit all content
     ExtendFitView,
+    /// Export wallpaper config to cosmic-bg (for lock screen)
+    ExportToCosmicBg,
+    /// Export completed
+    ExportToCosmicBgDone(Result<(), String>),
     /// Bring a specific layer forward (z+1)
     ExtendLayerBringForward(DefaultKey),
     /// Send a specific layer back (z-1)
@@ -1357,6 +1361,112 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::ExtendFitView => {
                 self.extend_fit_view_requested = true;
+            }
+
+            Message::ExportToCosmicBg => {
+                if self.extend_layers.is_empty() {
+                    return Task::none();
+                }
+
+                // Collect locked layers (direct per-output entries)
+                let mut locked_entries: Vec<(String, PathBuf)> = Vec::new();
+                for layer in self.extend_layers.values() {
+                    if layer.locked
+                        && let Some(ref output) = layer.target_output
+                    {
+                        locked_entries.push((output.clone(), layer.source_path.clone()));
+                    }
+                }
+
+                // Collect unlocked layers for compositing
+                let mut unlocked_layer_infos: Vec<glowberry_lib::extend_crop::LayerInfo> = self
+                    .extend_layers
+                    .values()
+                    .filter(|l| !l.locked)
+                    .map(|l| glowberry_lib::extend_crop::LayerInfo {
+                        source_path: l.source_path.clone(),
+                        offset: l.offset,
+                        img_scale: l.scale,
+                        z_index: l.z_index,
+                    })
+                    .collect();
+
+                let locked_monitor_names: std::collections::HashSet<String> =
+                    locked_entries.iter().map(|(n, _)| n.clone()).collect();
+
+                let monitors_to_composite: Vec<glowberry_lib::extend_crop::MonitorInfo> = self
+                    .monitor_geometry
+                    .iter()
+                    .filter(|m| !locked_monitor_names.contains(&m.name))
+                    .map(|m| glowberry_lib::extend_crop::MonitorInfo {
+                        name: m.name.clone(),
+                        position: m.position,
+                        logical_size: m.logical_size,
+                        physical_size: m.physical_size,
+                        scale: m.scale,
+                    })
+                    .collect();
+
+                let cache_dir = glowberry_lib::extend_crop::cache_dir();
+
+                return Task::perform(
+                    async move {
+                        // Composite unlocked layers
+                        let mut composited: Vec<(String, PathBuf)> = Vec::new();
+                        if !unlocked_layer_infos.is_empty() && !monitors_to_composite.is_empty() {
+                            composited = glowberry_lib::extend_crop::composite_for_monitors(
+                                &mut unlocked_layer_infos,
+                                &monitors_to_composite,
+                                &cache_dir,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+
+                        // Write to cosmic-bg config
+                        let bg_ctx =
+                            glowberry_config::cosmic_bg_context().map_err(|e| e.to_string())?;
+                        let mut bg_config = glowberry_config::Config {
+                            same_on_all: false,
+                            ..Default::default()
+                        };
+                        bg_ctx
+                            .0
+                            .set(glowberry_config::SAME_ON_ALL, false)
+                            .map_err(|e| e.to_string())?;
+
+                        // Write locked layer entries
+                        for (output, path) in &locked_entries {
+                            let entry = glowberry_config::Entry::new(
+                                output.clone(),
+                                glowberry_config::Source::Path(path.clone()),
+                            );
+                            bg_config
+                                .set_entry(&bg_ctx, entry)
+                                .map_err(|e| e.to_string())?;
+                        }
+
+                        // Write composited entries
+                        for (output, path) in &composited {
+                            let entry = glowberry_config::Entry::new(
+                                output.clone(),
+                                glowberry_config::Source::Path(path.clone()),
+                            );
+                            bg_config
+                                .set_entry(&bg_ctx, entry)
+                                .map_err(|e| e.to_string())?;
+                        }
+
+                        tracing::info!("Exported wallpaper config to cosmic-bg");
+                        Ok(())
+                    },
+                    |result| cosmic::Action::App(Message::ExportToCosmicBgDone(result)),
+                );
+            }
+
+            Message::ExportToCosmicBgDone(result) => {
+                if let Err(e) = result {
+                    tracing::error!("Failed to export to cosmic-bg: {}", e);
+                }
             }
 
             Message::ExtendLayerRightClick(key) => {
@@ -2498,6 +2608,13 @@ impl GlowBerrySettings {
                 .class(cosmic::theme::Button::Suggested)
                 .into(),
         );
+        if !self.extend_layers.is_empty() {
+            bottom.push(
+                button::text(fl!("export-cosmic-bg"))
+                    .on_press(Message::ExportToCosmicBg)
+                    .into(),
+            );
+        }
 
         let bottom_row = widget::row::with_children(bottom)
             .spacing(8)

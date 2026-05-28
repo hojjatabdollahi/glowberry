@@ -79,6 +79,7 @@ extend-apply = Apply
 extend-hint = Drag to move, scroll to resize. Use side buttons to change layer order.
 extend-no-layers = Click a wallpaper below to add it to the preview.
 clear-all = Clear All
+export-cosmic-bg = Export to Lock Screen
 unlock-layer = Unlock
 
 # Canvas context menu
