@@ -13,7 +13,7 @@ use cosmic::iced::widget::image::Handle as ImageHandle;
 use slotmap::DefaultKey;
 
 const PADDING: f32 = 10.0;
-const MONITOR_BORDER_WIDTH: f32 = 2.0;
+const MONITOR_BORDER_WIDTH: f32 = 3.0;
 const MONITOR_CORNER_RADIUS: f32 = 4.0;
 const SELECTION_BORDER_WIDTH: f32 = 2.5;
 const HANDLE_SIZE: f32 = 12.0;
@@ -642,86 +642,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 }
             }
 
-            // 2. Draw monitor outlines (on top of all layer images)
-            for (i, monitor) in self.monitors.iter().enumerate() {
-                let (mx, my) =
-                    state.virtual_to_widget(monitor.position.0 as f64, monitor.position.1 as f64);
-                let mw = monitor.logical_size.0 as f32 * state.camera_zoom;
-                let mh = monitor.logical_size.1 as f32 * state.camera_zoom;
-
-                let mon_rect = Rectangle {
-                    x: bounds.x + mx,
-                    y: bounds.y + my,
-                    width: mw,
-                    height: mh,
-                };
-
-                let mut bg = cosmic_theme.palette.neutral_4;
-                bg.alpha = 0.08;
-
-                renderer.fill_quad(
-                    Quad {
-                        bounds: mon_rect,
-                        border: Border {
-                            color: cosmic_theme.accent_color().into(),
-                            radius: MONITOR_CORNER_RADIUS.into(),
-                            width: MONITOR_BORDER_WIDTH,
-                        },
-                        shadow: Default::default(),
-                        snap: true,
-                    },
-                    core::Background::Color(bg.into()),
-                );
-
-                let label = format!("{}", i + 1);
-                let label_bg = Rectangle {
-                    x: mon_rect.x + mon_rect.width / 2.0 - 12.0,
-                    y: mon_rect.y + mon_rect.height / 2.0 - 10.0,
-                    width: 24.0,
-                    height: 20.0,
-                };
-
-                renderer.fill_quad(
-                    Quad {
-                        bounds: label_bg,
-                        border: Border {
-                            radius: 10.0.into(),
-                            ..Default::default()
-                        },
-                        shadow: Default::default(),
-                        snap: true,
-                    },
-                    core::Background::Color({
-                        let mut c = cosmic_theme.palette.neutral_1;
-                        c.alpha = 0.8;
-                        c.into()
-                    }),
-                );
-
-                core::text::Renderer::fill_text(
-                    renderer,
-                    core::Text {
-                        content: label,
-                        size: core::Pixels(14.0),
-                        line_height: core::text::LineHeight::Relative(1.2),
-                        font: cosmic::font::bold(),
-                        bounds: label_bg.size(),
-                        align_x: cosmic::iced::core::text::Alignment::Center,
-                        align_y: cosmic::iced::core::alignment::Vertical::Center,
-                        shaping: core::text::Shaping::Basic,
-                        wrapping: core::text::Wrapping::Word,
-                        ellipsize: core::text::Ellipsize::None,
-                    },
-                    core::Point {
-                        x: label_bg.center_x(),
-                        y: label_bg.center_y(),
-                    },
-                    cosmic_theme.palette.neutral_10.into(),
-                    bounds,
-                );
-            }
-
-            // 3. Draw selection borders, handles, and lock badges (on top of monitors)
+            // 2. Draw selection borders, resize handles, and lock badges
             for layer in unlocked.iter().chain(locked.iter()) {
                 let layer_rect = layer_widget_rect(state, layer, &bounds);
 
@@ -813,7 +734,85 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     }
                 }
             }
-        }); // end with_layer clip
+        }); // end with_layer for images + selection
+
+        // Monitor outlines in a separate layer so they're always on top
+        renderer.with_layer(bounds, |renderer| {
+            for (i, monitor) in self.monitors.iter().enumerate() {
+                let (mx, my) =
+                    state.virtual_to_widget(monitor.position.0 as f64, monitor.position.1 as f64);
+                let mw = monitor.logical_size.0 as f32 * state.camera_zoom;
+                let mh = monitor.logical_size.1 as f32 * state.camera_zoom;
+
+                let mon_rect = Rectangle {
+                    x: bounds.x + mx,
+                    y: bounds.y + my,
+                    width: mw,
+                    height: mh,
+                };
+
+                renderer.fill_quad(
+                    Quad {
+                        bounds: mon_rect,
+                        border: Border {
+                            color: cosmic_theme.accent_color().into(),
+                            radius: MONITOR_CORNER_RADIUS.into(),
+                            width: MONITOR_BORDER_WIDTH,
+                        },
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    core::Background::Color(core::Color::TRANSPARENT),
+                );
+
+                let label = format!("{}", i + 1);
+                let label_bg = Rectangle {
+                    x: mon_rect.x + mon_rect.width / 2.0 - 12.0,
+                    y: mon_rect.y + mon_rect.height / 2.0 - 10.0,
+                    width: 24.0,
+                    height: 20.0,
+                };
+
+                renderer.fill_quad(
+                    Quad {
+                        bounds: label_bg,
+                        border: Border {
+                            radius: 10.0.into(),
+                            ..Default::default()
+                        },
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    core::Background::Color({
+                        let mut c = cosmic_theme.palette.neutral_1;
+                        c.alpha = 0.8;
+                        c.into()
+                    }),
+                );
+
+                core::text::Renderer::fill_text(
+                    renderer,
+                    core::Text {
+                        content: label,
+                        size: core::Pixels(14.0),
+                        line_height: core::text::LineHeight::Relative(1.2),
+                        font: cosmic::font::bold(),
+                        bounds: label_bg.size(),
+                        align_x: cosmic::iced::core::text::Alignment::Center,
+                        align_y: cosmic::iced::core::alignment::Vertical::Center,
+                        shaping: core::text::Shaping::Basic,
+                        wrapping: core::text::Wrapping::Word,
+                        ellipsize: core::text::Ellipsize::None,
+                    },
+                    core::Point {
+                        x: label_bg.center_x(),
+                        y: label_bg.center_y(),
+                    },
+                    cosmic_theme.palette.neutral_10.into(),
+                    bounds,
+                );
+            }
+        }); // end with_layer for monitors
     }
 }
 
