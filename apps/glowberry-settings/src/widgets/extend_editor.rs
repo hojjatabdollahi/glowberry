@@ -38,7 +38,7 @@ pub struct ExtendEditor<'a, Message> {
     on_move: Box<dyn Fn(DefaultKey, f64, f64) -> Message + 'a>,
     on_scale: Box<dyn Fn(DefaultKey, f64) -> Message + 'a>,
     on_select: Box<dyn Fn(Option<DefaultKey>) -> Message + 'a>,
-    on_right_click: Option<Box<dyn Fn(DefaultKey) -> Message + 'a>>,
+    on_right_click: Option<Box<dyn Fn(DefaultKey, f32, f32) -> Message + 'a>>,
     fit_requested: bool,
     width: Length,
     height: Length,
@@ -65,7 +65,7 @@ impl<'a, Message> ExtendEditor<'a, Message> {
         }
     }
 
-    pub fn on_right_click(mut self, f: impl Fn(DefaultKey) -> Message + 'a) -> Self {
+    pub fn on_right_click(mut self, f: impl Fn(DefaultKey, f32, f32) -> Message + 'a) -> Self {
         self.on_right_click = Some(Box::new(f));
         self
     }
@@ -508,7 +508,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     for layer in locked.iter().chain(unlocked.iter()) {
                         let rect = layer_widget_rect(state, layer, &bounds);
                         if rect.contains(abs_pos) {
-                            shell.publish(on_right_click(layer.id));
+                            shell.publish(on_right_click(layer.id, position.x, position.y));
                             shell.capture_event();
                             break;
                         }

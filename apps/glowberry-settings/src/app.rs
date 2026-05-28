@@ -11,7 +11,7 @@ use cosmic::iced::Subscription;
 use cosmic::iced::widget::image::Handle as ImageHandle;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{
-    self, button, container, dropdown, segmented_button, settings, slider, text, toggler,
+    self, button, container, dropdown, menu, segmented_button, settings, slider, text, toggler,
 };
 use cosmic::{ApplicationExt, Element};
 use cosmic_config::{ConfigSet, CosmicConfigEntry};
@@ -123,10 +123,8 @@ pub struct GlowBerrySettings {
     extend_config: ExtendConfig,
     /// Monitor geometry (loaded when extend editor opens)
     monitor_geometry: Vec<crate::monitor_query::MonitorGeometry>,
-    /// Which wallpaper's popup is open
-    wallpaper_popup: Option<DefaultKey>,
-    /// Which layer's context menu is showing in the canvas
-    layer_context_menu: Option<DefaultKey>,
+    /// Which layer's context menu is showing in the canvas, and where
+    layer_context_menu: Option<(DefaultKey, (f32, f32))>,
     /// Image layers on the virtual desktop canvas
     extend_layers: SlotMap<DefaultKey, ExtendLayerState>,
     /// Currently selected layer
@@ -290,8 +288,8 @@ pub enum Message {
     WallpaperShowOn(DefaultKey, String),
     /// Set wallpaper on a screen by monitor index
     WallpaperShowOnIdx(DefaultKey, usize),
-    /// Right-click on a layer in the canvas
-    ExtendLayerRightClick(DefaultKey),
+    /// Right-click on a layer in the canvas (key, x, y relative to widget)
+    ExtendLayerRightClick(DefaultKey, f32, f32),
     /// Close the canvas layer context menu
     ExtendLayerMenuClose,
     /// Duplicate a layer's image on all screens
@@ -308,6 +306,27 @@ pub enum Message {
     ExtendLayerBringForward(DefaultKey),
     /// Send a specific layer back (z-1)
     ExtendLayerSendBack(DefaultKey),
+}
+
+/// Context menu actions for wallpaper thumbnails
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WallpaperAction {
+    Customize(DefaultKey),
+    DuplicateAll(DefaultKey),
+    SpanAll(DefaultKey),
+    ShowOn(DefaultKey, usize),
+}
+
+impl menu::Action for WallpaperAction {
+    type Message = Message;
+    fn message(&self) -> Message {
+        match self {
+            Self::Customize(k) => Message::WallpaperCustomize(*k),
+            Self::DuplicateAll(k) => Message::WallpaperDuplicateAll(*k),
+            Self::SpanAll(k) => Message::WallpaperSpanAll(*k),
+            Self::ShowOn(k, idx) => Message::WallpaperShowOnIdx(*k, *idx),
+        }
+    }
 }
 
 /// Default colors available in the color picker
@@ -454,7 +473,7 @@ impl cosmic::Application for GlowBerrySettings {
             window_opacity: 1.0,               // Will be set below from config
             extend_config: ExtendConfig::default(),
             monitor_geometry: Vec::new(),
-            wallpaper_popup: None,
+
             layer_context_menu: None,
             extend_layers: SlotMap::new(),
             extend_selected_layer: None,
@@ -550,7 +569,6 @@ impl cosmic::Application for GlowBerrySettings {
 
         match message {
             Message::ChangeCategory(category) => {
-                self.wallpaper_popup = None;
                 self.layer_context_menu = None;
                 self.categories.selected = Some(category.clone());
 
@@ -1084,20 +1102,11 @@ impl cosmic::Application for GlowBerrySettings {
                 }
             }
 
-            Message::WallpaperClicked(key) => {
-                self.wallpaper_popup = if self.wallpaper_popup == Some(key) {
-                    None
-                } else {
-                    Some(key)
-                };
-            }
+            Message::WallpaperClicked(_key) => {}
 
-            Message::WallpaperPopupClose => {
-                self.wallpaper_popup = None;
-            }
+            Message::WallpaperPopupClose => {}
 
             Message::WallpaperCustomize(key) => {
-                self.wallpaper_popup = None;
                 let Some(path) = self.selection.paths.get(key).cloned() else {
                     return Task::none();
                 };
@@ -1125,7 +1134,6 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::WallpaperDuplicateAll(key) => {
-                self.wallpaper_popup = None;
                 let Some(path) = self.selection.paths.get(key).cloned() else {
                     return Task::none();
                 };
@@ -1180,7 +1188,6 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::WallpaperSpanAll(key) => {
-                self.wallpaper_popup = None;
                 let Some(path) = self.selection.paths.get(key).cloned() else {
                     return Task::none();
                 };
@@ -1208,7 +1215,6 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::WallpaperShowOn(key, screen_name) => {
-                self.wallpaper_popup = None;
                 let Some(path) = self.selection.paths.get(key).cloned() else {
                     return Task::none();
                 };
@@ -1469,9 +1475,9 @@ impl cosmic::Application for GlowBerrySettings {
                 }
             }
 
-            Message::ExtendLayerRightClick(key) => {
+            Message::ExtendLayerRightClick(key, x, y) => {
                 self.extend_selected_layer = Some(key);
-                self.layer_context_menu = Some(key);
+                self.layer_context_menu = Some((key, (x, y)));
             }
 
             Message::ExtendLayerMenuClose => {
@@ -2492,7 +2498,7 @@ impl GlowBerrySettings {
 
         // Popover for layer right-click menu (always structurally present)
         let mut canvas_popover = widget::popover(canvas_container);
-        if let Some(key) = self.layer_context_menu {
+        if let Some((key, (cx, cy))) = self.layer_context_menu {
             let mut menu_items: Vec<Element<'_, Message>> = Vec::new();
 
             // Duplicate / show-on options (use Layer* messages that look up path from layer)
@@ -2575,6 +2581,10 @@ impl GlowBerrySettings {
 
             canvas_popover = canvas_popover
                 .popup(popup)
+                .position(widget::popover::Position::Point(cosmic::iced::Point {
+                    x: cx,
+                    y: cy,
+                }))
                 .on_close(Message::ExtendLayerMenuClose);
         }
 
@@ -2647,89 +2657,44 @@ impl GlowBerrySettings {
     }
 
     fn view_wallpaper_grid(&self) -> Element<'_, Message> {
-        let wallpaper_popup = self.wallpaper_popup;
-
         let buttons: Vec<Element<'_, Message>> = self
             .selection
             .selection_handles
             .iter()
             .map(|(id, handle)| {
-                let is_open = wallpaper_popup == Some(id);
-
-                // Image button: left-click = customize, secondary button = show menu
+                // Left-click = add to canvas
                 let img_button: Element<'_, Message> = widget::button::image(handle.clone())
                     .on_press(Message::WallpaperCustomize(id))
-                    .selected(is_open)
-                    .on_remove(Message::WallpaperClicked(id))
                     .into();
 
-                // Popover with placement options (always structurally present)
-                let mut popover = widget::popover(img_button);
-                if is_open {
-                    let mut menu_items: Vec<Element<'_, Message>> = vec![
-                        button::text(fl!("wp-customize"))
-                            .on_press(Message::WallpaperCustomize(id))
-                            .width(Length::Fill)
-                            .into(),
-                        button::text(fl!("wp-duplicate-all"))
-                            .on_press(Message::WallpaperDuplicateAll(id))
-                            .width(Length::Fill)
-                            .into(),
-                        button::text(fl!("wp-span-all"))
-                            .on_press(Message::WallpaperSpanAll(id))
-                            .width(Length::Fill)
-                            .into(),
-                    ];
-                    for monitor in &self.monitor_geometry {
-                        let name = monitor.name.clone();
-                        menu_items.push(
-                            button::text(format!("{} {}", fl!("wp-show-on"), &name))
-                                .on_press(Message::WallpaperShowOn(id, name))
-                                .width(Length::Fill)
-                                .into(),
-                        );
-                    }
-                    let popup = container(
-                        widget::column::with_children(menu_items)
-                            .spacing(2)
-                            .padding(8)
-                            .width(Length::Fixed(220.0)),
-                    )
-                    .class(cosmic::theme::Container::custom(|theme| {
-                        let cosmic = theme.cosmic();
-                        cosmic::widget::container::Style {
-                            background: Some(cosmic::iced::Background::Color(
-                                cosmic.background.component.base.into(),
-                            )),
-                            icon_color: Some(cosmic.background.component.on.into()),
-                            text_color: Some(cosmic.background.component.on.into()),
-                            border: cosmic::iced::Border {
-                                radius: cosmic.corner_radii.radius_m.into(),
-                                width: 1.0,
-                                color: cosmic.background.component.divider.into(),
-                            },
-                            shadow: cosmic::iced::Shadow {
-                                color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
-                                offset: cosmic::iced::Vector::new(0.0, 2.0),
-                                blur_radius: 8.0,
-                            },
-                            snap: false,
-                        }
-                    }));
-                    popover = popover.popup(popup).on_close(Message::WallpaperPopupClose);
+                // Right-click context menu
+                let mut ctx_items = vec![
+                    menu::Item::Button(fl!("wp-customize"), None, WallpaperAction::Customize(id)),
+                    menu::Item::Button(
+                        fl!("wp-duplicate-all"),
+                        None,
+                        WallpaperAction::DuplicateAll(id),
+                    ),
+                    menu::Item::Button(fl!("wp-span-all"), None, WallpaperAction::SpanAll(id)),
+                ];
+                for (idx, monitor) in self.monitor_geometry.iter().enumerate() {
+                    ctx_items.push(menu::Item::Button(
+                        format!("{} {}", fl!("wp-show-on"), &monitor.name),
+                        None,
+                        WallpaperAction::ShowOn(id, idx),
+                    ));
                 }
-                popover.into()
+
+                widget::context_menu(img_button, Some(menu::items(&HashMap::new(), ctx_items)))
+                    .into()
             })
             .collect();
 
-        if buttons.is_empty() {
-            widget::text(fl!("loading-wallpapers")).into()
-        } else {
-            widget::flex_row(buttons)
-                .column_spacing(12)
-                .row_spacing(16)
-                .into()
-        }
+        // Always return flex_row (even empty) so the widget tree type is stable
+        widget::flex_row(buttons)
+            .column_spacing(12)
+            .row_spacing(16)
+            .into()
     }
 
     fn view_color_grid(&self) -> Element<'_, Message> {
