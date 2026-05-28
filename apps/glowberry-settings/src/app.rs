@@ -889,8 +889,23 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::MonitorsLoaded(monitors) => {
                 self.monitor_geometry = monitors;
-                if self.extend_layers.is_empty() && !self.extend_config.layers.is_empty() {
-                    self.restore_extend_layers_from_config();
+                // Load layers for this specific display configuration
+                if self.extend_layers.is_empty() {
+                    let monitor_names: Vec<String> = self
+                        .monitor_geometry
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .collect();
+                    if let Some(ctx) = &self.config_context {
+                        let layers = glowberry_config::extend::ExtendConfig::load_for_displays(
+                            ctx,
+                            &monitor_names,
+                        );
+                        if !layers.is_empty() {
+                            self.extend_config.layers = layers;
+                            self.restore_extend_layers_from_config();
+                        }
+                    }
                 }
                 self.extend_fit_view_requested = true;
             }
@@ -1046,7 +1061,7 @@ impl cosmic::Application for GlowBerrySettings {
                     })
                     .collect();
 
-                // Save config (all layers including locked)
+                // Save config (all layers including locked) — both global and per-display-profile
                 self.extend_config.layers = self
                     .extend_layers
                     .values()
@@ -1062,6 +1077,16 @@ impl cosmic::Application for GlowBerrySettings {
                     .collect();
                 if let Some(ctx) = &self.config_context {
                     let _ = ctx.save_extend_config(&self.extend_config);
+                    let monitor_names: Vec<String> = self
+                        .monitor_geometry
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .collect();
+                    let _ = glowberry_config::extend::ExtendConfig::save_for_displays(
+                        ctx,
+                        &monitor_names,
+                        &self.extend_config.layers,
+                    );
                 }
 
                 if unlocked_layers.is_empty() || monitors_to_composite.is_empty() {

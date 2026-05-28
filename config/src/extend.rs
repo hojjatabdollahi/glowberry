@@ -2,18 +2,14 @@
 
 use cosmic_config::{ConfigGet, ConfigSet};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::Context;
 
 pub const EXTEND_ON_ALL: &str = "extend-on-all";
 pub const EXTEND_LAYERS: &str = "extend-layers";
-
-// Old keys for migration
-const OLD_EXTEND_SOURCE_PATH: &str = "extend-source-path";
-const OLD_EXTEND_IMG_OFFSET_X: &str = "extend-img-offset-x";
-const OLD_EXTEND_IMG_OFFSET_Y: &str = "extend-img-offset-y";
-const OLD_EXTEND_IMG_SCALE: &str = "extend-img-scale";
+pub const EXTEND_PROFILES: &str = "extend-profiles";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtendLayer {
@@ -34,6 +30,16 @@ pub struct ExtendConfig {
     pub layers: Vec<ExtendLayer>,
 }
 
+/// Map from display-set key (sorted monitor names joined by "+") to layer config
+pub type DisplayProfiles = HashMap<String, Vec<ExtendLayer>>;
+
+/// Build a display-set key from a list of monitor names
+pub fn display_key(monitors: &[String]) -> String {
+    let mut sorted: Vec<&str> = monitors.iter().map(|s| s.as_str()).collect();
+    sorted.sort();
+    sorted.join("+")
+}
+
 impl ExtendConfig {
     pub fn load(context: &Context) -> Self {
         let enabled = context.0.get::<bool>(EXTEND_ON_ALL).unwrap_or(false);
@@ -43,36 +49,72 @@ impl ExtendConfig {
             return Self { enabled, layers };
         }
 
-        // Fall back to old single-image format and migrate
-        let source_path = context
-            .0
-            .get::<Option<PathBuf>>(OLD_EXTEND_SOURCE_PATH)
-            .unwrap_or(None);
-        let offset_x = context.0.get::<f64>(OLD_EXTEND_IMG_OFFSET_X).unwrap_or(0.0);
-        let offset_y = context.0.get::<f64>(OLD_EXTEND_IMG_OFFSET_Y).unwrap_or(0.0);
-        let scale = context.0.get::<f64>(OLD_EXTEND_IMG_SCALE).unwrap_or(1.0);
-
-        let layers = if let Some(path) = source_path {
-            vec![ExtendLayer {
-                source_path: path,
-                img_offset_x: offset_x,
-                img_offset_y: offset_y,
-                img_scale: scale,
-                z_index: 0,
-                locked: false,
-                target_output: None,
-            }]
-        } else {
-            Vec::new()
-        };
-
-        Self { enabled, layers }
+        Self {
+            enabled,
+            layers: Vec::new(),
+        }
     }
 
     pub fn save(&self, context: &Context) -> Result<(), cosmic_config::Error> {
         context.0.set(EXTEND_ON_ALL, self.enabled)?;
         context.0.set(EXTEND_LAYERS, &self.layers)?;
         Ok(())
+    }
+
+    /// Load the layer config for a specific display configuration.
+    /// Falls back to: exact match → best partial match → current layers → empty.
+    pub fn load_for_displays(context: &Context, monitor_names: &[String]) -> Vec<ExtendLayer> {
+        let key = display_key(monitor_names);
+        let profiles = context
+            .0
+            .get::<DisplayProfiles>(EXTEND_PROFILES)
+            .unwrap_or_default();
+
+        // Exact match
+        if let Some(layers) = profiles.get(&key) {
+            return layers.clone();
+        }
+
+        // Find best partial match: profile that shares the most monitors with current set
+        let current_set: std::collections::HashSet<&str> =
+            monitor_names.iter().map(|s| s.as_str()).collect();
+
+        let mut best: Option<(&str, &Vec<ExtendLayer>, usize)> = None;
+        for (profile_key, layers) in &profiles {
+            let profile_monitors: std::collections::HashSet<&str> =
+                profile_key.split('+').collect();
+            let overlap = current_set.intersection(&profile_monitors).count();
+            if overlap > 0 {
+                if best.is_none() || overlap > best.unwrap().2 {
+                    best = Some((profile_key, layers, overlap));
+                }
+            }
+        }
+
+        if let Some((_, layers, _)) = best {
+            return layers.clone();
+        }
+
+        // Fall back to current extend-layers key
+        context
+            .0
+            .get::<Vec<ExtendLayer>>(EXTEND_LAYERS)
+            .unwrap_or_default()
+    }
+
+    /// Save the layer config for a specific display configuration.
+    pub fn save_for_displays(
+        context: &Context,
+        monitor_names: &[String],
+        layers: &[ExtendLayer],
+    ) -> Result<(), cosmic_config::Error> {
+        let key = display_key(monitor_names);
+        let mut profiles = context
+            .0
+            .get::<DisplayProfiles>(EXTEND_PROFILES)
+            .unwrap_or_default();
+        profiles.insert(key, layers.to_vec());
+        context.0.set(EXTEND_PROFILES, &profiles)
     }
 }
 
