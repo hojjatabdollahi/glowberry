@@ -765,11 +765,12 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     core::Background::Color(core::Color::TRANSPARENT),
                 );
 
-                let label = format!("{}", i + 1);
+                let label = monitor.name.clone();
+                let label_w = (label.len() as f32 * 7.0 + 12.0).min(mon_rect.width - 4.0);
                 let label_bg = Rectangle {
-                    x: mon_rect.x + mon_rect.width / 2.0 - 12.0,
+                    x: mon_rect.x + (mon_rect.width - label_w) / 2.0,
                     y: mon_rect.y + mon_rect.height / 2.0 - 10.0,
-                    width: 24.0,
+                    width: label_w,
                     height: 20.0,
                 };
 
