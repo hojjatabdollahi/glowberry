@@ -25,6 +25,9 @@ pub fn version_string() -> String {
 pub const NAME: &str = "io.github.hojjatabdollahi.glowberry";
 /// cosmic-bg config namespace (for lock screen export)
 pub const COSMIC_BG_NAME: &str = "com.system76.CosmicBackground";
+/// Key in the cosmic-bg *state* namespace holding the per-output applied
+/// wallpapers. This is what cosmic-greeter reads to paint the lock screen.
+pub const COSMIC_BG_WALLPAPERS: &str = "wallpapers";
 pub const BACKGROUNDS: &str = "backgrounds";
 pub const DEFAULT_BACKGROUND: &str = "all";
 pub const SAME_ON_ALL: &str = "same-on-all";
@@ -49,6 +52,31 @@ pub fn context() -> Result<Context, cosmic_config::Error> {
 
 pub fn cosmic_bg_context() -> Result<Context, cosmic_config::Error> {
     CosmicConfig::new(COSMIC_BG_NAME, 1).map(Context)
+}
+
+/// Export the applied wallpapers to the cosmic-bg *state* so the lock screen
+/// (cosmic-greeter) shows them.
+///
+/// cosmic-greeter does not read the cosmic-bg *config* (the `output.*` entries);
+/// it subscribes to the `wallpapers` key in the cosmic-bg *state* namespace
+/// (`~/.local/state/cosmic/com.system76.CosmicBackground`), a list of
+/// `(output_name, source)` pairs for the currently-applied wallpaper on each
+/// output. cosmic-bg's daemon normally writes this state when it applies a
+/// wallpaper; because GlowBerry acts as the wallpaper daemon, it must write the
+/// state itself or the lock screen keeps showing stale/default wallpapers.
+///
+/// # Errors
+///
+/// Fails if the state directory cannot be created or written.
+pub fn export_lock_screen_wallpapers(
+    wallpapers: &[(String, PathBuf)],
+) -> Result<(), cosmic_config::Error> {
+    let state = CosmicConfig::new_state(COSMIC_BG_NAME, 1)?;
+    let entries: Vec<(String, Source)> = wallpapers
+        .iter()
+        .map(|(output, path)| (output.clone(), Source::Path(path.clone())))
+        .collect();
+    state.set(COSMIC_BG_WALLPAPERS, entries)
 }
 
 #[derive(Clone, Debug)]

@@ -1537,7 +1537,20 @@ impl cosmic::Application for GlowBerrySettings {
                                 .map_err(|e| e.to_string())?;
                         }
 
-                        tracing::info!("Exported wallpaper config to cosmic-bg");
+                        // The cosmic-bg *config* above is only consumed by the
+                        // cosmic-bg daemon. cosmic-greeter paints the lock screen
+                        // from the cosmic-bg *state* instead, so mirror the applied
+                        // wallpapers there too — otherwise the lock screen keeps
+                        // showing the stale/default wallpaper.
+                        let mut state_wallpapers = locked_entries.clone();
+                        state_wallpapers.extend(composited.iter().cloned());
+                        glowberry_config::export_lock_screen_wallpapers(&state_wallpapers)
+                            .map_err(|e| e.to_string())?;
+
+                        tracing::info!(
+                            "Exported {} wallpaper(s) to cosmic-bg config and state",
+                            state_wallpapers.len()
+                        );
                         Ok(())
                     },
                     |result| cosmic::Action::App(Message::ExportToCosmicBgDone(result)),
@@ -2622,21 +2635,13 @@ impl GlowBerrySettings {
         .on_right_click(Message::ExtendLayerRightClick)
         .fit_requested(self.extend_fit_view_requested);
 
-        // Side buttons (right of canvas)
+        // Side buttons (right of canvas) — z-order and center only
         let mut side_buttons: Vec<Element<'_, Message>> = Vec::new();
 
         if let Some(sel_key) = self.extend_selected_layer {
             let is_locked = self.extend_layers.get(sel_key).is_some_and(|l| l.locked);
 
-            if is_locked {
-                // Locked layer: show unlock button
-                side_buttons.push(
-                    widget::button::icon(widget::icon::from_name("changes-allow-symbolic"))
-                        .on_press(Message::ExtendToggleLock(sel_key))
-                        .into(),
-                );
-            } else {
-                // Unlocked layer: show z-order and center buttons
+            if !is_locked {
                 side_buttons.push(
                     widget::button::icon(widget::icon::from_name("go-up-symbolic"))
                         .on_press(Message::ExtendLayerUp)
@@ -2653,9 +2658,33 @@ impl GlowBerrySettings {
                         .into(),
                 );
             }
+        }
 
-            // Delete always available
-            side_buttons.push(
+        let side_col = widget::column::with_children(side_buttons)
+            .spacing(4)
+            .align_x(Alignment::Center);
+
+        // Tool buttons overlaid on bottom-left of canvas
+        let mut overlay_buttons: Vec<Element<'_, Message>> = Vec::new();
+
+        if let Some(sel_key) = self.extend_selected_layer {
+            let is_locked = self.extend_layers.get(sel_key).is_some_and(|l| l.locked);
+
+            if is_locked {
+                overlay_buttons.push(
+                    widget::button::icon(widget::icon::from_name("changes-allow-symbolic"))
+                        .on_press(Message::ExtendToggleLock(sel_key))
+                        .into(),
+                );
+            } else {
+                overlay_buttons.push(
+                    widget::button::icon(widget::icon::from_name("changes-prevent-symbolic"))
+                        .on_press(Message::ExtendToggleLock(sel_key))
+                        .into(),
+                );
+            }
+
+            overlay_buttons.push(
                 widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
                     .on_press(Message::ExtendRemoveLayer(sel_key))
                     .class(cosmic::theme::Button::Destructive)
@@ -2663,14 +2692,39 @@ impl GlowBerrySettings {
             );
         }
 
-        let side_col = widget::column::with_children(side_buttons)
-            .spacing(4)
-            .align_x(Alignment::Center);
+        if !self.extend_layers.is_empty() {
+            overlay_buttons.push(
+                widget::button::icon(widget::icon::from_name("edit-clear-all-symbolic"))
+                    .on_press(Message::ExtendClearAll)
+                    .class(cosmic::theme::Button::Destructive)
+                    .into(),
+            );
+        }
 
-        let canvas_container: Element<'_, Message> = container(editor)
+        overlay_buttons.push(
+            widget::button::icon(widget::icon::from_name("zoom-fit-best-symbolic"))
+                .on_press(Message::ExtendFitView)
+                .into(),
+        );
+
+        let tool_col = widget::column::with_children(overlay_buttons).spacing(4);
+
+        let tool_overlay = container(tool_col)
             .width(Length::Fill)
-            .height(Length::Fixed(300.0))
-            .into();
+            .height(Length::Fill)
+            .align_x(Alignment::Start)
+            .align_y(Alignment::End)
+            .padding(6);
+
+        let canvas_container: Element<'_, Message> = cosmic::iced::widget::stack![
+            container(editor)
+                .width(Length::Fill)
+                .height(Length::Fixed(300.0)),
+            tool_overlay
+        ]
+        .width(Length::Fill)
+        .height(Length::Fixed(300.0))
+        .into();
 
         // Popover for layer right-click menu (always structurally present)
         let mut canvas_popover = widget::popover(canvas_container);
@@ -2774,20 +2828,6 @@ impl GlowBerrySettings {
         // Bottom controls: clear all + apply
         let mut bottom: Vec<Element<'_, Message>> = Vec::new();
 
-        bottom.push(
-            widget::button::icon(widget::icon::from_name("zoom-fit-best-symbolic"))
-                .on_press(Message::ExtendFitView)
-                .into(),
-        );
-
-        if !self.extend_layers.is_empty() {
-            bottom.push(
-                button::text(fl!("clear-all"))
-                    .on_press(Message::ExtendClearAll)
-                    .class(cosmic::theme::Button::Destructive)
-                    .into(),
-            );
-        }
         bottom.push(
             button::text(fl!("extend-apply"))
                 .on_press(Message::ApplyExtend)

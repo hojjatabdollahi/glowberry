@@ -102,12 +102,61 @@ pub fn composite_for_monitors(
             image::imageops::overlay(&mut canvas, &layer_img.to_rgba8(), 0, 0);
         }
 
-        let out_path = cache_dir.join(format!("{}.png", monitor.name));
+        // Name the file by a hash of its pixels so the path changes whenever the
+        // composited image changes (and stays the same when it doesn't). Downstream
+        // consumers — cosmic-bg for the desktop, cosmic-greeter for the lock screen —
+        // cache wallpapers by path and won't reload a file whose path is unchanged.
+        // A stable per-output filename therefore leaves the desktop/lock screen
+        // showing the previous image after the user picks a new one.
+        let digest = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash_slice(canvas.as_raw().as_slice(), &mut hasher);
+            std::hash::Hasher::finish(&hasher)
+        };
+        let out_path = cache_dir.join(format!("{}-{:016x}.png", monitor.name, digest));
+
         DynamicImage::ImageRgba8(canvas).save(&out_path)?;
+
+        // Prune old composites for this monitor, keeping the few most recent so
+        // the cache stays bounded. We keep more than one because the previously
+        // applied file is still referenced by the cosmic-bg state (lock screen)
+        // until the next export — deleting it eagerly would make the lock screen
+        // fall back to its default wallpaper.
+        prune_old_composites(cache_dir, &monitor.name);
+
         results.push((monitor.name.clone(), out_path));
     }
 
     Ok(results)
+}
+
+/// Keep only the most recent composites for `monitor_name` (both the legacy
+/// `<name>.png` and `<name>-<hash>.png` files), pruning older ones.
+fn prune_old_composites(cache_dir: &Path, monitor_name: &str) {
+    const KEEP: usize = 3;
+    let legacy = format!("{monitor_name}.png");
+    let prefix = format!("{monitor_name}-");
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    let mut matches: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let fname = path.file_name()?.to_str()?.to_owned();
+            if fname == legacy || (fname.starts_with(&prefix) && fname.ends_with(".png")) {
+                let mtime = entry.metadata().ok()?.modified().ok()?;
+                Some((mtime, path))
+            } else {
+                None
+            }
+        })
+        .collect();
+    // Newest first; drop everything past the KEEP most recent.
+    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in matches.into_iter().skip(KEEP) {
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
