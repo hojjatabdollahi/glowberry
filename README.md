@@ -10,10 +10,14 @@ Disclaimer: This project extends the functionality of cosmic-bg with live shader
 
 https://github.com/user-attachments/assets/44c1a6a2-4c13-4d02-b108-48284f1a5def
 
+Multi monitor support:
+<img width="1523" height="987" alt="image" src="https://github.com/user-attachments/assets/1662eae0-4b26-4338-9c72-970c2de5ef91" />
+
+
 ## Features
 
 - Live GPU-rendered shader wallpapers (WGSL)
-- Static image wallpapers and solid colors
+- Static image wallpapers with multi monitor support
 - Per-display configuration
 - Power saving options (pause/reduce FPS on battery)
 - Settings application for easy configuration
