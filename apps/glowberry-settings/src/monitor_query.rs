@@ -24,6 +24,29 @@ pub struct MonitorGeometry {
     pub physical_size: (u32, u32),
     pub scale: f64,
     pub bezel: glowberry_config::extend::Bezel,
+    /// Monitor model name from EDID (e.g. "LG HDR 4K"), if reported.
+    pub model: Option<String>,
+    /// Stable EDID-derived identity (make|model|serial), if reported. Same
+    /// physical monitor yields the same value regardless of which port it's on.
+    pub edid: Option<String>,
+}
+
+impl MonitorGeometry {
+    /// Key used to store per-display settings (bezels). Uses the EDID identity
+    /// so the same monitor keeps its settings across ports; falls back to the
+    /// connector name when EDID info is unavailable.
+    pub fn bezel_key(&self) -> String {
+        self.edid.clone().unwrap_or_else(|| self.name.clone())
+    }
+
+    /// Human-friendly label: the monitor model with the current connector in
+    /// parentheses (e.g. "LG HDR 4K (DP-6)"); just the connector if no model.
+    pub fn display_label(&self) -> String {
+        match &self.model {
+            Some(model) if !model.is_empty() => format!("{model} ({})", self.name),
+            _ => self.name.clone(),
+        }
+    }
 }
 
 pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError> {
@@ -76,9 +99,32 @@ pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError>
         let mut scale = 1.0f64;
         let mut current_mode_size: Option<(u32, u32)> = None;
         let mut is_rotated = false;
+        let mut make: Option<String> = None;
+        let mut model: Option<String> = None;
+        let mut serial: Option<String> = None;
 
         for child in children.nodes() {
             match child.name().value() {
+                "description" => {
+                    for entry in child.entries() {
+                        match entry.name().map(|n| n.value()) {
+                            Some("make") => {
+                                make = entry.value().as_string().map(str::to_owned);
+                            }
+                            Some("model") => {
+                                model = entry.value().as_string().map(str::to_owned);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "serial_number" => {
+                    if let Some(entry) = child.entries().first()
+                        && let Some(s) = entry.value().as_string()
+                    {
+                        serial = Some(s.to_owned());
+                    }
+                }
                 "position" => {
                     if let [x, y, ..] = child.entries() {
                         position = (
@@ -141,6 +187,18 @@ pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError>
         let logical_w = (phys_w as f64 / scale).round() as u32;
         let logical_h = (phys_h as f64 / scale).round() as u32;
 
+        // Build a stable EDID identity when any descriptor is present.
+        let edid = if make.is_some() || model.is_some() || serial.is_some() {
+            Some(format!(
+                "{}|{}|{}",
+                make.as_deref().unwrap_or(""),
+                model.as_deref().unwrap_or(""),
+                serial.as_deref().unwrap_or(""),
+            ))
+        } else {
+            None
+        };
+
         monitors.push(MonitorGeometry {
             name: name.to_owned(),
             position,
@@ -148,6 +206,8 @@ pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError>
             physical_size: (phys_w, phys_h),
             scale,
             bezel: glowberry_config::extend::Bezel::default(),
+            model,
+            edid,
         });
     }
 

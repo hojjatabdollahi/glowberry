@@ -78,9 +78,21 @@ all-displays = All Displays
 extend-apply = Apply
 extend-hint = Drag to move, scroll to resize. Use side buttons to change layer order.
 extend-no-layers = Click a wallpaper below to add it to the preview.
+live-hint = Right-click a display to apply this to all screens or just one.
+live-no-items = Pick a color or animation below to preview it on your displays.
 clear-all = Clear All
 export-cosmic-bg = Export to Lock Screen
 unlock-layer = Unlock
+
+# Button tooltips
+tip-layer-up = Move layer up
+tip-layer-down = Move layer down
+tip-center = Center layer on the displays
+tip-lock = Lock to a display
+tip-unlock = Unlock layer
+tip-delete = Delete layer
+tip-clear-all = Remove all layers
+tip-fit = Fit all displays in view
 
 # Canvas context menu
 ctx-bring-forward = Bring Forward
@@ -99,3 +111,4 @@ wp-customize = Customize in preview
 wp-duplicate-all = Duplicate on all screens
 wp-span-all = Span across all screens
 wp-show-on = Show on
+apply-all = Apply on all screens

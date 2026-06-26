@@ -30,6 +30,30 @@ pub struct LayerView<'a> {
     pub z_index: usize,
     pub selected: bool,
     pub locked: bool,
+    /// For color items (color/live modes): fill this layer with a solid color
+    /// or gradient instead of an image.
+    pub color: Option<&'a glowberry_config::Color>,
+}
+
+/// Build a fill background for a color item (solid or gradient), applying the
+/// given opacity. Mirrors the gradient construction used by the flat preview.
+fn color_background(color: &glowberry_config::Color, opacity: f32) -> cosmic::iced::Background {
+    use cosmic::iced::{Background, Color as IcedColor, Degrees, Gradient, gradient::Linear};
+    match color {
+        glowberry_config::Color::Single([r, g, b]) => {
+            Background::Color(IcedColor::from_rgba(*r, *g, *b, opacity))
+        }
+        glowberry_config::Color::Gradient(grad) => {
+            let stop_increment = 1.0 / (grad.colors.len().saturating_sub(1).max(1)) as f32;
+            let mut stop = 0.0;
+            let mut linear = Linear::new(Degrees(grad.radius));
+            for &[r, g, b] in &*grad.colors {
+                linear = linear.add_stop(stop, IcedColor::from_rgba(r, g, b, opacity));
+                stop += stop_increment;
+            }
+            Background::Gradient(Gradient::Linear(linear))
+        }
+    }
 }
 
 pub struct ExtendEditor<'a, Message> {
@@ -98,6 +122,17 @@ struct State {
     camera_initialized: bool,
     camera_pan_start: (f32, f32),
     widget_size: (f32, f32),
+    // Signature of the scene content last fitted to. When the monitor layout or
+    // the set of layers changes (e.g. monitors are queried after the window
+    // opens, or an image is added), the view re-fits automatically so the user
+    // doesn't have to press the fit button. Moving/scaling a layer does not
+    // change the signature, so it won't fight manual edits.
+    last_content_sig: u64,
+    // Widget size at the last fit. The window settles to its final size shortly
+    // after opening, so we also re-fit when the size changes — keeping the scene
+    // centered — until the user manually pans/zooms.
+    last_fit_size: (f32, f32),
+    user_adjusted: bool,
 }
 
 impl Default for State {
@@ -113,8 +148,30 @@ impl Default for State {
             camera_initialized: false,
             camera_pan_start: (0.0, 0.0),
             widget_size: (400.0, 300.0),
+            last_content_sig: 0,
+            last_fit_size: (0.0, 0.0),
+            user_adjusted: false,
         }
     }
+}
+
+/// Signature of the scene's structural content (monitor geometry, and the set
+/// and intrinsic size of layers) — but not layer offset/scale, so editing a
+/// layer doesn't trigger a re-fit.
+fn content_signature(monitors: &[MonitorGeometry], layers: &[LayerView]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    monitors.len().hash(&mut hasher);
+    for m in monitors {
+        m.position.hash(&mut hasher);
+        m.logical_size.hash(&mut hasher);
+    }
+    layers.len().hash(&mut hasher);
+    for l in layers {
+        l.id.hash(&mut hasher);
+        l.image_size.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl State {
@@ -286,10 +343,24 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
         let state = tree.state.downcast_mut::<State>();
         state.widget_size = (size.width, size.height);
 
-        // Initialize camera or handle fit request
-        if !state.camera_initialized || self.fit_requested {
+        // Fit on first layout, on an explicit fit request, or — until the user
+        // manually pans/zooms — whenever the scene's structural content changes
+        // (monitors queried after open, a layer added) or the widget is resized
+        // (the window settling to its final size after opening). This keeps the
+        // scene fitted and centered on open without fighting later manual edits.
+        let sig = content_signature(self.monitors, &self.layers);
+        let size_changed = (state.widget_size.0 - state.last_fit_size.0).abs() > 0.5
+            || (state.widget_size.1 - state.last_fit_size.1).abs() > 0.5;
+        let auto_fit = !state.user_adjusted && (sig != state.last_content_sig || size_changed);
+        if !state.camera_initialized || self.fit_requested || auto_fit {
             state.fit_to_view(self.monitors, &self.layers);
             state.camera_initialized = true;
+            state.last_content_sig = sig;
+            state.last_fit_size = state.widget_size;
+            // An explicit fit re-enables automatic centering.
+            if self.fit_requested {
+                state.user_adjusted = false;
+            }
         }
 
         layout::Node::new(size)
@@ -359,8 +430,12 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                         }
                         shell.publish((self.on_select)(Some(layer_id)));
                     } else {
-                        state.drag_mode = None;
+                        // Empty area: deselect and start panning the camera so a
+                        // click-drag on the background moves the view.
+                        state.drag_mode = Some(DragMode::PanCamera);
                         state.dragging_layer = None;
+                        state.drag_start = position;
+                        state.camera_pan_start = state.camera_pan;
                         shell.publish((self.on_select)(None));
                     }
                     shell.capture_event();
@@ -385,6 +460,9 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 {
                     let dx = position.x - state.drag_start.x;
                     let dy = position.y - state.drag_start.y;
+                    // Any drag counts as a manual adjustment; stop auto-fitting
+                    // on resize so we don't fight the user.
+                    state.user_adjusted = true;
 
                     match mode {
                         DragMode::PanCamera => {
@@ -484,6 +562,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     state.camera_pan.1 =
                         cursor_y - (cursor_y - state.camera_pan.1) * (new_zoom / state.camera_zoom);
                     state.camera_zoom = new_zoom;
+                    state.user_adjusted = true;
 
                     shell.capture_event();
                 }
@@ -566,6 +645,8 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     return mouse::Interaction::Grab;
                 }
             }
+            // Empty area is pannable.
+            return mouse::Interaction::Grab;
         }
         mouse::Interaction::Idle
     }
@@ -612,7 +693,19 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 let layer_rect = layer_widget_rect(state, layer, &bounds);
                 let opacity = if layer.selected { 1.0 } else { 0.75 };
 
-                if let Some(handle) = layer.image_handle {
+                if let Some(color) = layer.color {
+                    if let Some(clipped) = layer_rect.intersection(&bounds) {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds: clipped,
+                                border: Border::default(),
+                                shadow: Default::default(),
+                                snap: true,
+                            },
+                            color_background(color, opacity),
+                        );
+                    }
+                } else if let Some(handle) = layer.image_handle {
                     use core::image::Renderer as ImageRenderer;
                     ImageRenderer::draw_image(
                         renderer,

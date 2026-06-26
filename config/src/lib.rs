@@ -443,7 +443,11 @@ impl Config {
             context.0.set(&output_key, entry.clone())?;
         }
 
-        if let Some(old) = self.entry_mut(&output_key) {
+        // Match in-memory entries by the bare output name (e.g. "DP-5"), which is
+        // what `Entry::output` holds — not the on-disk key ("output.DP-5").
+        // Using the key here never matched, so every set_entry pushed a duplicate
+        // and `entry()` returned a stale copy until the next reload.
+        if let Some(old) = self.entry_mut(&entry.output) {
             *old = entry;
         } else if entry.output != "all" {
             self.backgrounds.push(entry);
@@ -460,3 +464,4 @@ impl Config {
         Ok(())
     }
 }
+
