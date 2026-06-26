@@ -5,6 +5,7 @@
 use crate::fl;
 use crate::shader_analysis::{self, Complexity};
 use crate::shader_params::{ParamType, ParamValue, ParsedShader};
+use cosmetics::widgets::scrub_spin::scrub_spin;
 use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::Subscription;
@@ -15,7 +16,6 @@ use cosmic::widget::{
 };
 use cosmic::{ApplicationExt, Element};
 use cosmic_config::{ConfigGet, ConfigSet, CosmicConfigEntry};
-use cosmetics::widgets::scrub_spin::scrub_spin;
 use glowberry_config::extend::ExtendConfig;
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use glowberry_config::state::State;
@@ -778,7 +778,13 @@ impl cosmic::Application for GlowBerrySettings {
                         if let Some(ctx) = &self.config_context {
                             let _ = ctx.0.set("saved-shader", source.clone());
                         }
-                        self.apply_content_to_output(None, source, handle, (1920, 1080), monitor_idx);
+                        self.apply_content_to_output(
+                            None,
+                            source,
+                            handle,
+                            (1920, 1080),
+                            monitor_idx,
+                        );
                     }
                 }
             }
@@ -1842,17 +1848,23 @@ impl cosmic::Application for GlowBerrySettings {
                                             // downstream consumers cache by path.
                                             let digest = {
                                                 use std::hash::{Hash, Hasher};
-                                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                                let mut h =
+                                                    std::collections::hash_map::DefaultHasher::new(
+                                                    );
                                                 rgba.hash(&mut h);
                                                 h.finish()
                                             };
-                                            if let Some(img) = image::RgbaImage::from_raw(rw, rh, rgba)
+                                            if let Some(img) =
+                                                image::RgbaImage::from_raw(rw, rh, rgba)
                                             {
                                                 let out_path = cache.join(format!(
                                                     "{output}-shader-{digest:016x}.png"
                                                 ));
                                                 if let Err(e) = img.save(&out_path) {
-                                                    tracing::warn!(?e, "failed to save shader snapshot");
+                                                    tracing::warn!(
+                                                        ?e,
+                                                        "failed to save shader snapshot"
+                                                    );
                                                 } else {
                                                     out.push((output, out_path));
                                                 }
@@ -2822,7 +2834,10 @@ impl GlowBerrySettings {
                     .extend_layers
                     .iter()
                     .filter_map(|(k, l)| {
-                        Some((l.target_output.clone()?, self.extend_layer_colors.get(k)?.clone()))
+                        Some((
+                            l.target_output.clone()?,
+                            self.extend_layer_colors.get(k)?.clone(),
+                        ))
                     })
                     .collect();
                 let _ = ctx.0.set("saved-color-outputs", map);
@@ -2853,8 +2868,11 @@ impl GlowBerrySettings {
             (
                 ctx.and_then(|c| c.0.get::<Vec<(String, Color)>>("saved-color-outputs").ok())
                     .unwrap_or_default(),
-                ctx.and_then(|c| c.0.get::<Vec<(String, Source)>>("saved-shader-outputs").ok())
-                    .unwrap_or_default(),
+                ctx.and_then(|c| {
+                    c.0.get::<Vec<(String, Source)>>("saved-shader-outputs")
+                        .ok()
+                })
+                .unwrap_or_default(),
                 ctx.and_then(|c| c.0.get::<Color>("saved-color").ok()),
                 ctx.and_then(|c| c.0.get::<Source>("saved-shader").ok()),
             )
@@ -3305,10 +3323,8 @@ impl GlowBerrySettings {
                     fl!("tip-layer-down"),
                 ));
                 side_buttons.push(with_tip(
-                    widget::button::icon(widget::icon::from_name(
-                        "format-justify-center-symbolic",
-                    ))
-                    .on_press(Message::ExtendCenter),
+                    widget::button::icon(widget::icon::from_name("format-justify-center-symbolic"))
+                        .on_press(Message::ExtendCenter),
                     fl!("tip-center"),
                 ));
             }
@@ -3650,8 +3666,11 @@ impl GlowBerrySettings {
                         .on_press(Message::ColorSelect(color.clone()))
                         .into();
 
-                let mut ctx_items =
-                    vec![menu::Item::Button(fl!("apply-all"), None, ColorAction::All(idx))];
+                let mut ctx_items = vec![menu::Item::Button(
+                    fl!("apply-all"),
+                    None,
+                    ColorAction::All(idx),
+                )];
                 for (m, monitor) in self.monitor_geometry.iter().enumerate() {
                     ctx_items.push(menu::Item::Button(
                         format!("{} {}", fl!("wp-show-on"), &monitor.name),
@@ -3705,8 +3724,11 @@ impl GlowBerrySettings {
                 .align_x(Alignment::Center)
                 .into();
 
-                let mut ctx_items =
-                    vec![menu::Item::Button(fl!("apply-all"), None, ShaderAction::All(idx))];
+                let mut ctx_items = vec![menu::Item::Button(
+                    fl!("apply-all"),
+                    None,
+                    ShaderAction::All(idx),
+                )];
                 for (m, monitor) in self.monitor_geometry.iter().enumerate() {
                     ctx_items.push(menu::Item::Button(
                         format!("{} {}", fl!("wp-show-on"), &monitor.name),

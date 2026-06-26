@@ -13,7 +13,6 @@ use cosmic::iced::widget::image::Handle as ImageHandle;
 use slotmap::DefaultKey;
 
 const PADDING: f32 = 10.0;
-const MONITOR_BORDER_WIDTH: f32 = 3.0;
 const MONITOR_CORNER_RADIUS: f32 = 4.0;
 const SELECTION_BORDER_WIDTH: f32 = 2.5;
 const HANDLE_SIZE: f32 = 12.0;
@@ -72,6 +71,7 @@ fn bezel_gradient(angle_deg: f32, a: [f32; 3], b: [f32; 3]) -> cosmic::iced::Bac
     Background::Gradient(Gradient::Linear(linear))
 }
 
+#[allow(clippy::type_complexity)]
 pub struct ExtendEditor<'a, Message> {
     monitors: &'a [MonitorGeometry],
     layers: Vec<LayerView<'a>>,

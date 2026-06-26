@@ -1208,7 +1208,7 @@ dependencies = [
 [[package]]
 name = "cosmetics"
 version = "0.1.0"
-source = "git+https://github.com/hojjatabdollahi/cosmetics.git#092cb3d04a3b4daff6be46a4e00b5e7ff5e6694b"
+source = "git+https://github.com/hojjatabdollahi/cosmetics.git#8ef62705945d67a32220872a859967c794789c3e"
 dependencies = [
  "libcosmic",
  "num-traits",

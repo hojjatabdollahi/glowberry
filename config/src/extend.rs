@@ -109,10 +109,8 @@ impl ExtendConfig {
             let profile_monitors: std::collections::HashSet<&str> =
                 profile_key.split('+').collect();
             let overlap = current_set.intersection(&profile_monitors).count();
-            if overlap > 0 {
-                if best.is_none() || overlap > best.unwrap().2 {
-                    best = Some((profile_key, layers, overlap));
-                }
+            if overlap > 0 && (best.is_none() || overlap > best.unwrap().2) {
+                best = Some((profile_key, layers, overlap));
             }
         }
 
