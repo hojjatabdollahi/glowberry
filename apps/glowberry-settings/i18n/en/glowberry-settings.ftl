@@ -113,4 +113,5 @@ wp-customize = Customize in preview
 wp-duplicate-all = Duplicate on all screens
 wp-span-all = Span across all screens
 wp-show-on = Show on
+wp-remove-source = Remove from grid
 apply-all = Apply on all screens
