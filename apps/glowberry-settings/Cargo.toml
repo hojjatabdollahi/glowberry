@@ -14,6 +14,9 @@ path = "src/main.rs"
 glowberry-config = { path = "../../config" }
 glowberry-lib = { path = "../../crates/glowberry-lib" }
 
+# Custom COSMIC widgets
+cosmetics = { git = "https://github.com/hojjatabdollahi/cosmetics.git" }
+
 # COSMIC/iced dependencies
 cosmic-config = { git = "https://github.com/pop-os/libcosmic" }
 cosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", default-features = false, features = [
@@ -25,6 +28,7 @@ cosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", d
   "wayland",
   "winit",
   "wgpu",
+  "xdg-portal",
 ] }
 
 # Async runtime
@@ -53,6 +57,10 @@ walkdir = "2.5"
 dirs = "6"
 xdg = "3"
 infer = "0.19"
+
+# KDL parsing (for cosmic-randr monitor query)
+kdl = "6.5.0"
+thiserror = "2"
 
 # Utilities
 tracing = "0.1"

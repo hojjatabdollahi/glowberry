@@ -24,20 +24,24 @@ pub enum WallpaperEvent {
     Loaded,
 }
 
-/// Create a subscription that loads wallpapers from the given directory
-pub fn wallpapers(current_dir: PathBuf) -> Subscription<WallpaperEvent> {
-    Subscription::run_with(current_dir, async_stream)
+/// Create a subscription that loads wallpapers from the given sources. Each
+/// source may be a directory (scanned for images) or an individual image file.
+/// Re-runs whenever the source list changes.
+pub fn wallpapers(sources: Vec<PathBuf>) -> Subscription<WallpaperEvent> {
+    Subscription::run_with(sources, async_stream)
 }
 
 #[allow(clippy::ptr_arg)]
-fn async_stream(current_dir: &PathBuf) -> Pin<Box<dyn Send + Stream<Item = WallpaperEvent>>> {
+fn async_stream(sources: &Vec<PathBuf>) -> Pin<Box<dyn Send + Stream<Item = WallpaperEvent>>> {
     Box::pin(futures_lite::stream::unfold(
-        LoadState::Init(current_dir.clone()),
+        LoadState::Init(sources.clone()),
         |state| async move {
             match state {
-                LoadState::Init(path) => Some((WallpaperEvent::Loading, LoadState::Loading(path))),
-                LoadState::Loading(path) => {
-                    let stream = load_wallpapers_from_path(path).await;
+                LoadState::Init(paths) => {
+                    Some((WallpaperEvent::Loading, LoadState::Loading(paths)))
+                }
+                LoadState::Loading(paths) => {
+                    let stream = load_wallpapers_from_sources(paths).await;
                     // Get first item or signal done
                     let mut stream = stream;
                     if let Some((path, display, selection)) = stream.next().await {
@@ -74,23 +78,38 @@ fn async_stream(current_dir: &PathBuf) -> Pin<Box<dyn Send + Stream<Item = Wallp
 }
 
 enum LoadState {
-    Init(PathBuf),
-    Loading(PathBuf),
+    Init(Vec<PathBuf>),
+    Loading(Vec<PathBuf>),
     Streaming(Pin<Box<dyn Send + Stream<Item = (PathBuf, RgbaImage, RgbaImage)>>>),
     Done,
 }
 
-/// Load wallpapers from a directory
-async fn load_wallpapers_from_path(
-    path: PathBuf,
+/// Load wallpapers from a set of sources (directories are scanned recursively;
+/// individual image files are included directly). De-duplicates paths.
+async fn load_wallpapers_from_sources(
+    sources: Vec<PathBuf>,
 ) -> Pin<Box<dyn Send + Stream<Item = (PathBuf, RgbaImage, RgbaImage)>>> {
-    let candidate_paths: Vec<_> = WalkDir::new(&path)
-        .max_depth(3)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.path().to_path_buf())
-        .collect();
+    let mut candidate_paths: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for source in sources {
+        if source.is_file() {
+            if seen.insert(source.clone()) {
+                candidate_paths.push(source);
+            }
+        } else {
+            for entry in WalkDir::new(&source)
+                .max_depth(3)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+            {
+                let p = entry.path().to_path_buf();
+                if seen.insert(p.clone()) {
+                    candidate_paths.push(p);
+                }
+            }
+        }
+    }
 
     let stream = futures_lite::stream::iter(candidate_paths).filter_map(|path| async move {
         if is_image_file(&path) {
@@ -136,16 +155,14 @@ fn load_image_with_thumbnail_sync(path: &Path) -> Option<ImageTuple> {
         image::open(path).ok()?
     };
 
-    // Create display thumbnail (300x169)
-    let display_thumbnail = resize_thumbnail(&image, 300, 169);
+    // Canvas preview: the FULL image, aspect-preserving (fit within 600x400).
+    // The multi-monitor canvas stretches this to the image's real size, so it
+    // must contain the whole image and keep its aspect — otherwise a big image
+    // shows a cropped, stretched slice.
+    let display_thumbnail = image.thumbnail(600, 400).to_rgba8();
 
-    // Create selection thumbnail (158x105) with rounded corners
-    let mut selection_thumbnail = image::imageops::resize(
-        &display_thumbnail,
-        158,
-        105,
-        image::imageops::FilterType::Lanczos3,
-    );
+    // Grid tile: centre-cropped to fill the square, with rounded corners.
+    let mut selection_thumbnail = resize_thumbnail(&image, 158, 105);
     round(&mut selection_thumbnail, [8, 8, 8, 8]);
 
     Some((path.to_path_buf(), display_thumbnail, selection_thumbnail))

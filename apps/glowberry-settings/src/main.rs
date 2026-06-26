@@ -4,6 +4,7 @@
 
 mod app;
 mod i18n;
+mod monitor_query;
 mod pages;
 mod shader_analysis;
 mod shader_params;

@@ -1,6 +1,7 @@
 pub(crate) mod colored;
 pub(crate) mod draw;
 pub mod engine;
+pub mod extend_crop;
 pub(crate) mod fragment_canvas;
 pub(crate) mod gpu;
 pub(crate) mod img_source;
