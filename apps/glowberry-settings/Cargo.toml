@@ -28,6 +28,7 @@ cosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", d
   "wayland",
   "winit",
   "wgpu",
+  "xdg-portal",
 ] }
 
 # Async runtime

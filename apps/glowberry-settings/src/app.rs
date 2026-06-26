@@ -91,6 +91,9 @@ pub struct GlowBerrySettings {
 
     /// Current wallpaper folder
     current_folder: PathBuf,
+    /// User-added wallpaper sources (image files and/or directories), shown in
+    /// the grid in addition to the default folder.
+    wallpaper_sources: Vec<PathBuf>,
 
     /// Prefer low power GPU for shader rendering
     prefer_low_power: bool,
@@ -223,6 +226,14 @@ pub enum Message {
     Fit(usize),
     /// Wallpaper event from subscription
     WallpaperEvent(WallpaperEvent),
+    /// Open a file picker to add image files to the grid
+    AddWallpaperImages,
+    /// Open a folder picker to add a directory to the grid
+    AddWallpaperFolder,
+    /// Paths chosen from a picker were added as wallpaper sources
+    WallpaperSourcesPicked(Vec<PathBuf>),
+    /// Remove a user-added wallpaper source by index
+    RemoveWallpaperSource(usize),
     /// Toggle context drawer page
     ToggleContextPage(ContextPage),
     /// Open URL (for about page links)
@@ -509,7 +520,8 @@ impl cosmic::Application for GlowBerrySettings {
             selected_fit: 0,
             cached_display_handle: None,
             current_folder,
-            prefer_low_power: true, // Will be set below
+            wallpaper_sources: Vec::new(), // Will be set below from config
+            prefer_low_power: true,        // Will be set below
             glowberry_is_default: is_glowberry_default(),
             shader_param_values: HashMap::new(),
             shader_details_expanded: false,
@@ -545,6 +557,10 @@ impl cosmic::Application for GlowBerrySettings {
         // Load prefer_low_power, power saving, extend config, and window opacity from config
         if let Some(ctx) = &app.config_context {
             app.prefer_low_power = ctx.prefer_low_power();
+            app.wallpaper_sources = ctx
+                .0
+                .get::<Vec<PathBuf>>("wallpaper-sources")
+                .unwrap_or_default();
             app.power_saving = ctx.power_saving_config();
             app.window_opacity = ctx.window_opacity();
             app.extend_config = ctx.extend_config();
@@ -595,10 +611,12 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
+        // Default folder plus any user-added files/directories.
+        let mut sources = vec![self.current_folder.clone()];
+        sources.extend(self.wallpaper_sources.iter().cloned());
         let mut subscriptions = vec![
             // Wallpaper loading subscription
-            wallpaper_subscription::wallpapers(self.current_folder.clone())
-                .map(Message::WallpaperEvent),
+            wallpaper_subscription::wallpapers(sources).map(Message::WallpaperEvent),
         ];
 
         // Watch for state changes from daemon (connected outputs, wallpaper state)
@@ -859,6 +877,70 @@ impl cosmic::Application for GlowBerrySettings {
                     }
                 }
             },
+
+            Message::AddWallpaperImages => {
+                return Task::perform(
+                    async {
+                        cosmic::dialog::file_chooser::open::Dialog::new()
+                            .open_files()
+                            .await
+                            .ok()
+                            .map(|resp| {
+                                resp.urls()
+                                    .iter()
+                                    .filter_map(|u| u.to_file_path().ok())
+                                    .collect::<Vec<PathBuf>>()
+                            })
+                            .unwrap_or_default()
+                    },
+                    |paths| cosmic::Action::App(Message::WallpaperSourcesPicked(paths)),
+                );
+            }
+
+            Message::AddWallpaperFolder => {
+                return Task::perform(
+                    async {
+                        cosmic::dialog::file_chooser::open::Dialog::new()
+                            .open_folder()
+                            .await
+                            .ok()
+                            .and_then(|resp| resp.url().to_file_path().ok())
+                            .map(|p| vec![p])
+                            .unwrap_or_default()
+                    },
+                    |paths| cosmic::Action::App(Message::WallpaperSourcesPicked(paths)),
+                );
+            }
+
+            Message::WallpaperSourcesPicked(paths) => {
+                let mut changed = false;
+                for p in paths {
+                    if p != self.current_folder && !self.wallpaper_sources.contains(&p) {
+                        self.wallpaper_sources.push(p);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    if let Some(ctx) = &self.config_context {
+                        let _ = ctx
+                            .0
+                            .set("wallpaper-sources", self.wallpaper_sources.clone());
+                    }
+                    // Surface the result on the wallpaper page.
+                    self.categories.selected = Some(Category::Wallpapers);
+                }
+            }
+
+            Message::RemoveWallpaperSource(idx) => {
+                if idx < self.wallpaper_sources.len() {
+                    self.wallpaper_sources.remove(idx);
+                    if let Some(ctx) = &self.config_context {
+                        let _ = ctx
+                            .0
+                            .set("wallpaper-sources", self.wallpaper_sources.clone());
+                    }
+                }
+            }
 
             Message::ToggleContextPage(context_page) => {
                 if self.context_page == context_page {
@@ -3498,11 +3580,54 @@ impl GlowBerrySettings {
             })
             .collect();
 
-        // Always return flex_row (even empty) so the widget tree type is stable
-        widget::flex_row(buttons)
-            .column_spacing(12)
-            .row_spacing(16)
-            .into()
+        let grid = widget::flex_row(buttons).column_spacing(12).row_spacing(16);
+
+        // Toolbar: add images / add folder.
+        let toolbar = widget::row::with_children(vec![
+            button::text(fl!("add-images"))
+                .leading_icon(widget::icon::from_name("list-add-symbolic"))
+                .on_press(Message::AddWallpaperImages)
+                .into(),
+            button::text(fl!("add-folder"))
+                .leading_icon(widget::icon::from_name("folder-new-symbolic"))
+                .on_press(Message::AddWallpaperFolder)
+                .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        // Chips for each user-added source, with a remove button.
+        let mut children: Vec<Element<'_, Message>> = vec![toolbar.into()];
+        if !self.wallpaper_sources.is_empty() {
+            let mut chips: Vec<Element<'_, Message>> = Vec::new();
+            for (idx, src) in self.wallpaper_sources.iter().enumerate() {
+                let label = src
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_else(|| src.to_str().unwrap_or("?"))
+                    .to_string();
+                chips.push(
+                    widget::row::with_children(vec![
+                        widget::text::caption(label).into(),
+                        widget::button::icon(widget::icon::from_name("window-close-symbolic"))
+                            .on_press(Message::RemoveWallpaperSource(idx))
+                            .into(),
+                    ])
+                    .spacing(2)
+                    .align_y(Alignment::Center)
+                    .into(),
+                );
+            }
+            children.push(
+                widget::flex_row(chips)
+                    .column_spacing(8)
+                    .row_spacing(4)
+                    .into(),
+            );
+        }
+        children.push(grid.into());
+
+        widget::column::with_children(children).spacing(12).into()
     }
 
     fn view_color_grid(&self) -> Element<'_, Message> {
