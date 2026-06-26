@@ -347,6 +347,8 @@ enum WallpaperAction {
     DuplicateAll(DefaultKey),
     SpanAll(DefaultKey),
     ShowOn(DefaultKey, usize),
+    /// Remove a user-added wallpaper source (by index).
+    RemoveSource(usize),
 }
 
 impl menu::Action for WallpaperAction {
@@ -357,6 +359,7 @@ impl menu::Action for WallpaperAction {
             Self::DuplicateAll(k) => Message::WallpaperDuplicateAll(*k),
             Self::SpanAll(k) => Message::WallpaperSpanAll(*k),
             Self::ShowOn(k, idx) => Message::WallpaperShowOnIdx(*k, *idx),
+            Self::RemoveSource(idx) => Message::RemoveWallpaperSource(*idx),
         }
     }
 }
@@ -3562,6 +3565,14 @@ impl GlowBerrySettings {
         .into()
     }
 
+    /// Index of the user-added source a wallpaper path belongs to (the file
+    /// itself, or a directory that contains it). `None` for bundled wallpapers.
+    fn wallpaper_source_index_for(&self, path: &std::path::Path) -> Option<usize> {
+        self.wallpaper_sources
+            .iter()
+            .position(|src| src.as_path() == path || (src.is_dir() && path.starts_with(src)))
+    }
+
     fn view_wallpaper_grid(&self) -> Element<'_, Message> {
         let buttons: Vec<Element<'_, Message>> = self
             .selection
@@ -3591,6 +3602,19 @@ impl GlowBerrySettings {
                     ));
                 }
 
+                // Removing an added wallpaper: only offered for user-added
+                // sources, not the bundled ones.
+                if let Some(path) = self.selection.paths.get(id)
+                    && let Some(src_idx) = self.wallpaper_source_index_for(path)
+                {
+                    ctx_items.push(menu::Item::Divider);
+                    ctx_items.push(menu::Item::Button(
+                        fl!("wp-remove-source"),
+                        None,
+                        WallpaperAction::RemoveSource(src_idx),
+                    ));
+                }
+
                 widget::context_menu(img_button, Some(menu::items(&HashMap::new(), ctx_items)))
                     .into()
             })
@@ -3612,38 +3636,9 @@ impl GlowBerrySettings {
         .spacing(8)
         .align_y(Alignment::Center);
 
-        // Chips for each user-added source, with a remove button.
-        let mut children: Vec<Element<'_, Message>> = vec![toolbar.into()];
-        if !self.wallpaper_sources.is_empty() {
-            let mut chips: Vec<Element<'_, Message>> = Vec::new();
-            for (idx, src) in self.wallpaper_sources.iter().enumerate() {
-                let label = src
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_else(|| src.to_str().unwrap_or("?"))
-                    .to_string();
-                chips.push(
-                    widget::row::with_children(vec![
-                        widget::text::caption(label).into(),
-                        widget::button::icon(widget::icon::from_name("window-close-symbolic"))
-                            .on_press(Message::RemoveWallpaperSource(idx))
-                            .into(),
-                    ])
-                    .spacing(2)
-                    .align_y(Alignment::Center)
-                    .into(),
-                );
-            }
-            children.push(
-                widget::flex_row(chips)
-                    .column_spacing(8)
-                    .row_spacing(4)
-                    .into(),
-            );
-        }
-        children.push(grid.into());
-
-        widget::column::with_children(children).spacing(12).into()
+        widget::column::with_children(vec![toolbar.into(), grid.into()])
+            .spacing(12)
+            .into()
     }
 
     fn view_color_grid(&self) -> Element<'_, Message> {
