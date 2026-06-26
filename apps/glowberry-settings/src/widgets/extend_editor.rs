@@ -56,6 +56,22 @@ fn color_background(color: &glowberry_config::Color, opacity: f32) -> cosmic::ic
     }
 }
 
+// Bezel shades for the 3D bevel, lit from the top-left. Even the darkest shade
+// stays well above black so the frame is visible against any image.
+const BEZEL_LIGHT: [f32; 3] = [0.42, 0.42, 0.45];
+const BEZEL_MID: [f32; 3] = [0.20, 0.20, 0.22];
+const BEZEL_DARK: [f32; 3] = [0.10, 0.10, 0.11];
+
+/// Linear-gradient fill for one bezel side, giving a beveled 3D look. `angle_deg`
+/// follows iced/CSS (0° = up, clockwise); stop 0 is `a`, stop 1 is `b`.
+fn bezel_gradient(angle_deg: f32, a: [f32; 3], b: [f32; 3]) -> cosmic::iced::Background {
+    use cosmic::iced::{Background, Color as IcedColor, Degrees, Gradient, gradient::Linear};
+    let linear = Linear::new(Degrees(angle_deg))
+        .add_stop(0.0, IcedColor::from_rgb(a[0], a[1], a[2]))
+        .add_stop(1.0, IcedColor::from_rgb(b[0], b[1], b[2]));
+    Background::Gradient(Gradient::Linear(linear))
+}
+
 pub struct ExtendEditor<'a, Message> {
     monitors: &'a [MonitorGeometry],
     layers: Vec<LayerView<'a>>,
@@ -831,8 +847,6 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
 
         // Monitor outlines in a separate layer so they're always on top
         renderer.with_layer(bounds, |renderer| {
-            let bezel_color = core::Color::BLACK;
-
             for monitor in self.monitors.iter() {
                 let (mx, my) =
                     state.virtual_to_widget(monitor.position.0 as f64, monitor.position.1 as f64);
@@ -880,7 +894,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                             shadow: Default::default(),
                             snap: true,
                         },
-                        core::Background::Color(bezel_color),
+                        bezel_gradient(180.0, BEZEL_LIGHT, BEZEL_MID),
                     );
                 }
                 // Bottom bezel
@@ -901,7 +915,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                             shadow: Default::default(),
                             snap: true,
                         },
-                        core::Background::Color(bezel_color),
+                        bezel_gradient(180.0, BEZEL_MID, BEZEL_DARK),
                     );
                 }
                 // Left bezel
@@ -918,7 +932,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                             shadow: Default::default(),
                             snap: true,
                         },
-                        core::Background::Color(bezel_color),
+                        bezel_gradient(90.0, BEZEL_LIGHT, BEZEL_MID),
                     );
                 }
                 // Right bezel
@@ -935,7 +949,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                             shadow: Default::default(),
                             snap: true,
                         },
-                        core::Background::Color(bezel_color),
+                        bezel_gradient(90.0, BEZEL_MID, BEZEL_DARK),
                     );
                 }
 
