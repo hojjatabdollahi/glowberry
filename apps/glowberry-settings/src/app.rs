@@ -1333,6 +1333,11 @@ impl cosmic::Application for GlowBerrySettings {
                             .get(key)
                             .cloned()
                             .unwrap_or_else(|| Source::Path(layer.source_path.clone()));
+                        // The cached source was captured at selection time, before
+                        // any parameter edits. Rebuild shader sources from the
+                        // current values so custom parameters aren't reset to
+                        // defaults on apply.
+                        let source = self.refresh_shader_source(source);
                         locked_entries.push((output.clone(), source));
                         locked_monitors.insert(output.clone());
                     }
@@ -2394,6 +2399,76 @@ impl GlowBerrySettings {
             }
         };
         Some(source)
+    }
+
+    /// Rebuild a shader `Source` from the current in-memory parameter values.
+    ///
+    /// Staged canvas sources in `extend_layer_sources` are captured at selection
+    /// time, before any parameters are edited, so applying them verbatim would
+    /// persist the shader's defaults. This regenerates the inline shader code
+    /// (or falls back to a plain path when no custom values exist) so the user's
+    /// edits survive "Apply". Non-shader sources are returned unchanged.
+    fn refresh_shader_source(&self, source: Source) -> Source {
+        let Source::Shader(ss) = &source else {
+            return source;
+        };
+
+        // Identify which shader this is: prefer the preserved source_path, then
+        // fall back to the inline path variant.
+        let path = ss.source_path.clone().or_else(|| {
+            if let glowberry_config::ShaderContent::Path(p) = &ss.shader {
+                Some(p.clone())
+            } else {
+                None
+            }
+        });
+        let Some(path) = path else {
+            return source;
+        };
+
+        let Some(idx) = self
+            .available_shaders
+            .iter()
+            .position(|s| s.path == path)
+        else {
+            return source;
+        };
+        let shader = &self.available_shaders[idx];
+        let Some(parsed) = &shader.parsed else {
+            return source;
+        };
+
+        let values = self
+            .shader_param_values
+            .get(&idx)
+            .cloned()
+            .unwrap_or_default();
+
+        let params: HashMap<String, f64> = values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_f32() as f64))
+            .collect();
+
+        let (shader_content, source_path) = if values.is_empty() {
+            (
+                glowberry_config::ShaderContent::Path(shader.path.clone()),
+                None,
+            )
+        } else {
+            (
+                glowberry_config::ShaderContent::Code(parsed.generate_source(&values)),
+                Some(shader.path.clone()),
+            )
+        };
+
+        Source::Shader(glowberry_config::ShaderSource {
+            shader: shader_content,
+            source_path,
+            params,
+            background_image: ss.background_image.clone(),
+            language: ss.language,
+            frame_rate: ss.frame_rate,
+        })
     }
 
     fn apply_selection(&mut self) {
