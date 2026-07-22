@@ -2426,11 +2426,7 @@ impl GlowBerrySettings {
             return source;
         };
 
-        let Some(idx) = self
-            .available_shaders
-            .iter()
-            .position(|s| s.path == path)
-        else {
+        let Some(idx) = self.available_shaders.iter().position(|s| s.path == path) else {
             return source;
         };
         let shader = &self.available_shaders[idx];
