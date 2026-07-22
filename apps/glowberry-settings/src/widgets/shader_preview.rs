@@ -67,7 +67,13 @@ impl ShaderPreviewRenderer {
     pub fn new(shader_path: &Path, width: u32, height: u32) -> Result<Self, PreviewError> {
         // Read shader code
         let shader_code = std::fs::read_to_string(shader_path)?;
+        Self::from_code(&shader_code, width, height)
+    }
 
+    /// Create a renderer directly from WGSL source code (without the GlowBerry
+    /// preamble, which is prepended internally). Used for live previews where
+    /// the shader body has parameter values substituted in.
+    pub fn from_code(shader_code: &str, width: u32, height: u32) -> Result<Self, PreviewError> {
         // Check if shader requires texture resources (which we don't provide in preview)
         if shader_code.contains("iTexture") || shader_code.contains("iTextureSampler") {
             return Err(PreviewError::ShaderCompilation(

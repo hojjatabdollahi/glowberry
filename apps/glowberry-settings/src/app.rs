@@ -25,6 +25,8 @@ use slotmap::{DefaultKey, SecondaryMap, SlotMap};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Wrapper for output name to store in segmented button data
 #[derive(Clone, Debug)]
@@ -38,6 +40,23 @@ pub const APP_ID: &str = "io.github.hojjatabdollahi.glowberry-settings";
 
 const SIMULATED_WIDTH: u16 = 300;
 const SIMULATED_HEIGHT: u16 = 169;
+
+/// Resolution of live-animated shader preview frames. Kept modest so software
+/// GPUs (llvmpipe) can sustain a smooth frame rate; the image is scaled up to
+/// fill each monitor rect in the canvas.
+const LIVE_PREVIEW_WIDTH: u32 = 320;
+const LIVE_PREVIEW_HEIGHT: u32 = 180;
+
+/// Persistent offscreen renderer for the live shader preview. Reused across
+/// frames so we create the wgpu device once (rebuilt only when the shader
+/// source or its parameter values change).
+#[derive(Default)]
+struct LivePreview {
+    renderer: Option<crate::widgets::shader_preview::ShaderPreviewRenderer>,
+    /// The WGSL source the current renderer was built from, used to detect when
+    /// a rebuild is needed (e.g. parameter edits or shader switch).
+    source: String,
+}
 
 /// Context page for the settings drawer
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -142,6 +161,16 @@ pub struct GlowBerrySettings {
     extend_next_z: usize,
     /// Request the canvas to fit all content in view
     extend_fit_view_requested: bool,
+
+    /// Persistent renderer for the live shader preview in the monitor canvas.
+    live_preview: Arc<Mutex<LivePreview>>,
+    /// True while a live preview frame is being rendered off-thread, so ticks
+    /// don't pile up faster than the GPU can render them.
+    live_preview_in_flight: bool,
+    /// True while the shader thumbnail grid is rendering. The live preview is
+    /// paused during this window so we never create wgpu devices concurrently
+    /// (which can crash software renderers like llvmpipe).
+    shader_thumbnails_loading: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +249,11 @@ pub enum Message {
     ShaderShowOn(usize, usize),
     /// Shader thumbnail loaded
     ShaderThumbnail(usize, Option<ImageHandle>),
+    ShaderThumbnailsLoaded(Vec<(usize, Option<ImageHandle>)>),
+    /// Frame tick driving the live shader preview animation.
+    PreviewTick,
+    /// A live preview frame finished rendering (shader index, frame image).
+    PreviewFrame(usize, Option<ImageHandle>),
     /// Frame rate changed
     ShaderFrameRate(usize),
     /// Fit mode changed
@@ -555,6 +589,9 @@ impl cosmic::Application for GlowBerrySettings {
             extend_selected_layer: None,
             extend_next_z: 0,
             extend_fit_view_requested: false,
+            live_preview: Arc::new(Mutex::new(LivePreview::default())),
+            live_preview_in_flight: false,
+            shader_thumbnails_loading: false,
         };
 
         // Load prefer_low_power, power saving, extend config, and window opacity from config
@@ -643,6 +680,22 @@ impl cosmic::Application for GlowBerrySettings {
                         .and_then(|ctx| Config::load(&ctx).ok());
                     Message::ConfigOrStateChanged(config)
                 }),
+            );
+        }
+
+        // Drive the live shader preview animation only while a shader is the
+        // active selection — no wasted repaints for images/colors.
+        if matches!(self.selection.active, Choice::Shader(_)) {
+            // Cap the preview at 30 FPS; the 60 FPS option is for the wallpaper
+            // itself, not this software-rendered preview.
+            let fps = if self.selected_shader_frame_rate == 0 {
+                15
+            } else {
+                30
+            };
+            subscriptions.push(
+                cosmic::iced::time::every(Duration::from_millis(1000 / fps))
+                    .map(|_| Message::PreviewTick),
             );
         }
 
@@ -793,26 +846,79 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ShaderThumbnail(idx, handle) => {
-                if let Some(handle) = handle
-                    && idx < self.shader_thumbnails.len()
-                {
-                    self.shader_thumbnails[idx] = handle.clone();
-                    // Update any staged canvas items showing this shader, so the
-                    // per-output live preview shows the real thumbnail.
-                    let to_update: Vec<DefaultKey> = self
-                        .extend_layers
-                        .keys()
-                        .filter(|&k| {
-                            self.extend_layer_sources
-                                .get(k)
-                                .is_some_and(|s| self.shader_idx_for_source(s) == Some(idx))
-                        })
-                        .collect();
-                    for key in to_update {
-                        if let Some(layer) = self.extend_layers.get_mut(key) {
-                            layer.image_handle = Some(handle.clone());
-                        }
+                if let Some(handle) = handle {
+                    self.set_shader_thumbnail(idx, handle);
+                }
+            }
+
+            Message::ShaderThumbnailsLoaded(thumbnails) => {
+                self.shader_thumbnails_loading = false;
+                for (idx, handle) in thumbnails {
+                    if let Some(handle) = handle {
+                        self.set_shader_thumbnail(idx, handle);
                     }
+                }
+            }
+
+            Message::PreviewTick => {
+                // Render the next frame of the currently-selected shader, unless
+                // a frame is already in flight or the thumbnail grid is still
+                // rendering (avoid concurrent wgpu device creation).
+                if self.live_preview_in_flight || self.shader_thumbnails_loading {
+                    return Task::none();
+                }
+                let Choice::Shader(idx) = self.selection.active else {
+                    return Task::none();
+                };
+                let Some(code) = self.preview_shader_code(idx) else {
+                    return Task::none();
+                };
+
+                self.live_preview_in_flight = true;
+                let live_preview = self.live_preview.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let mut lp = live_preview.lock().ok()?;
+
+                            // (Re)build the renderer when the source changes
+                            // (shader switch or parameter edit).
+                            if lp.renderer.is_none() || lp.source != code {
+                                lp.source = code.clone();
+                                lp.renderer = match crate::widgets::shader_preview::
+                                    ShaderPreviewRenderer::from_code(
+                                        &code,
+                                        LIVE_PREVIEW_WIDTH,
+                                        LIVE_PREVIEW_HEIGHT,
+                                    ) {
+                                    Ok(r) => Some(r),
+                                    Err(e) => {
+                                        tracing::debug!(?e, "live preview build failed");
+                                        None
+                                    }
+                                };
+                            }
+
+                            let (w, h, rgba) = lp.renderer.as_ref()?.render_frame().ok()?;
+                            Some(ImageHandle::from_rgba(w, h, rgba))
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                    },
+                    move |handle| cosmic::Action::App(Message::PreviewFrame(idx, handle)),
+                );
+            }
+
+            Message::PreviewFrame(idx, handle) => {
+                self.live_preview_in_flight = false;
+                // Ignore stale frames if the selection changed while rendering.
+                // Only update the monitor-canvas layers — not the fixed-size
+                // grid thumbnail, which must stay 158x105.
+                if let Some(handle) = handle
+                    && self.selection.active == Choice::Shader(idx)
+                {
+                    self.update_shader_canvas_layers(idx, handle);
                 }
             }
 
@@ -1062,10 +1168,12 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ShaderParamReleased => {
-                // Apply the shader with current parameters when slider is released
-                if matches!(self.selection.active, Choice::Shader(_)) {
-                    self.apply_selection();
-                }
+                // Parameter edits are preview-only: the in-app monitor preview
+                // reflects them (the preview tick reads `shader_param_values`),
+                // but we deliberately do NOT write the live wallpaper config
+                // here. Writing on every slider release would make the daemon
+                // reload and rebuild all wallpaper surfaces, flickering the real
+                // desktop. Edits are committed only when the user clicks Apply.
             }
 
             Message::ToggleShaderDetails => {
@@ -1073,15 +1181,11 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ResetShaderParams(shader_idx) => {
-                // Remove all custom parameter values for this shader
+                // Remove all custom parameter values for this shader. The live
+                // preview picks up the defaults on its next tick; like slider
+                // edits, this stays preview-only and is not written to the live
+                // wallpaper config until the user clicks Apply.
                 self.shader_param_values.remove(&shader_idx);
-
-                // Re-apply the shader with default parameters
-                if let Choice::Shader(idx) = self.selection.active
-                    && idx == shader_idx
-                {
-                    self.apply_selection();
-                }
             }
 
             // Power saving messages
@@ -3043,46 +3147,95 @@ impl GlowBerrySettings {
     }
 
     /// Load shader thumbnails
-    fn load_shader_thumbnails(&self) -> Task<Message> {
+    /// Store a rendered shader thumbnail and propagate it to any staged canvas
+    /// items showing that shader, so the per-output live preview updates too.
+    fn set_shader_thumbnail(&mut self, idx: usize, handle: ImageHandle) {
+        if idx >= self.shader_thumbnails.len() {
+            return;
+        }
+        self.shader_thumbnails[idx] = handle.clone();
+        self.update_shader_canvas_layers(idx, handle);
+    }
+
+    /// Push a freshly-rendered frame into every staged monitor-canvas layer
+    /// showing the given shader, without touching the fixed-size grid
+    /// thumbnail (`shader_thumbnails`). Used for live preview frames, which are
+    /// higher-resolution than the grid tiles.
+    fn update_shader_canvas_layers(&mut self, idx: usize, handle: ImageHandle) {
+        let to_update: Vec<DefaultKey> = self
+            .extend_layers
+            .keys()
+            .filter(|&k| {
+                self.extend_layer_sources
+                    .get(k)
+                    .is_some_and(|s| self.shader_idx_for_source(s) == Some(idx))
+            })
+            .collect();
+        for key in to_update {
+            if let Some(layer) = self.extend_layers.get_mut(key) {
+                layer.image_handle = Some(handle.clone());
+            }
+        }
+    }
+
+    /// Build the WGSL source for a shader's live preview, with the user's
+    /// current parameter values substituted in (falling back to the raw file
+    /// when no custom values exist or the shader has no parsed params).
+    fn preview_shader_code(&self, idx: usize) -> Option<String> {
+        let shader = self.available_shaders.get(idx)?;
+        match &shader.parsed {
+            Some(parsed) => {
+                let values = self
+                    .shader_param_values
+                    .get(&idx)
+                    .cloned()
+                    .unwrap_or_default();
+                if values.is_empty() {
+                    std::fs::read_to_string(&shader.path).ok()
+                } else {
+                    Some(parsed.generate_source(&values))
+                }
+            }
+            None => std::fs::read_to_string(&shader.path).ok(),
+        }
+    }
+
+    fn load_shader_thumbnails(&mut self) -> Task<Message> {
+        self.shader_thumbnails_loading = true;
         let shader_paths: Vec<_> = self
             .available_shaders
             .iter()
             .map(|s| s.path.clone())
             .collect();
 
-        Task::batch(
-            shader_paths
-                .into_iter()
-                .enumerate()
-                .map(|(idx, path)| {
-                    Task::perform(
-                        async move {
-                            let handle = tokio::task::spawn_blocking(move || {
-                                match crate::widgets::shader_preview::render_shader_preview(
-                                    &path, 158, 105,
-                                ) {
-                                    Ok((width, height, rgba)) => {
-                                        Some(ImageHandle::from_rgba(width, height, rgba))
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            ?path,
-                                            ?e,
-                                            "Failed to render shader preview"
-                                        );
-                                        None
-                                    }
-                                }
-                            })
-                            .await
-                            .ok()
-                            .flatten();
-                            (idx, handle)
-                        },
-                        |(idx, handle)| cosmic::Action::App(Message::ShaderThumbnail(idx, handle)),
-                    )
+        // Render previews sequentially in a single blocking task. Each render
+        // spins up its own wgpu instance/adapter/device; creating many of them
+        // concurrently (one Task per shader) can crash on software renderers
+        // (e.g. llvmpipe), so we serialize them into one task instead.
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut thumbnails = Vec::with_capacity(shader_paths.len());
+                    for (idx, path) in shader_paths.into_iter().enumerate() {
+                        let handle = match crate::widgets::shader_preview::render_shader_preview(
+                            &path, 158, 105,
+                        ) {
+                            Ok((width, height, rgba)) => {
+                                Some(ImageHandle::from_rgba(width, height, rgba))
+                            }
+                            Err(e) => {
+                                tracing::debug!(?path, ?e, "Failed to render shader preview");
+                                None
+                            }
+                        };
+                        thumbnails.push((idx, handle));
+                    }
+                    thumbnails
                 })
-                .collect::<Vec<_>>(),
+                .await
+                .unwrap_or_default()
+            },
+            |thumbnails| cosmic::Action::App(Message::ShaderThumbnailsLoaded(thumbnails)),
         )
     }
 
