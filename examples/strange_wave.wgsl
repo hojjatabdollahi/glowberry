@@ -34,10 +34,12 @@ fn hue(v: f32) -> vec4<f32> {
     return 0.6 + 0.6 * cos(6.3 * v + vec4<f32>(0.0, 23.0, 21.0, 0.0));
 }
 
-// Wave layer
-fn wave(u: vec2<f32>, s: f32, C: vec4<f32>, t: f32) -> vec4<f32> {
-    let top = noise(u.x) * noise(u.x - s - t) + 0.4;
-    let bottom = noise(u.x + 5.0) * noise(u.x - 9.0 - s - t) - 0.8;
+// Wave layer. `n_top`/`n_bottom` are noise(u.x) and noise(u.x + 5.0),
+// which are identical for every layer (layer scaling only affects y),
+// so the caller evaluates them once instead of per layer.
+fn wave(u: vec2<f32>, s: f32, C: vec4<f32>, t: f32, n_top: f32, n_bottom: f32) -> vec4<f32> {
+    let top = n_top * noise(u.x - s - t) + 0.4;
+    let bottom = n_bottom * noise(u.x - 9.0 - s - t) - 0.8;
     
     let wave_pos = (u.y - bottom) / (top - bottom) - 0.5;
     let color_blend = pow(abs(wave_pos) * 2.0, 9.0) + 0.05;
@@ -60,10 +62,13 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     u.x -= t * scroll_speed;
     
     // Wave layers
+    let ux = u.x * wave_scale;
+    let n_top = noise(ux);
+    let n_bottom = noise(ux + 5.0);
     let layer_step = 1.5 / f32(layers);
     var s = 1.5;
     for (var i = 0; i < layers; i++) {
-        C = wave(u * vec2<f32>(wave_scale, 1.0 + s), -s, C, t);
+        C = wave(u * vec2<f32>(wave_scale, 1.0 + s), -s, C, t, n_top, n_bottom);
         s -= layer_step;
     }
     

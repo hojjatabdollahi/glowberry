@@ -40,13 +40,28 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     let t = atan2(pos.y, pos.x) / pi;
     
     var acc = 0.0;
+    // Both sine arguments are affine in the loop index, so each step advances
+    // the previous sample by a constant-angle rotation. This replaces the two
+    // sin() calls per iteration (100 for the default detail) with four
+    // evaluated once plus a few multiply-adds per step.
+    let a1 = petals * pi * (t + time * 0.1); // petal angle at i=0
+    let d1 = petals * pi / n; //                per-step increment
+    var s1 = sin(a1);
+    var c1 = cos(a1);
+    let sd1 = sin(d1);
+    let cd1 = cos(d1);
+    var s2 = sin(-time); //                     shimmer angle at i=0
+    var c2 = cos(-time);
+    let sd2 = sin(0.1);
+    let cd2 = cos(0.1);
     for (var i = 0; i < iterations; i += 1) {
-        let fi = f32(i);
-        acc += 0.002 / abs(
-            0.25 * sin(petals * pi * (t + time * 0.1 + fi / n)) +
-            sin(fi * 0.1 - time) * 0.1 -
-            radius
-        );
+        acc += 0.002 / abs(0.25 * s1 + s2 * 0.1 - radius);
+        let ns1 = s1 * cd1 + c1 * sd1;
+        c1 = c1 * cd1 - s1 * sd1;
+        s1 = ns1;
+        let ns2 = s2 * cd2 + c2 * sd2;
+        c2 = c2 * cd2 - s2 * sd2;
+        s2 = ns2;
     }
     
     // Neon color mapping

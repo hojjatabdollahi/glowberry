@@ -37,12 +37,17 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     let yBoost = cosRange(time * 0.1, 10.0,  5.0);
     let fScale = cosRange(time * 15.5, 1.25, 0.5);
 
+    // Time-only phase terms, hoisted out of the loop (the x phase cost a
+    // cos() on every iteration).
+    let phase_x = time * cos(ct) * 0.5 / 20.0;
+    let phase_y = time * ct * 0.3 / 40.0;
+
     for (var i: i32 = 1; i < detail; i++) {
         let fi = f32(i);
         var newp = p;
 
-        newp.x += (0.25 / fi) * sin(fi * p.y + time * cos(ct) * 0.5 / 20.0 + 0.005 * fi) * fScale + xBoost;
-        newp.y += (0.25 / fi) * sin(fi * p.x + time * ct        * 0.3 / 40.0 + 0.03 * f32(i + 15)) * fScale + yBoost;
+        newp.x += (0.25 / fi) * sin(fi * p.y + phase_x + 0.005 * fi) * fScale + xBoost;
+        newp.y += (0.25 / fi) * sin(fi * p.x + phase_y + 0.03 * f32(i + 15)) * fScale + yBoost;
 
         p = newp;
     }

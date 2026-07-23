@@ -25,19 +25,21 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     
     // Layers
     let layer_step = 0.5 / f32(layers);
+    // Centered coordinates are the same for every layer; compute once.
+    let u0 = (fragCoord.xy * 2.0 - r) / r.y;
     var i = 0.6;
     for (var layer = 0; layer < layers; layer++) {
         // Smoothly rotate a quarter at a time
         var a = (iTime * speed + i) * 4.0;
         a = a - sin(a);
         a = a - sin(a);
-        
+
         // Rotation matrix
         let cv = cos(a / 4.0 + vec4<f32>(0.0, 11.0, 33.0, 0.0));
         let R = mat2x2<f32>(cv.x, cv.z, cv.y, cv.w);
-        
+
         // Scale and center
-        var u = (fragCoord.xy * 2.0 - r) / r.y;
+        var u = u0;
         
         // Compute round square SDF
         let uR = u * R;

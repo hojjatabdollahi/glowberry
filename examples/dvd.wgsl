@@ -197,7 +197,6 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     var lastHitPos = calcHitPos(move_, dir, size);
     var col = vec4<f32>(1.0, 1.0, 1.0, 0.0);
     var colFx = vec4<f32>(1.0, 1.0, 1.0, 0.0);
-    var colFy = vec4<f32>(1.0, 1.0, 1.0, 0.0);
     let e = vec2<f32>(0.8, 0.0) / iResolution.y;
 
     for (var i = 0; i < 5; i++) {
@@ -224,7 +223,6 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
 
         drawReflectedHit(&col, p, hitPos, hitDist, screenSize);
         drawReflectedHit(&colFx, p + e, hitPos, hitDist, screenSize);
-        drawReflectedHit(&colFy, p + e.yx, hitPos, hitDist, screenSize);
     }
 
     // Flip every second cell to create reflection
@@ -236,7 +234,9 @@ fn main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     // Calc normals
     let bf = 0.1; // Bump factor
     let fx = (col.a - colFx.a) * 99.0; // Nearby horizontal samples.
-    let fy = (col.a - colFy.a) * 0.0; // Nearby vertical samples.
+    // The original sampled a vertical offset too (colFy) but multiplied it by
+    // zero; the whole third ripple-field evaluation was dead work.
+    let fy = 0.0;
     let ff = length(vec2<f32>(fx, fy));
     let ee = rangec(0.0, 10.0 / iResolution.y, ff);
     let nor = normalize(vec3<f32>(vec2<f32>(fx, fy) * ee, ff));
