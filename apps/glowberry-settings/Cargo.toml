@@ -35,8 +35,10 @@ cosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", d
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "fs"] }
 
 # GPU rendering for shader previews
+# "gles" backs the Backends::GL fallback in shader_preview.rs for machines without Vulkan
 wgpu = { version = "29.0", default-features = false, features = [
   "vulkan",
+  "gles",
   "wgsl",
 ] }
 pollster = "0.4"

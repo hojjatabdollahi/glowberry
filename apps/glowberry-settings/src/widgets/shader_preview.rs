@@ -264,8 +264,14 @@ impl ShaderPreviewRenderer {
     ///
     /// Returns a tuple of (width, height, rgba_data).
     pub fn render_frame(&self) -> Result<(u32, u32, Vec<u8>), PreviewError> {
+        self.render_frame_at(self.start_time.elapsed().as_secs_f32())
+    }
+
+    /// Render a single frame at an explicit `iTime` value. Used by tests to
+    /// compare shader variants deterministically.
+    pub fn render_frame_at(&self, time: f32) -> Result<(u32, u32, Vec<u8>), PreviewError> {
         // Update time uniform
-        let elapsed = self.start_time.elapsed().as_secs_f32();
+        let elapsed = time;
         self.queue
             .write_buffer(&self.time_buffer, 0, bytemuck::bytes_of(&elapsed));
 

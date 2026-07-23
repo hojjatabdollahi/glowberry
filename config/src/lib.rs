@@ -237,10 +237,20 @@ pub struct ShaderSource {
     /// Target frame rate (1-60, default 30).
     #[serde(default = "default_frame_rate")]
     pub frame_rate: u8,
+    /// Resolution scale for shader rendering (0.25-1.0, default 1.0).
+    /// The shader renders at this fraction of the output's native resolution
+    /// and the compositor upscales the buffer via wp_viewport. Half scale
+    /// costs a quarter of the fragment work.
+    #[serde(default = "default_render_scale")]
+    pub render_scale: f32,
 }
 
 fn default_frame_rate() -> u8 {
     30
+}
+
+fn default_render_scale() -> f32 {
+    1.0
 }
 
 /// Where the shader code comes from.

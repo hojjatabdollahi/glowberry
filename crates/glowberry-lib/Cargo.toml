@@ -28,8 +28,10 @@ sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
 tracing = { workspace = true }
 walkdir = "2.5"
 wayland-backend = "0.3"
+# "gles" backs the Backends::GL fallback in gpu.rs for machines without Vulkan
 wgpu = { version = "29.0", default-features = false, features = [
   "vulkan",
+  "gles",
   "wgsl",
 ] }
 bytemuck = "1.24"

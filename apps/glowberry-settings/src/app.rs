@@ -98,6 +98,10 @@ pub struct GlowBerrySettings {
     selected_shader_frame_rate: usize,
     /// Frame rate options
     frame_rate_options: Vec<String>,
+    /// Selected shader render quality index (0=Full, 1=Half, 2=Quarter)
+    selected_shader_render_scale: usize,
+    /// Render quality options
+    render_scale_options: Vec<String>,
 
     /// Fit options (Zoom, Fit) — used by color/shader modes
     #[allow(dead_code)]
@@ -250,6 +254,8 @@ pub enum Message {
     /// Shader thumbnail loaded
     ShaderThumbnail(usize, Option<ImageHandle>),
     ShaderThumbnailsLoaded(Vec<(usize, Option<ImageHandle>)>),
+    /// Render quality (resolution scale) changed
+    ShaderRenderScale(usize),
     /// Frame tick driving the live shader preview animation.
     PreviewTick,
     /// A live preview frame finished rendering (shader index, frame image).
@@ -553,6 +559,12 @@ impl cosmic::Application for GlowBerrySettings {
             shader_thumbnails,
             selected_shader_frame_rate: 1, // 30 FPS default
             frame_rate_options: vec![fl!("fps-15"), fl!("fps-30"), fl!("fps-60")],
+            selected_shader_render_scale: 0, // Full resolution default
+            render_scale_options: vec![
+                fl!("quality-full"),
+                fl!("quality-half"),
+                fl!("quality-quarter"),
+            ],
             fit_options: vec![fl!("fit-fill"), fl!("fit-fit")],
             selected_fit: 0,
             cached_display_handle: None,
@@ -924,6 +936,11 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::ShaderFrameRate(idx) => {
                 self.selected_shader_frame_rate = idx;
+                self.apply_selection();
+            }
+
+            Message::ShaderRenderScale(idx) => {
+                self.selected_shader_render_scale = idx;
                 self.apply_selection();
             }
 
@@ -2445,6 +2462,11 @@ impl GlowBerrySettings {
                         2 => 60,
                         _ => 30,
                     };
+                    let render_scale = match self.selected_shader_render_scale {
+                        1 => 0.5,
+                        2 => 0.25,
+                        _ => 1.0,
+                    };
 
                     // Check if we have custom parameter values for this shader
                     let (shader_content, source_path, params) = if let Some(parsed) = &shader.parsed
@@ -2496,6 +2518,7 @@ impl GlowBerrySettings {
                         background_image: None,
                         language: glowberry_config::ShaderLanguage::Wgsl,
                         frame_rate,
+                        render_scale,
                     })
                 } else {
                     return None;
@@ -2568,6 +2591,7 @@ impl GlowBerrySettings {
             background_image: ss.background_image.clone(),
             language: ss.language,
             frame_rate: ss.frame_rate,
+            render_scale: ss.render_scale,
         })
     }
 
@@ -2686,6 +2710,13 @@ impl GlowBerrySettings {
                     0..=22 => 0,
                     23..=45 => 1,
                     _ => 2,
+                };
+                self.selected_shader_render_scale = if shader_source.render_scale <= 0.375 {
+                    2 // Quarter
+                } else if shader_source.render_scale <= 0.75 {
+                    1 // Half
+                } else {
+                    0 // Full
                 };
                 self.categories.selected = Some(Category::Shaders);
             }
@@ -3317,6 +3348,15 @@ impl GlowBerrySettings {
                     &self.frame_rate_options,
                     Some(self.selected_shader_frame_rate),
                     Message::ShaderFrameRate,
+                ),
+            ));
+
+            list = list.add(settings::item(
+                fl!("render-quality"),
+                dropdown(
+                    &self.render_scale_options,
+                    Some(self.selected_shader_render_scale),
+                    Message::ShaderRenderScale,
                 ),
             ));
 

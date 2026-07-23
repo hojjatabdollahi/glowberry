@@ -45,6 +45,7 @@ use sctk::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
+use std::time::Duration;
 use tracing::error;
 
 /// Access glibc malloc tunables.
@@ -78,6 +79,9 @@ pub struct GpuLayerState {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     canvas: fragment_canvas::FragmentCanvas,
+    /// Resolution scale (0.25-1.0): the buffer is rendered at this fraction of
+    /// the output's physical size and upscaled by the compositor via viewport.
+    render_scale: f32,
 }
 
 // Manual Debug impl since wgpu types don't implement Debug
@@ -389,7 +393,6 @@ impl BackgroundEngine {
             power_monitor,
             power_saving_config,
             current_frame_rate_override: None,
-            was_on_battery: false,
             was_animation_paused: false,
         };
 
@@ -444,8 +447,6 @@ pub struct GlowBerry {
     power_saving_config: PowerSavingConfig,
     /// Currently applied frame rate override (None = using configured rates).
     current_frame_rate_override: Option<u8>,
-    /// Whether we were on battery in the last check (for detecting changes).
-    was_on_battery: bool,
     /// Whether animation was paused in the last frame (for detecting resume).
     was_animation_paused: bool,
 }
@@ -514,24 +515,38 @@ impl GlowBerry {
         false
     }
 
-    /// Check if power state has changed and update frame rates if needed.
-    /// Returns true if frame rate was changed.
-    fn check_and_update_frame_rates(&mut self) -> bool {
-        let Some(ref power_monitor) = self.power_monitor else {
-            return false;
-        };
+    /// Schedule the next frame callback for a shader surface after `delay`.
+    ///
+    /// A one-shot timer requests the actual `wl_surface.frame` callback when
+    /// the shader's frame interval has elapsed, so the process wakes at the
+    /// shader's frame rate instead of the output's refresh rate. Rendering
+    /// happens when the compositor answers the callback, which also inherits
+    /// its throttling (occluded/locked outputs answer at ~1 Hz or not at all).
+    fn schedule_shader_frame(&mut self, surface: wl_surface::WlSurface, delay: Duration) {
+        let cb_surface = surface.clone();
+        let timer = calloop::timer::Timer::from_duration(delay);
+        let inserted = self.loop_handle.insert_source(timer, move |_, _, state| {
+            // The layer may have been torn down while the timer was pending
+            // (config change, output removed); only re-arm if it still exists.
+            let alive = state.wallpapers.iter().any(|w| {
+                w.layers
+                    .iter()
+                    .any(|l| l.gpu_state.is_some() && l.layer.wl_surface() == &cb_surface)
+            });
+            if alive {
+                cb_surface.frame(&state.qh, cb_surface.clone());
+                cb_surface.commit();
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
 
-        let power_state = power_monitor.current();
-        let on_battery = power_state.on_battery;
-
-        // Check if battery state changed
-        if on_battery == self.was_on_battery {
-            return false;
+        if inserted.is_err() {
+            // Fall back to the previous per-vblank behavior rather than
+            // letting the animation stall.
+            tracing::error!("failed to schedule shader frame timer; re-arming immediately");
+            surface.frame(&self.qh, surface.clone());
+            surface.commit();
         }
-
-        self.was_on_battery = on_battery;
-        self.reapply_frame_rates();
-        true
     }
 
     /// Reapply frame rate settings based on current power state and config.
@@ -580,11 +595,6 @@ impl GlowBerry {
         // Note: power_monitor already has the NEW state when this is called,
         // so we can't compute was_paused from current state.
         let was_paused = self.was_animation_paused;
-
-        // Update battery state tracking
-        if let Some(ref power_monitor) = self.power_monitor {
-            self.was_on_battery = power_monitor.current().on_battery;
-        }
 
         // Reapply frame rates based on new power state
         self.reapply_frame_rates();
@@ -667,15 +677,27 @@ impl GlowBerry {
         Self::shader_physical_size(layer.size, layer.fractional_scale, output_mode_dims)
     }
 
+    /// Apply a render scale (0.25-1.0) to a physical buffer size. The
+    /// compositor upscales the smaller buffer to the surface's logical size
+    /// via wp_viewport, cutting fragment work by scale².
+    fn scaled_buffer_size((w, h): (u32, u32), render_scale: f32) -> (u32, u32) {
+        let scale = render_scale.clamp(0.25, 1.0);
+        (
+            ((w as f32 * scale).round() as u32).max(1),
+            ((h as f32 * scale).round() as u32).max(1),
+        )
+    }
+
     fn update_shader_layer_surface(
         gpu: &gpu::GpuRenderer,
         qh: &QueueHandle<Self>,
         layer: &mut GlowBerryLayer,
     ) {
-        let (physical_w, physical_h) = Self::shader_layer_physical_size(layer);
+        let physical = Self::shader_layer_physical_size(layer);
         let Some(gpu_state) = layer.gpu_state.as_mut() else {
             return;
         };
+        let (physical_w, physical_h) = Self::scaled_buffer_size(physical, gpu_state.render_scale);
 
         gpu_state.surface_config =
             gpu.configure_surface(&gpu_state.surface, physical_w, physical_h);
@@ -740,6 +762,14 @@ impl GlowBerry {
 
         _ = all_wallpaper.save_state();
         self.wallpapers.push(all_wallpaper);
+
+        // Release the GPU renderer entirely when no shader wallpaper remains,
+        // freeing the Vulkan device, its driver threads, and VRAM.
+        // It is recreated lazily if a shader wallpaper is applied again.
+        if self.gpu_renderer.is_some() && !self.wallpapers.iter().any(Wallpaper::is_shader) {
+            tracing::info!("No shader wallpapers remain; releasing GPU renderer");
+            self.gpu_renderer = None;
+        }
     }
 
     #[must_use]
@@ -812,7 +842,7 @@ impl GlowBerry {
         let output_name = layer.output_info.name.clone();
 
         // Get native resolution from the current output mode
-        let (physical_width, physical_height) = layer
+        let native = layer
             .output_info
             .modes
             .iter()
@@ -825,17 +855,23 @@ impl GlowBerry {
                 (w * scale / 120, h * scale / 120)
             });
 
+        // Render at a fraction of native resolution when configured; the
+        // compositor upscales via wp_viewport (set_destination below).
+        let render_scale = shader_source.render_scale.clamp(0.25, 1.0);
+        let (physical_width, physical_height) = Self::scaled_buffer_size(native, render_scale);
+
         tracing::debug!(
             output = ?output_name,
             physical_width,
             physical_height,
-            "GPU layer dimensions (native resolution)"
+            render_scale,
+            "GPU layer dimensions"
         );
 
         // Create GPU surface
         let surface = unsafe { gpu.create_surface(&self.connection, &wl_surface) };
 
-        // Configure surface at native resolution
+        // Configure surface at the (possibly scaled) render resolution
         let surface_config = gpu.configure_surface(&surface, physical_width, physical_height);
 
         // Create fragment canvas
@@ -861,6 +897,7 @@ impl GlowBerry {
                     surface,
                     surface_config,
                     canvas,
+                    render_scale,
                 });
 
                 // Set viewport destination to logical size so compositor scales correctly
@@ -977,15 +1014,17 @@ impl CompositorHandler for GlowBerry {
     fn frame(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        // Check for power state changes and update frame rates if needed
-        self.check_and_update_frame_rates();
-
-        // Check if animation should be paused due to power state
+        // Check if animation should be paused due to power state.
+        // (Battery-state transitions themselves are handled event-driven via
+        // the D-Bus notification channel -> on_power_state_changed.)
         let should_pause = self.should_pause_animation();
+
+        // When set, schedule the next frame callback after this delay.
+        let mut next_frame: Option<Duration> = None;
 
         // Find the wallpaper and layer for this surface
         for wallpaper in &mut self.wallpapers {
@@ -996,8 +1035,6 @@ impl CompositorHandler for GlowBerry {
             {
                 // Check if this is a shader wallpaper with GPU state
                 if let Some(gpu_state) = &mut layer.gpu_state {
-                    // Skip rendering if paused, but still request frame callback
-                    // so we can resume when power state changes
                     if !should_pause {
                         // Check if we should render this frame (frame rate limiting)
                         if gpu_state.canvas.should_render()
@@ -1011,20 +1048,12 @@ impl CompositorHandler for GlowBerry {
                                         .texture
                                         .create_view(&wgpu::TextureViewDescriptor::default());
 
-                                    // Update resolution for this specific layer's surface
-                                    let width = gpu_state.surface_config.width;
-                                    let height = gpu_state.surface_config.height;
-
                                     tracing::trace!(
                                         output = ?layer.output_info.name,
-                                        width,
-                                        height,
+                                        width = gpu_state.surface_config.width,
+                                        height = gpu_state.surface_config.height,
                                         "Rendering shader frame"
                                     );
-
-                                    gpu_state
-                                        .canvas
-                                        .update_resolution(gpu.queue(), width, height);
 
                                     // Render the shader
                                     gpu_state.canvas.render(gpu, &view);
@@ -1055,14 +1084,11 @@ impl CompositorHandler for GlowBerry {
                                 }
                             }
                         }
-                    }
 
-                    // Request next frame callback to continue animation
-                    // Only request if not paused - when paused, GPU goes truly idle
-                    // The on_power_state_changed handler will request frames when resuming
-                    if !should_pause {
-                        surface.frame(qh, surface.clone());
-                        layer.layer.commit();
+                        // Pace the next frame with a timer instead of re-arming
+                        // the callback immediately: the process then sleeps
+                        // between frames rather than waking on every vblank.
+                        next_frame = Some(gpu_state.canvas.next_frame_delay());
                     } else {
                         // Track that we're paused so on_power_state_changed can resume us
                         self.was_animation_paused = true;
@@ -1071,6 +1097,10 @@ impl CompositorHandler for GlowBerry {
                 }
                 break;
             }
+        }
+
+        if let Some(delay) = next_frame {
+            self.schedule_shader_frame(surface.clone(), delay);
         }
     }
 

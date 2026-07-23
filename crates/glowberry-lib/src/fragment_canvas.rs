@@ -398,6 +398,11 @@ impl FragmentCanvas {
         self.last_frame = Instant::now();
     }
 
+    /// Time remaining until the next frame is due (zero if overdue).
+    pub fn next_frame_delay(&self) -> Duration {
+        self.frame_interval.saturating_sub(self.last_frame.elapsed())
+    }
+
     /// Get the configured (original) frame rate.
     pub fn configured_frame_rate(&self) -> u8 {
         self.configured_frame_rate

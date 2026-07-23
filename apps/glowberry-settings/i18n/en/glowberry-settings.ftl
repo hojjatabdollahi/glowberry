@@ -24,6 +24,10 @@ fit-fit = Fit
 fps-15 = 15 FPS
 fps-30 = 30 FPS
 fps-60 = 60 FPS
+render-quality = Render Quality
+quality-full = Full
+quality-half = Half (best efficiency)
+quality-quarter = Quarter
 
 # Loading states
 loading-wallpapers = Loading wallpapers...

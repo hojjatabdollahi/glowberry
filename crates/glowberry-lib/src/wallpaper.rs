@@ -238,6 +238,13 @@ impl Wallpaper {
                 }
             }
         }
+
+        // Release the decoded source image once all layers are drawn — the
+        // SHM buffers already hold the scaled pixels the compositor samples.
+        // The rare redraw (resize/rescale/rotation) re-decodes from disk.
+        if self.layers.iter().all(|layer| !layer.needs_redraw) {
+            self.current_image = None;
+        }
     }
 
     pub fn load_images(&mut self) {

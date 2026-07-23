@@ -130,7 +130,9 @@ impl GpuRenderer {
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 2,
+            // A wallpaper never races the deadline; the shortest allowed
+            // swapchain saves one full-resolution image of VRAM per output.
+            desired_maximum_frame_latency: 1,
             alpha_mode,
             view_formats: vec![],
         };
