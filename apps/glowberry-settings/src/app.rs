@@ -935,13 +935,15 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ShaderFrameRate(idx) => {
+                // Preview-only until Apply: writing the config here would make
+                // the daemon rebuild the wallpaper immediately, and the staged
+                // canvas source would clobber it again on Apply.
                 self.selected_shader_frame_rate = idx;
-                self.apply_selection();
             }
 
             Message::ShaderRenderScale(idx) => {
+                // Preview-only until Apply, same as frame rate.
                 self.selected_shader_render_scale = idx;
-                self.apply_selection();
             }
 
             Message::Fit(idx) => {
@@ -2457,16 +2459,8 @@ impl GlowBerrySettings {
             Choice::Color(color) => Source::Color(color.clone()),
             Choice::Shader(idx) => {
                 if let Some(shader) = self.available_shaders.get(*idx) {
-                    let frame_rate = match self.selected_shader_frame_rate {
-                        0 => 15,
-                        2 => 60,
-                        _ => 30,
-                    };
-                    let render_scale = match self.selected_shader_render_scale {
-                        1 => 0.5,
-                        2 => 0.25,
-                        _ => 1.0,
-                    };
+                    let frame_rate = self.current_frame_rate();
+                    let render_scale = self.current_render_scale();
 
                     // Check if we have custom parameter values for this shader
                     let (shader_content, source_path, params) = if let Some(parsed) = &shader.parsed
@@ -2528,17 +2522,61 @@ impl GlowBerrySettings {
         Some(source)
     }
 
-    /// Rebuild a shader `Source` from the current in-memory parameter values.
+    /// Sync the frame-rate and render-quality dropdowns to a shader source's
+    /// stored settings. Called when restoring a selection from config, so the
+    /// UI shows (and Apply re-persists) what was actually saved.
+    fn sync_shader_dropdowns(&mut self, ss: &glowberry_config::ShaderSource) {
+        self.selected_shader_frame_rate = match ss.frame_rate {
+            0..=22 => 0,
+            23..=45 => 1,
+            _ => 2,
+        };
+        self.selected_shader_render_scale = if ss.render_scale <= 0.375 {
+            2 // Quarter
+        } else if ss.render_scale <= 0.75 {
+            1 // Half
+        } else {
+            0 // Full
+        };
+    }
+
+    /// Frame rate from the current dropdown selection.
+    fn current_frame_rate(&self) -> u8 {
+        match self.selected_shader_frame_rate {
+            0 => 15,
+            2 => 60,
+            _ => 30,
+        }
+    }
+
+    /// Render scale from the current dropdown selection.
+    fn current_render_scale(&self) -> f32 {
+        match self.selected_shader_render_scale {
+            1 => 0.5,
+            2 => 0.25,
+            _ => 1.0,
+        }
+    }
+
+    /// Rebuild a shader `Source` from the current in-memory settings.
     ///
-    /// Staged canvas sources in `extend_layer_sources` are captured at selection
-    /// time, before any parameters are edited, so applying them verbatim would
-    /// persist the shader's defaults. This regenerates the inline shader code
-    /// (or falls back to a plain path when no custom values exist) so the user's
-    /// edits survive "Apply". Non-shader sources are returned unchanged.
+    /// Staged canvas sources in `extend_layer_sources` are captured at
+    /// selection time, before the user edits anything. Shader settings are
+    /// preview-only until "Apply", so this refreshes everything the UI shows —
+    /// frame rate, render quality, and parameter values (regenerating the
+    /// inline shader code, or falling back to a plain path when no custom
+    /// values exist). Non-shader sources are returned unchanged.
     fn refresh_shader_source(&self, source: Source) -> Source {
         let Source::Shader(ss) = &source else {
             return source;
         };
+
+        let mut ss = ss.clone();
+        // Always persist the current dropdown settings, even when the shader
+        // file can't be matched below (frame rate and quality don't depend on
+        // the shader's parameters).
+        ss.frame_rate = self.current_frame_rate();
+        ss.render_scale = self.current_render_scale();
 
         // Identify which shader this is: prefer the preserved source_path, then
         // fall back to the inline path variant.
@@ -2549,50 +2587,34 @@ impl GlowBerrySettings {
                 None
             }
         });
-        let Some(path) = path else {
-            return source;
-        };
 
-        let Some(idx) = self.available_shaders.iter().position(|s| s.path == path) else {
-            return source;
-        };
-        let shader = &self.available_shaders[idx];
-        let Some(parsed) = &shader.parsed else {
-            return source;
-        };
+        if let Some(path) = path
+            && let Some(idx) = self.available_shaders.iter().position(|s| s.path == path)
+            && let Some(parsed) = &self.available_shaders[idx].parsed
+        {
+            let shader_path = self.available_shaders[idx].path.clone();
+            let values = self
+                .shader_param_values
+                .get(&idx)
+                .cloned()
+                .unwrap_or_default();
 
-        let values = self
-            .shader_param_values
-            .get(&idx)
-            .cloned()
-            .unwrap_or_default();
+            ss.params = values
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_f32() as f64))
+                .collect();
 
-        let params: HashMap<String, f64> = values
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_f32() as f64))
-            .collect();
+            if values.is_empty() {
+                ss.shader = glowberry_config::ShaderContent::Path(shader_path);
+                ss.source_path = None;
+            } else {
+                ss.shader =
+                    glowberry_config::ShaderContent::Code(parsed.generate_source(&values));
+                ss.source_path = Some(shader_path);
+            }
+        }
 
-        let (shader_content, source_path) = if values.is_empty() {
-            (
-                glowberry_config::ShaderContent::Path(shader.path.clone()),
-                None,
-            )
-        } else {
-            (
-                glowberry_config::ShaderContent::Code(parsed.generate_source(&values)),
-                Some(shader.path.clone()),
-            )
-        };
-
-        Source::Shader(glowberry_config::ShaderSource {
-            shader: shader_content,
-            source_path,
-            params,
-            background_image: ss.background_image.clone(),
-            language: ss.language,
-            frame_rate: ss.frame_rate,
-            render_scale: ss.render_scale,
-        })
+        Source::Shader(ss)
     }
 
     fn apply_selection(&mut self) {
@@ -2706,18 +2728,7 @@ impl GlowBerrySettings {
                     }
                 }
 
-                self.selected_shader_frame_rate = match shader_source.frame_rate {
-                    0..=22 => 0,
-                    23..=45 => 1,
-                    _ => 2,
-                };
-                self.selected_shader_render_scale = if shader_source.render_scale <= 0.375 {
-                    2 // Quarter
-                } else if shader_source.render_scale <= 0.75 {
-                    1 // Half
-                } else {
-                    0 // Full
-                };
+                self.sync_shader_dropdowns(shader_source);
                 self.categories.selected = Some(Category::Shaders);
             }
         }
@@ -3120,6 +3131,11 @@ impl GlowBerrySettings {
                         && let Some(i) = idx
                     {
                         first_active = Some(Choice::Shader(i));
+                        // Show the saved source's settings in the dropdowns;
+                        // Apply persists whatever the dropdowns show.
+                        if let Source::Shader(ss) = &src {
+                            self.sync_shader_dropdowns(ss);
+                        }
                     }
                     self.insert_locked_item(monitor, None, src, handle, (1920, 1080));
                 }
