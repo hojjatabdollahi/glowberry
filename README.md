@@ -20,6 +20,7 @@ Multi monitor support:
 - Static image wallpapers with multi monitor support
 - Per-display configuration
 - Power saving options (pause/reduce FPS on battery)
+- Shader screensaver on idle (opt-in)
 - Settings application for easy configuration
 
 ## Installation
@@ -99,6 +100,44 @@ To install additional shaders manually:
 ```sh
 cp my_shader.wgsl ~/.local/share/glowberry/shaders/
 ```
+
+## Screensaver
+
+GlowBerry can raise a fullscreen shader on every monitor after a period of
+inactivity. It is off by default; enable it under **Screensaver** in the
+settings app.
+
+It is a screensaver, not a screen locker. On COSMIC the session lock belongs to
+`cosmic-greeter`, and `cosmic-idle` owns the fade-to-black, screen-off and lock
+sequence. GlowBerry fills the gap before those happen:
+
+```
+last input ──▶ screensaver ─────────▶ fade to black ─▶ screen off ─▶ lock
+               (GlowBerry)                    (cosmic-idle)
+```
+
+Because of that split, the screensaver timeout must be shorter than COSMIC's
+screen-off time, or the screen blanks before the screensaver is ever visible.
+The settings app warns when the two conflict, and GlowBerry removes its surfaces
+when screen-off is due so cosmic-idle's fade and lock proceed cleanly. Once the
+session is locked, the compositor stops drawing ordinary clients, so the
+screensaver is not visible on the lock screen.
+
+Any input dismisses it. The screensaver takes an exclusive keyboard grab while
+visible, so the keystroke that dismisses it is consumed rather than being
+delivered to whatever application had focus.
+
+To preview a screensaver without waiting out the timeout:
+
+```sh
+glowberry --screensaver
+```
+
+Note that this starts a full wallpaper daemon, so stop the session's GlowBerry
+instance first — otherwise both compete for the wallpaper layer.
+
+Fades use `wp_alpha_modifier_v1`; on a compositor without it the screensaver
+still works, it just appears and disappears without fading.
 
 ## Uninstall
 

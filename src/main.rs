@@ -8,7 +8,16 @@ use tracing_subscriber::prelude::*;
 #[derive(Parser, Debug)]
 #[command(name = "glowberry")]
 #[command(author, about, long_about = None)]
-struct Args {}
+struct Args {
+    /// Show the screensaver immediately instead of waiting for the idle
+    /// timeout. Intended for previewing a screensaver shader.
+    ///
+    /// This starts a full wallpaper daemon, so do not run it while the
+    /// cosmic-session instance of GlowBerry is running — both would try to own
+    /// the wallpaper layer.
+    #[arg(long)]
+    screensaver: bool,
+}
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -22,9 +31,13 @@ fn main() -> color_eyre::Result<()> {
     init_logger();
 
     let version: &'static str = glowberry_config::version_string().leak();
-    let _args = Args::command().version(version).get_matches();
+    let matches = Args::command().version(version).get_matches();
+    let force_screensaver = matches.get_flag("screensaver");
 
-    BackgroundEngine::run(EngineConfig::default())?;
+    BackgroundEngine::run(EngineConfig {
+        force_screensaver,
+        ..EngineConfig::default()
+    })?;
 
     Ok(())
 }

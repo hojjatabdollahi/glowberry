@@ -18,6 +18,7 @@ use cosmic::{ApplicationExt, Element};
 use cosmic_config::{ConfigGet, ConfigSet, CosmicConfigEntry};
 use glowberry_config::extend::ExtendConfig;
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
+use glowberry_config::screensaver::{ScreensaverConfig, ScreensaverSource};
 use glowberry_config::state::State;
 use glowberry_config::{Color, Config, Context as ConfigContext, Entry, Gradient, Source};
 use image::{ImageBuffer, Rgba};
@@ -46,6 +47,35 @@ const SIMULATED_HEIGHT: u16 = 169;
 /// fill each monitor rect in the canvas.
 const LIVE_PREVIEW_WIDTH: u32 = 320;
 const LIVE_PREVIEW_HEIGHT: u32 = 180;
+
+/// Idle timeouts offered for the screensaver, in seconds.
+///
+/// Deliberately all shorter than cosmic-idle's 15-minute default screen-off
+/// time, so the default choices cannot produce a screensaver that never becomes
+/// visible. The UI still warns if the user's own screen-off time is lower.
+const SCREENSAVER_TIMEOUT_CHOICES_SECS: [u32; 6] = [60, 120, 300, 600, 900, 1800];
+
+/// Render a duration in whole minutes, or seconds when under a minute.
+fn format_duration_secs(secs: u32) -> String {
+    if secs < 60 {
+        return fl!("duration-seconds", count = secs);
+    }
+    let minutes: u32 = secs / 60;
+    fl!("duration-minutes", count = minutes)
+}
+
+/// Index of the offered timeout closest to `secs`.
+///
+/// The config can hold any value (hand-edited, or written by an older version),
+/// so the dropdown snaps to the nearest offered choice rather than falling back
+/// to an unrelated default.
+fn nearest_timeout_index(secs: u32) -> usize {
+    SCREENSAVER_TIMEOUT_CHOICES_SECS
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, choice)| choice.abs_diff(secs))
+        .map_or(2, |(idx, _)| idx)
+}
 
 /// Persistent offscreen renderer for the live shader preview. Reused across
 /// frames so we create the wgpu device once (rebuilt only when the shader
@@ -142,6 +172,21 @@ pub struct GlowBerrySettings {
     low_battery_threshold_options: Vec<String>,
     /// Selected low battery threshold index
     selected_low_battery_threshold: usize,
+
+    /// Screensaver configuration
+    screensaver: ScreensaverConfig,
+    /// Idle timeout options for dropdown, in the same order as
+    /// [`SCREENSAVER_TIMEOUT_CHOICES_SECS`]
+    screensaver_timeout_options: Vec<String>,
+    /// Selected idle timeout index
+    selected_screensaver_timeout: usize,
+    /// Screensaver content options for dropdown
+    screensaver_source_options: Vec<String>,
+    /// Selected screensaver content index
+    selected_screensaver_source: usize,
+    /// cosmic-idle's screen-off time in ms, read at startup so the UI can warn
+    /// when the screensaver timeout would leave the screensaver invisible.
+    cosmic_idle_screen_off_ms: Option<u32>,
 
     /// Window background opacity (0.0 = transparent, 1.0 = opaque)
     window_opacity: f32,
@@ -308,6 +353,16 @@ pub enum Message {
     SetLowBatteryThreshold(usize),
     /// Toggle pause when lid closed
     SetPauseOnLidClosed(bool),
+
+    // Screensaver messages
+    /// Toggle the screensaver on or off
+    SetScreensaverEnabled(bool),
+    /// Change the idle timeout (index into `SCREENSAVER_TIMEOUT_CHOICES_SECS`)
+    SetScreensaverTimeout(usize),
+    /// Change what the screensaver draws
+    SetScreensaverSource(usize),
+    /// Toggle running the screensaver on battery power
+    SetScreensaverOnBattery(bool),
 
     /// Window opacity slider changed (live preview)
     SetWindowOpacity(f32),
@@ -590,7 +645,19 @@ impl cosmic::Application for GlowBerrySettings {
                 "50%".to_string(),
             ],
             selected_low_battery_threshold: 1, // 20% default
-            window_opacity: 1.0,               // Will be set below from config
+            screensaver: ScreensaverConfig::default(),
+            screensaver_timeout_options: SCREENSAVER_TIMEOUT_CHOICES_SECS
+                .iter()
+                .map(|secs| format_duration_secs(*secs))
+                .collect(),
+            selected_screensaver_timeout: 2, // 5 minutes default
+            screensaver_source_options: vec![
+                fl!("screensaver-source-wallpaper"),
+                fl!("screensaver-source-black"),
+            ],
+            selected_screensaver_source: 0,
+            cosmic_idle_screen_off_ms: glowberry_config::screensaver::cosmic_idle_screen_off_ms(),
+            window_opacity: 1.0, // Will be set below from config
             extend_config: ExtendConfig::default(),
             monitor_geometry: Vec::new(),
 
@@ -631,6 +698,20 @@ impl cosmic::Application for GlowBerrySettings {
                 30 => 2,
                 50 => 3,
                 _ => 1, // Default to 20%
+            };
+
+            app.screensaver = ctx.screensaver_config();
+            // A timeout set outside the offered choices (hand-edited config)
+            // maps to the nearest one so the dropdown still shows something
+            // sensible instead of defaulting to an unrelated value.
+            app.selected_screensaver_timeout =
+                nearest_timeout_index(app.screensaver.idle_timeout_secs);
+            app.selected_screensaver_source = match app.screensaver.source {
+                ScreensaverSource::SameAsWallpaper => 0,
+                ScreensaverSource::Black => 1,
+                // A dedicated shader can only be set by editing the config; keep
+                // showing the closest label rather than silently rewriting it.
+                ScreensaverSource::Shader(_) => 0,
             };
         }
 
@@ -1250,6 +1331,54 @@ impl cosmic::Application for GlowBerrySettings {
                 self.power_saving.pause_on_lid_closed = value;
                 if let Some(ctx) = &self.config_context {
                     let _ = ctx.set_pause_on_lid_closed(value);
+                }
+            }
+
+            Message::SetScreensaverEnabled(value) => {
+                self.screensaver.enabled = value;
+                if let Some(ctx) = &self.config_context
+                    && let Err(err) = ctx.set_screensaver_enabled(value)
+                {
+                    tracing::error!(?err, "Failed to save screensaver enabled");
+                }
+            }
+
+            Message::SetScreensaverTimeout(idx) => {
+                self.selected_screensaver_timeout = idx;
+                let secs = SCREENSAVER_TIMEOUT_CHOICES_SECS
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(glowberry_config::screensaver::DEFAULT_IDLE_TIMEOUT_SECS);
+                self.screensaver.idle_timeout_secs = secs;
+                if let Some(ctx) = &self.config_context
+                    && let Err(err) = ctx.set_screensaver_idle_timeout_secs(secs)
+                {
+                    tracing::error!(?err, "Failed to save screensaver timeout");
+                }
+            }
+
+            Message::SetScreensaverSource(idx) => {
+                self.selected_screensaver_source = idx;
+                let source = match idx {
+                    1 => ScreensaverSource::Black,
+                    _ => ScreensaverSource::SameAsWallpaper,
+                };
+                self.screensaver.source = source.clone();
+                if let Some(ctx) = &self.config_context
+                    && let Err(err) = ctx.set_screensaver_source(source)
+                {
+                    tracing::error!(?err, "Failed to save screensaver source");
+                }
+            }
+
+            Message::SetScreensaverOnBattery(value) => {
+                self.screensaver.on_battery = value;
+                if let Some(ctx) = &self.config_context {
+                    // No dedicated setter for this key; write the whole struct.
+                    self.screensaver.on_battery = value;
+                    if let Err(err) = self.screensaver.save(ctx) {
+                        tracing::error!(?err, "Failed to save screensaver config");
+                    }
                 }
             }
 
@@ -2298,6 +2427,8 @@ impl GlowBerrySettings {
             toggler(self.power_saving.pause_on_lid_closed).on_toggle(Message::SetPauseOnLidClosed),
         ));
 
+        let screensaver_section = self.screensaver_section();
+
         // Build background service section with optional PATH warning
         let mut bg_service_section = widget::settings::section()
             .title(fl!("background-service"))
@@ -2404,10 +2535,72 @@ impl GlowBerrySettings {
                 .into(),
             // Power saving section
             power_saving_section.into(),
+            // Screensaver section
+            screensaver_section,
             // Bezel section
             bezel_section.into(),
         ])
         .into()
+    }
+
+    /// Build the screensaver settings section.
+    ///
+    /// Only the two content modes that need no extra picker are offered here.
+    /// A dedicated screensaver shader is representable in the config
+    /// (`ScreensaverSource::Shader`) but selecting one needs the shader browser,
+    /// so for now that is config-file only and the dropdown leaves it untouched.
+    fn screensaver_section(&self) -> Element<'_, Message> {
+        let mut section = widget::settings::section().title(fl!("screensaver"));
+
+        section = section.add(settings::item(
+            fl!("screensaver-enable"),
+            toggler(self.screensaver.enabled).on_toggle(Message::SetScreensaverEnabled),
+        ));
+
+        if !self.screensaver.enabled {
+            return section.into();
+        }
+
+        section = section.add(settings::item(
+            fl!("screensaver-timeout"),
+            dropdown(
+                &self.screensaver_timeout_options,
+                Some(self.selected_screensaver_timeout),
+                Message::SetScreensaverTimeout,
+            ),
+        ));
+
+        section = section.add(settings::item(
+            fl!("screensaver-content"),
+            dropdown(
+                &self.screensaver_source_options,
+                Some(self.selected_screensaver_source),
+                Message::SetScreensaverSource,
+            ),
+        ));
+
+        section = section.add(settings::item(
+            fl!("screensaver-on-battery"),
+            toggler(self.screensaver.on_battery).on_toggle(Message::SetScreensaverOnBattery),
+        ));
+
+        // cosmic-idle owns screen-off and locking. If it blanks the screen at or
+        // before our timeout, the screensaver never becomes visible — worth
+        // saying plainly rather than leaving the user to wonder.
+        if let Some(screen_off_ms) = self.cosmic_idle_screen_off_ms
+            && self.screensaver.idle_timeout_ms() >= screen_off_ms
+        {
+            let minutes: u32 = screen_off_ms / 60_000;
+            section = section.add(
+                widget::text(fl!("screensaver-after-screen-off", minutes = minutes))
+                    .size(12)
+                    .class(cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(
+                        0.9, 0.6, 0.2,
+                    ))),
+            );
+        }
+
+        section.into()
     }
 
     fn init_from_config(&mut self) {
@@ -4314,4 +4507,44 @@ async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
     }
 
     Ok(enable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SCREENSAVER_TIMEOUT_CHOICES_SECS, nearest_timeout_index};
+
+    #[test]
+    fn exact_timeout_choices_map_to_themselves() {
+        for (idx, secs) in SCREENSAVER_TIMEOUT_CHOICES_SECS.iter().enumerate() {
+            assert_eq!(nearest_timeout_index(*secs), idx, "choice {secs}s");
+        }
+    }
+
+    #[test]
+    fn off_list_timeout_snaps_to_nearest_choice() {
+        // 4 minutes is closer to 5 minutes (index 2) than to 2 minutes.
+        assert_eq!(nearest_timeout_index(240), 2);
+        // 90 seconds sits between 60s and 120s; either is acceptable, but it
+        // must not fall back to the default index.
+        assert!(matches!(nearest_timeout_index(90), 0 | 1));
+    }
+
+    #[test]
+    fn extreme_timeouts_clamp_to_the_ends() {
+        assert_eq!(nearest_timeout_index(0), 0);
+        assert_eq!(
+            nearest_timeout_index(u32::MAX),
+            SCREENSAVER_TIMEOUT_CHOICES_SECS.len() - 1
+        );
+    }
+
+    #[test]
+    fn timeout_choices_are_ascending_and_under_cosmic_idle_default() {
+        assert!(
+            SCREENSAVER_TIMEOUT_CHOICES_SECS
+                .windows(2)
+                .all(|w| w[0] < w[1]),
+            "choices must be ascending for nearest-match to read sensibly"
+        );
+    }
 }

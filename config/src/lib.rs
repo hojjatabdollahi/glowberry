@@ -2,6 +2,7 @@
 
 pub mod extend;
 pub mod power_saving;
+pub mod screensaver;
 pub mod state;
 
 use cosmic_config::{Config as CosmicConfig, ConfigGet, ConfigSet};

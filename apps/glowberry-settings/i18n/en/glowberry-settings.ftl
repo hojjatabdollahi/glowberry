@@ -69,6 +69,28 @@ pause-low-battery = Pause on low battery
 low-battery-threshold = Battery threshold
 pause-lid-closed = Pause when lid closed
 
+# Screensaver section
+screensaver = Screensaver
+screensaver-enable = Show a screensaver when idle
+screensaver-timeout = Show after
+screensaver-content = Show
+screensaver-source-wallpaper = Current wallpaper shader
+screensaver-source-black = Black screen
+screensaver-on-battery = Run on battery power
+# Shown when COSMIC's screen-off timer would blank the display before the
+# screensaver has a chance to appear. { $minutes } is COSMIC's screen-off time.
+screensaver-after-screen-off = COSMIC turns the screen off after { $minutes } minutes, so the screensaver will not be visible. Choose a shorter time here, or raise the screen-off time in COSMIC's power settings.
+
+# Durations
+duration-seconds = { $count } { $count ->
+        [one] second
+       *[other] seconds
+    }
+duration-minutes = { $count } { $count ->
+        [one] minute
+       *[other] minutes
+    }
+
 # About
 repository = Repository
 
