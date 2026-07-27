@@ -400,7 +400,8 @@ impl FragmentCanvas {
 
     /// Time remaining until the next frame is due (zero if overdue).
     pub fn next_frame_delay(&self) -> Duration {
-        self.frame_interval.saturating_sub(self.last_frame.elapsed())
+        self.frame_interval
+            .saturating_sub(self.last_frame.elapsed())
     }
 
     /// Get the configured (original) frame rate.

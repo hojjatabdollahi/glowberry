@@ -2608,8 +2608,7 @@ impl GlowBerrySettings {
                 ss.shader = glowberry_config::ShaderContent::Path(shader_path);
                 ss.source_path = None;
             } else {
-                ss.shader =
-                    glowberry_config::ShaderContent::Code(parsed.generate_source(&values));
+                ss.shader = glowberry_config::ShaderContent::Code(parsed.generate_source(&values));
                 ss.source_path = Some(shader_path);
             }
         }
