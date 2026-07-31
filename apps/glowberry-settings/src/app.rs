@@ -33,6 +33,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 struct OutputName(String);
 
+mod keep_awake_subscription;
 mod wallpaper_subscription;
 use wallpaper_subscription::WallpaperEvent;
 
@@ -62,6 +63,17 @@ fn format_duration_secs(secs: u32) -> String {
     }
     let minutes: u32 = secs / 60;
     fl!("duration-minutes", count = minutes)
+}
+
+/// Small amber note for a setting that will not do what it says — a
+/// misconfiguration or something else on the system getting in the way.
+fn warning_text(message: String) -> Element<'static, Message> {
+    widget::text(message)
+        .size(12)
+        .class(cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(
+            0.9, 0.6, 0.2,
+        )))
+        .into()
 }
 
 /// Index of the offered timeout closest to `secs`.
@@ -187,6 +199,14 @@ pub struct GlowBerrySettings {
     /// cosmic-idle's screen-off time in ms, read at startup so the UI can warn
     /// when the screensaver timeout would leave the screensaver invisible.
     cosmic_idle_screen_off_ms: Option<u32>,
+    /// True while an app holds a Wayland idle inhibitor, which keeps the
+    /// compositor from ever reporting idle and so keeps the screensaver from
+    /// appearing. Only tracked while the screensaver settings are on screen.
+    idle_inhibited: bool,
+    /// Apps asking over D-Bus to keep the screen awake, as published by the
+    /// daemon. It suppresses the screensaver for these, and unlike the Wayland
+    /// kind they can be named. An empty entry is an app that did not say who it is.
+    wake_requests: Vec<String>,
 
     /// Window background opacity (0.0 = transparent, 1.0 = opaque)
     window_opacity: f32,
@@ -331,6 +351,8 @@ pub enum Message {
     PreferLowPower(bool),
     /// Config or state changed externally (from daemon or another instance)
     ConfigOrStateChanged(Option<Config>),
+    /// The daemon wrote state (connected outputs, screen-wake requests)
+    StateChanged,
     /// Toggle GlowBerry as the default background service
     SetGlowBerryDefault(bool),
     /// Result of setting GlowBerry as default
@@ -363,6 +385,8 @@ pub enum Message {
     SetScreensaverSource(usize),
     /// Toggle running the screensaver on battery power
     SetScreensaverOnBattery(bool),
+    /// An app started or stopped inhibiting idle detection via Wayland
+    IdleInhibited(bool),
 
     /// Window opacity slider changed (live preview)
     SetWindowOpacity(f32),
@@ -657,6 +681,8 @@ impl cosmic::Application for GlowBerrySettings {
             ],
             selected_screensaver_source: 0,
             cosmic_idle_screen_off_ms: glowberry_config::screensaver::cosmic_idle_screen_off_ms(),
+            idle_inhibited: false,
+            wake_requests: Vec::new(),
             window_opacity: 1.0, // Will be set below from config
             extend_config: ExtendConfig::default(),
             monitor_geometry: Vec::new(),
@@ -714,6 +740,10 @@ impl cosmic::Application for GlowBerrySettings {
                 ScreensaverSource::Shader(_) => 0,
             };
         }
+
+        // A video may already be playing, in which case the daemon noticed long
+        // before this window opened.
+        app.refresh_wake_requests();
 
         // Populate outputs from config first - these are the outputs that have been configured
         // The daemon adds outputs to config as it discovers them via Wayland
@@ -774,6 +804,36 @@ impl cosmic::Application for GlowBerrySettings {
                     Message::ConfigOrStateChanged(config)
                 }),
             );
+
+            // The subscription above watches the config directory. State lives in
+            // its own directory, so the daemon's screen-wake requests need their
+            // own watch to arrive while the window is open.
+            subscriptions.push(
+                cosmic_config::config_state_subscription::<_, State>(
+                    std::any::TypeId::of::<Self>(),
+                    glowberry_config::NAME.into(),
+                    State::version(),
+                )
+                .map(|update| {
+                    for why in &update.errors {
+                        tracing::debug!(?why, "state subscription error");
+                    }
+                    Message::StateChanged
+                }),
+            );
+        }
+
+        // A Wayland idle inhibitor can only be inferred, and only while looking:
+        // the probe compares two idle notifications, so it has to be running. The
+        // D-Bus kind needs no subscription — the daemon publishes those to state,
+        // which is already watched above. The warning is the only consumer, so
+        // this runs only while the screensaver section is on screen.
+        if self.screensaver.enabled
+            && self.core.window.show_context
+            && self.context_page == ContextPage::Settings
+        {
+            subscriptions
+                .push(keep_awake_subscription::idle_inhibited().map(Message::IdleInhibited));
         }
 
         // Drive the live shader preview animation only while a shader is the
@@ -1166,6 +1226,9 @@ impl cosmic::Application for GlowBerrySettings {
                     self.set_show_context(true);
                 }
                 self.context_page = context_page;
+                // The inhibitor probe only runs while this section is on screen,
+                // so a remembered verdict would be shown stale on the way back in.
+                self.idle_inhibited = false;
             }
 
             Message::OpenUrl(url) => {
@@ -1231,6 +1294,11 @@ impl cosmic::Application for GlowBerrySettings {
 
                 // Always refresh connected outputs (state may have changed)
                 self.populate_outputs_from_config();
+                self.refresh_wake_requests();
+            }
+
+            Message::StateChanged => {
+                self.refresh_wake_requests();
             }
 
             Message::SetGlowBerryDefault(enable) => {
@@ -1336,6 +1404,9 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::SetScreensaverEnabled(value) => {
                 self.screensaver.enabled = value;
+                // Turning the screensaver off stops the inhibitor probe, so drop
+                // its verdict rather than showing it again stale on re-enable.
+                self.idle_inhibited = false;
                 if let Some(ctx) = &self.config_context
                     && let Err(err) = ctx.set_screensaver_enabled(value)
                 {
@@ -1380,6 +1451,10 @@ impl cosmic::Application for GlowBerrySettings {
                         tracing::error!(?err, "Failed to save screensaver config");
                     }
                 }
+            }
+
+            Message::IdleInhibited(value) => {
+                self.idle_inhibited = value;
             }
 
             Message::SetWindowOpacity(value) => {
@@ -2591,13 +2666,24 @@ impl GlowBerrySettings {
             && self.screensaver.idle_timeout_ms() >= screen_off_ms
         {
             let minutes: u32 = screen_off_ms / 60_000;
-            section = section.add(
-                widget::text(fl!("screensaver-after-screen-off", minutes = minutes))
-                    .size(12)
-                    .class(cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(
-                        0.9, 0.6, 0.2,
-                    ))),
-            );
+            section = section.add(warning_text(fl!(
+                "screensaver-after-screen-off",
+                minutes = minutes
+            )));
+        }
+
+        // Something keeping the screen awake means the screensaver stays away
+        // until it stops, which is worth saying so it does not read as broken.
+        // A D-Bus request names the app; a Wayland inhibitor cannot be attributed
+        // to one, so it gets the generic wording.
+        if !self.wake_requests.is_empty() {
+            let named = self.wake_requests.iter().find(|app| !app.is_empty());
+            section = section.add(match named {
+                Some(app) => warning_text(fl!("screensaver-app-keeping-awake", app = app.clone())),
+                None => warning_text(fl!("screensaver-keeping-awake")),
+            });
+        } else if self.idle_inhibited {
+            section = section.add(warning_text(fl!("screensaver-keeping-awake")));
         }
 
         section.into()
@@ -2622,6 +2708,32 @@ impl GlowBerrySettings {
         };
 
         self.select_entry_source(&entry.source.clone());
+    }
+
+    /// Re-read the apps the daemon says are keeping the screen awake.
+    ///
+    /// Empty when no daemon is running, which is also when there is no
+    /// screensaver to warn about.
+    fn refresh_wake_requests(&mut self) {
+        let Ok(state_helper) = State::state() else {
+            self.wake_requests.clear();
+            return;
+        };
+
+        // A missing key is normal — a daemon that has not written this one yet —
+        // and the partial entry still carries the fields that did read, so this
+        // takes it rather than throwing the whole entry away.
+        let state = match State::get_entry(&state_helper) {
+            Ok(state) => state,
+            Err((errors, partial)) => {
+                for why in &errors {
+                    tracing::debug!(?why, "partial state read");
+                }
+                partial
+            }
+        };
+
+        self.wake_requests = state.screen_wake_requests;
     }
 
     fn cache_display_image(&mut self) {

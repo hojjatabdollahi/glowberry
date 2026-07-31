@@ -3,6 +3,9 @@
 use crate::{
     fragment_canvas, gpu, img_source,
     screensaver::{FadePhase, ScreensaverState},
+    screensaver_inhibit::{
+        InhibitMonitorHandle, InhibitorsChanged, start_screensaver_inhibit_monitor,
+    },
     upower::{PowerMonitorHandle, PowerStateChanged, start_power_monitor},
     wallpaper::Wallpaper,
 };
@@ -318,6 +321,21 @@ impl BackgroundEngine {
             })
             .expect("failed to insert power notification channel into event loop");
 
+        // Apps that ask to keep the screen awake over D-Bus (Chrome's video wake
+        // lock, for one) are invisible to `ext-idle-notify-v1`, so the seat still
+        // goes idle and the screensaver would come up over a playing video.
+        let (inhibit_notify_tx, inhibit_notify_rx) = calloop::channel::channel();
+        let screensaver_inhibitors = start_screensaver_inhibit_monitor(Some(inhibit_notify_tx));
+
+        event_loop
+            .handle()
+            .insert_source(inhibit_notify_rx, |event, _, state: &mut GlowBerry| {
+                if let calloop::channel::Event::Msg(InhibitorsChanged) = event {
+                    state.on_screensaver_inhibitors_changed();
+                }
+            })
+            .expect("failed to insert inhibit notification channel into event loop");
+
         let source_tx = img_source::img_source(&event_loop.handle(), |state, source, event| {
             use notify::event::{ModifyKind, RenameMode};
 
@@ -498,9 +516,15 @@ impl BackgroundEngine {
             alpha_modifier,
             single_pixel_buffer,
             screensaver: None,
+            screensaver_inhibitors,
+            seat_idle: false,
         };
 
         bg_state.refresh_idle_notification();
+
+        // A previous run could have been killed mid-video, leaving requests in
+        // state that nothing will ever clear.
+        bg_state.save_screen_wake_requests();
 
         // Outputs arrive asynchronously, so a forced screensaver cannot be
         // raised until at least one wl_output has been advertised.
@@ -511,7 +535,7 @@ impl BackgroundEngine {
 
             if pending_force_activate && !bg_state.active_outputs.is_empty() {
                 pending_force_activate = false;
-                bg_state.activate_screensaver();
+                bg_state.force_activate_screensaver();
             }
 
             if bg_state.exit {
@@ -588,6 +612,14 @@ pub struct GlowBerry {
         Option<wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1>,
     /// Live screensaver state; `None` whenever the screensaver is not showing.
     pub(crate) screensaver: Option<ScreensaverState>,
+    /// Tracks apps asking to keep the screen awake over D-Bus. `None` when the
+    /// bus monitor could not be started, in which case such requests go
+    /// unnoticed — see [`crate::screensaver_inhibit`].
+    pub(crate) screensaver_inhibitors: Option<InhibitMonitorHandle>,
+    /// Whether the compositor last reported the seat idle. Lets a screensaver
+    /// suppressed by an inhibitor still appear once that inhibitor is released,
+    /// without waiting for the user to touch something and go idle again.
+    pub(crate) seat_idle: bool,
 }
 
 // Manual Debug impl since wgpu types don't implement Debug
@@ -1159,6 +1191,43 @@ impl GlowBerry {
                     tracing::error!("Failed to save connected outputs: {err}");
                 } else {
                     tracing::debug!(outputs = ?state.connected_outputs, "Saved connected outputs to state");
+                }
+            }
+        }
+    }
+
+    /// Publish the apps asking to keep the screen awake, for the settings app.
+    ///
+    /// Distinct names only, so an app that holds several at once (a browser with
+    /// two playing tabs) does not cause a write per request.
+    pub(crate) fn save_screen_wake_requests(&self) {
+        let mut requests: Vec<String> = self
+            .screensaver_inhibitors
+            .as_ref()
+            .map(|monitor| {
+                let mut names: Vec<String> = monitor
+                    .current()
+                    .into_iter()
+                    .map(|inhibitor| inhibitor.app)
+                    .collect();
+                names.sort();
+                names.dedup();
+                names
+            })
+            .unwrap_or_default();
+        requests.shrink_to_fit();
+
+        if let Ok(state_helper) = State::state() {
+            let mut state = State::get_entry(&state_helper).unwrap_or_default();
+            if state.screen_wake_requests != requests {
+                state.screen_wake_requests = requests;
+                if let Err(err) = state.write_entry(&state_helper) {
+                    tracing::error!(?err, "Failed to save screen-wake requests");
+                } else {
+                    tracing::debug!(
+                        requests = ?state.screen_wake_requests,
+                        "Saved screen-wake requests to state"
+                    );
                 }
             }
         }
@@ -2143,10 +2212,12 @@ impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for GlowBerry
         match event {
             ext_idle_notification_v1::Event::Idled => {
                 tracing::debug!("Seat went idle");
+                state.seat_idle = true;
                 state.activate_screensaver();
             }
             ext_idle_notification_v1::Event::Resumed => {
                 tracing::debug!("Seat resumed");
+                state.seat_idle = false;
                 // Dismiss even if no input reached our surfaces — the session may
                 // have locked, in which case cosmic-greeter has the input and we
                 // would otherwise render behind it forever.

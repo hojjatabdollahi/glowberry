@@ -80,6 +80,11 @@ screensaver-on-battery = Run on battery power
 # Shown when COSMIC's screen-off timer would blank the display before the
 # screensaver has a chance to appear. { $minutes } is COSMIC's screen-off time.
 screensaver-after-screen-off = COSMIC turns the screen off after { $minutes } minutes, so the screensaver will not be visible. Choose a shorter time here, or raise the screen-off time in COSMIC's power settings.
+# Shown while an app is asking to keep the screen awake, which holds the
+# screensaver off until it stops. { $app } is the app's own name for itself.
+screensaver-app-keeping-awake = { $app } is keeping the screen awake, so the screensaver is paused while it runs.
+# Same situation, for when the app cannot be identified.
+screensaver-keeping-awake = An app is keeping the screen awake, so the screensaver will not appear until it stops. Video players, games and presentation tools often do this while running.
 
 # Durations
 duration-seconds = { $count } { $count ->

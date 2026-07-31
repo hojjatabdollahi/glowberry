@@ -62,7 +62,10 @@ use sctk::{
     },
 };
 
-use crate::engine::{GlowBerry, GpuLayerState};
+use crate::{
+    engine::{GlowBerry, GpuLayerState},
+    screensaver_inhibit::Inhibitor,
+};
 
 /// Where the screensaver's fade is in its lifecycle.
 #[derive(Debug, Clone, Copy)]
@@ -246,34 +249,147 @@ pub(crate) fn screen_off_deadline_from(
     Some(now + Duration::from_millis(u64::from(remaining_ms)))
 }
 
+/// What is asking for the screensaver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trigger {
+    /// The compositor reported the seat idle.
+    Idle,
+    /// The user asked for it outright, with `--screensaver`.
+    Forced,
+}
+
+/// Why the screensaver is not allowed to appear right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Suppression {
+    /// Turned off in settings.
+    Disabled,
+    /// Running on battery, which the user did not opt into.
+    OnBattery,
+    /// An app asked to keep the screen awake.
+    ScreenWakeRequest,
+}
+
+/// Decide whether the screensaver may appear, given the current conditions.
+///
+/// Note there is no setting for `wake_requested`, unlike the battery rule:
+/// covering a video the user is watching is never what they meant by enabling a
+/// screensaver. It does not apply to [`Trigger::Forced`] though — someone
+/// previewing a shader from the command line has said what they want, and a
+/// video playing behind the preview does not change that.
+fn screensaver_suppression(
+    config: &glowberry_config::screensaver::ScreensaverConfig,
+    on_battery: bool,
+    wake_requested: bool,
+    trigger: Trigger,
+) -> Option<Suppression> {
+    if !config.enabled {
+        return Some(Suppression::Disabled);
+    }
+    if on_battery && !config.on_battery {
+        return Some(Suppression::OnBattery);
+    }
+    if wake_requested && trigger == Trigger::Idle {
+        return Some(Suppression::ScreenWakeRequest);
+    }
+    None
+}
+
 impl GlowBerry {
     /// Whether the screensaver may activate right now.
     ///
     /// Separate from [`Self::should_pause_animation`], which governs the
     /// wallpaper: pausing the wallpaper on battery is a sensible default,
     /// whereas suppressing the screensaver entirely is a distinct choice.
-    fn screensaver_allowed(&self) -> bool {
-        if !self.screensaver_config.enabled {
-            return false;
-        }
+    fn screensaver_allowed(&self, trigger: Trigger) -> bool {
+        let on_battery = self
+            .power_monitor
+            .as_ref()
+            .is_some_and(|monitor| monitor.current().on_battery);
+        let wake_request = self.screen_wake_request();
 
-        if !self.screensaver_config.on_battery
-            && let Some(monitor) = self.power_monitor.as_ref()
-            && monitor.current().on_battery
-        {
-            tracing::debug!("Screensaver suppressed: on battery");
-            return false;
+        match screensaver_suppression(
+            &self.screensaver_config,
+            on_battery,
+            wake_request.is_some(),
+            trigger,
+        ) {
+            None => true,
+            Some(Suppression::Disabled) => false,
+            Some(Suppression::OnBattery) => {
+                tracing::debug!("Screensaver suppressed: on battery");
+                false
+            }
+            Some(Suppression::ScreenWakeRequest) => {
+                // Only reachable for the D-Bus kind: a Wayland idle inhibitor
+                // keeps the compositor from reporting idle in the first place.
+                if let Some(inhibitor) = wake_request.as_ref() {
+                    tracing::debug!(
+                        app = %inhibitor.app,
+                        reason = %inhibitor.reason,
+                        "Screensaver suppressed: an app asked to keep the screen awake"
+                    );
+                }
+                false
+            }
         }
-
-        true
     }
 
-    /// Raise the screensaver on every active output.
+    /// One of the apps currently asking to keep the screen awake, if any.
+    pub(crate) fn screen_wake_request(&self) -> Option<Inhibitor> {
+        self.screensaver_inhibitors
+            .as_ref()?
+            .current()
+            .into_iter()
+            .next()
+    }
+
+    /// React to an app taking or releasing a D-Bus screen-wake request.
+    ///
+    /// Taking one while the screensaver is up fades it away, which is the point:
+    /// video playback starting is exactly when the user does not want it. And
+    /// releasing the last one while the seat is still idle raises the screensaver
+    /// that was suppressed, so a finished video does not cost the user the
+    /// screensaver for the rest of the night.
+    pub(crate) fn on_screensaver_inhibitors_changed(&mut self) {
+        // The settings app shows these, and cannot observe them for itself.
+        self.save_screen_wake_requests();
+
+        if let Some(inhibitor) = self.screen_wake_request() {
+            if self.screensaver.is_some() {
+                tracing::info!(
+                    app = %inhibitor.app,
+                    reason = %inhibitor.reason,
+                    "An app asked to keep the screen awake; dismissing the screensaver"
+                );
+                self.dismiss_screensaver();
+            }
+            return;
+        }
+
+        if self.seat_idle && self.screensaver.is_none() {
+            tracing::info!(
+                "Screen-wake requests released while the seat is still idle; \
+                 raising the screensaver"
+            );
+            self.activate_screensaver();
+        }
+    }
+
+    /// Raise the screensaver because the seat went idle.
     ///
     /// Idempotent: a second call while the screensaver is already up is ignored,
     /// except that it cancels an in-progress fade-out.
     pub(crate) fn activate_screensaver(&mut self) {
-        if !self.screensaver_allowed() {
+        self.activate_screensaver_for(Trigger::Idle);
+    }
+
+    /// Raise the screensaver because the user asked for it directly.
+    pub(crate) fn force_activate_screensaver(&mut self) {
+        self.activate_screensaver_for(Trigger::Forced);
+    }
+
+    fn activate_screensaver_for(&mut self, trigger: Trigger) {
+        if !self.screensaver_allowed(trigger) {
             return;
         }
 
@@ -723,6 +839,102 @@ mod tests {
     #[test]
     fn no_deadline_when_timeouts_coincide() {
         assert!(screen_off_deadline_from(Some(300_000), 300_000, Instant::now()).is_none());
+    }
+
+    /// An enabled screensaver that does not mind battery power, so each test can
+    /// vary only the condition it is about.
+    fn enabled_config() -> ScreensaverConfig {
+        ScreensaverConfig {
+            enabled: true,
+            on_battery: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nothing_in_the_way_allows_the_screensaver() {
+        assert_eq!(
+            screensaver_suppression(&enabled_config(), false, false, Trigger::Idle),
+            None
+        );
+    }
+
+    #[test]
+    fn a_screen_wake_request_suppresses_the_screensaver() {
+        // Chrome's video wake lock: the compositor still reports idle, so this
+        // is the only thing keeping the screensaver off the video.
+        assert_eq!(
+            screensaver_suppression(&enabled_config(), false, true, Trigger::Idle),
+            Some(Suppression::ScreenWakeRequest)
+        );
+    }
+
+    #[test]
+    fn a_screen_wake_request_wins_over_the_battery_opt_in() {
+        // Opting into running on battery says nothing about wanting to cover a
+        // video, so the wake request still suppresses.
+        assert_eq!(
+            screensaver_suppression(&enabled_config(), true, true, Trigger::Idle),
+            Some(Suppression::ScreenWakeRequest)
+        );
+    }
+
+    #[test]
+    fn a_forced_preview_ignores_screen_wake_requests() {
+        // `--screensaver` is someone asking to see the shader now; a video
+        // playing behind it does not override that.
+        assert_eq!(
+            screensaver_suppression(&enabled_config(), false, true, Trigger::Forced),
+            None
+        );
+    }
+
+    #[test]
+    fn a_forced_preview_still_respects_battery_and_the_switch() {
+        let config = ScreensaverConfig {
+            enabled: true,
+            on_battery: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            screensaver_suppression(&config, true, false, Trigger::Forced),
+            Some(Suppression::OnBattery)
+        );
+        assert_eq!(
+            screensaver_suppression(&ScreensaverConfig::default(), false, false, Trigger::Forced),
+            Some(Suppression::Disabled)
+        );
+    }
+
+    #[test]
+    fn battery_suppresses_unless_opted_in() {
+        let config = ScreensaverConfig {
+            enabled: true,
+            on_battery: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            screensaver_suppression(&config, true, false, Trigger::Idle),
+            Some(Suppression::OnBattery)
+        );
+        assert_eq!(
+            screensaver_suppression(&config, false, false, Trigger::Idle),
+            None
+        );
+    }
+
+    #[test]
+    fn disabled_reports_itself_rather_than_another_reason() {
+        // The reason drives logging, so a switched-off screensaver should not
+        // claim an app is keeping the screen awake.
+        let config = ScreensaverConfig {
+            enabled: false,
+            ..enabled_config()
+        };
+        assert_eq!(
+            screensaver_suppression(&config, true, true, Trigger::Idle),
+            Some(Suppression::Disabled)
+        );
     }
 
     #[test]
