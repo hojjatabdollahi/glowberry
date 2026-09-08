@@ -6,6 +6,7 @@ use crate::{
     wallpaper::Wallpaper,
 };
 use cosmic_config::{CosmicConfigEntry, calloop::ConfigWatchSource};
+use cosmic_protocols::session_lock_layer::v1::client::cosmic_session_lock_layer_manager_v1::CosmicSessionLockLayerManagerV1;
 use eyre::Context;
 use glowberry_config::{
     Config, Source,
@@ -40,7 +41,7 @@ use sctk::{
         WaylandSurface,
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-            LayerSurfaceConfigure,
+            LayerSurfaceConfigure, SurfaceKind,
         },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
@@ -381,6 +382,7 @@ impl BackgroundEngine {
             layer_state: LayerShell::bind(&globals, &qh).unwrap(),
             viewporter: globals.bind(&qh, 1..=1, ()).unwrap(),
             fractional_scale_manager: globals.bind(&qh, 1..=1, ()).ok(),
+            session_lock_layer_manager: globals.bind(&qh, 1..=1, ()).ok(),
             qh,
             source_tx,
             loop_handle: event_loop.handle(),
@@ -430,6 +432,8 @@ pub struct GlowBerry {
     layer_state: LayerShell,
     viewporter: wp_viewporter::WpViewporter,
     fractional_scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+    /// Keeps our layers visible while the session is locked (cosmic-comp only).
+    session_lock_layer_manager: Option<CosmicSessionLockLayerManagerV1>,
     qh: QueueHandle<GlowBerry>,
     source_tx: calloop::channel::SyncSender<(String, notify::Event)>,
     loop_handle: calloop::LoopHandle<'static, GlowBerry>,
@@ -787,6 +791,10 @@ impl GlowBerry {
         layer.set_anchor(Anchor::all());
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        if let (Some(mgr), SurfaceKind::Wlr(wlr)) = (&self.session_lock_layer_manager, layer.kind())
+        {
+            mgr.set_show_on_lock(wlr);
+        }
         surface.commit();
 
         let viewport = self.viewporter.get_viewport(&surface, &self.qh, ());
@@ -1368,6 +1376,7 @@ delegate_registry!(GlowBerry);
 delegate_noop!(GlowBerry: wp_viewporter::WpViewporter);
 delegate_noop!(GlowBerry: wp_viewport::WpViewport);
 delegate_noop!(GlowBerry: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+delegate_noop!(GlowBerry: ignore CosmicSessionLockLayerManagerV1);
 
 impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, Weak<wl_surface::WlSurface>>
     for GlowBerry

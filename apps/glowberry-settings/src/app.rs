@@ -1971,12 +1971,13 @@ impl cosmic::Application for GlowBerrySettings {
             .height(Length::Fill)
             .class(cosmic::theme::Container::custom(move |theme| {
                 let cosmic = theme.cosmic();
-                let mut bg_color: cosmic::iced::Color = cosmic.background.base.into();
+                let mut bg_color: cosmic::iced::Color =
+                    cosmic.background(theme.transparent).base.into();
                 bg_color.a = opacity;
                 cosmic::widget::container::Style {
                     background: Some(cosmic::iced::Background::Color(bg_color)),
-                    icon_color: Some(cosmic.background.on.into()),
-                    text_color: Some(cosmic.background.on.into()),
+                    icon_color: Some(cosmic.background(theme.transparent).on.into()),
+                    text_color: Some(cosmic.background(theme.transparent).on.into()),
                     border: cosmic::iced::Border::default(),
                     shadow: cosmic::iced::Shadow::default(),
                     snap: false,
@@ -3132,11 +3133,12 @@ impl GlowBerrySettings {
             .padding(8)
             .class(cosmic::theme::Container::custom(move |theme| {
                 let cosmic = theme.cosmic();
-                let mut bg_color: cosmic::iced::Color = cosmic.background.component.base.into();
+                let mut bg_color: cosmic::iced::Color =
+                    cosmic.background(theme.transparent).component.base.into();
                 bg_color.a = opacity;
                 cosmic::widget::container::Style {
-                    icon_color: Some(cosmic.background.component.on.into()),
-                    text_color: Some(cosmic.background.component.on.into()),
+                    icon_color: Some(cosmic.background(theme.transparent).component.on.into()),
+                    text_color: Some(cosmic.background(theme.transparent).component.on.into()),
                     background: Some(cosmic::iced::Background::Color(bg_color)),
                     border: cosmic::iced::Border {
                         radius: cosmic.corner_radii.radius_s.into(),
@@ -3337,7 +3339,7 @@ impl GlowBerrySettings {
         let opacity = self.window_opacity;
         list.style(cosmic::theme::Container::custom(move |theme| {
             let cosmic = theme.cosmic();
-            let component = &cosmic.background.component;
+            let component = &cosmic.background(theme.transparent).component;
             let mut bg_color: cosmic::iced::Color = component.base.into();
             bg_color.a = opacity;
             cosmic::widget::container::Style {
@@ -3564,14 +3566,18 @@ impl GlowBerrySettings {
                 let cosmic = theme.cosmic();
                 cosmic::widget::container::Style {
                     background: Some(cosmic::iced::Background::Color(
-                        cosmic.background.component.base.into(),
+                        cosmic.background(theme.transparent).component.base.into(),
                     )),
-                    icon_color: Some(cosmic.background.component.on.into()),
-                    text_color: Some(cosmic.background.component.on.into()),
+                    icon_color: Some(cosmic.background(theme.transparent).component.on.into()),
+                    text_color: Some(cosmic.background(theme.transparent).component.on.into()),
                     border: cosmic::iced::Border {
                         radius: cosmic.corner_radii.radius_m.into(),
                         width: 1.0,
-                        color: cosmic.background.component.divider.into(),
+                        color: cosmic
+                            .background(theme.transparent)
+                            .component
+                            .divider
+                            .into(),
                     },
                     shadow: cosmic::iced::Shadow {
                         color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
