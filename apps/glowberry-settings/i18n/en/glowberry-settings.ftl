@@ -87,7 +87,6 @@ add-folder = Add folder
 live-hint = Right-click a display to apply this to all screens or just one.
 live-no-items = Pick a color or animation below to preview it on your displays.
 clear-all = Clear All
-export-cosmic-bg = Export to Lock Screen
 unlock-layer = Unlock
 
 # Button tooltips
