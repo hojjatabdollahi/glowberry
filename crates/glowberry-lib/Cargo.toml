@@ -29,6 +29,9 @@ sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
 tracing = { workspace = true }
 walkdir = "2.5"
 wayland-backend = "0.3"
+# zwlr_output_manager_v1: EDID make/model/serial per connector, for stable
+# per-output config keys that survive connector renames on re-dock.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # "gles" backs the Backends::GL fallback in gpu.rs for machines without Vulkan
 wgpu = { version = "29.0", default-features = false, features = [
   "vulkan",

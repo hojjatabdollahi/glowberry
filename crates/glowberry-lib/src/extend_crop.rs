@@ -133,7 +133,8 @@ pub fn composite_for_monitors(
 /// Keep only the most recent composites for `monitor_name` (both the legacy
 /// `<name>.png` and `<name>-<hash>.png` files), pruning older ones.
 fn prune_old_composites(cache_dir: &Path, monitor_name: &str) {
-    const KEEP: usize = 3;
+    // Display-set profiles reference older crops, so keep a few more around.
+    const KEEP: usize = 6;
     let legacy = format!("{monitor_name}.png");
     let prefix = format!("{monitor_name}-");
     let Ok(entries) = std::fs::read_dir(cache_dir) else {

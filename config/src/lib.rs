@@ -27,6 +27,9 @@ pub const BACKGROUNDS: &str = "backgrounds";
 pub const DEFAULT_BACKGROUND: &str = "all";
 pub const SAME_ON_ALL: &str = "same-on-all";
 pub const PREFER_LOW_POWER: &str = "prefer-low-power";
+/// Per display set (see `extend::display_key`): the complete per-output
+/// wallpaper state last applied while exactly that set was connected.
+pub const OUTPUT_PROFILES: &str = "output-profiles";
 pub const WINDOW_OPACITY: &str = "window-opacity";
 
 /// Errors that can occur during config operations
@@ -45,10 +48,60 @@ pub fn context() -> Result<Context, cosmic_config::Error> {
     CosmicConfig::new(NAME, 1).map(Context)
 }
 
+/// Stable identity for an output built from its EDID descriptors
+/// (`make|model|serial`). The same physical monitor yields the same value no
+/// matter which connector it is on, so per-output config survives re-docking
+/// (COSMIC hands out a fresh `DP-N` on most re-plugs). `None` when nothing is
+/// known; callers then fall back to the connector name.
+#[must_use]
+pub fn output_identity(make: &str, model: &str, serial: &str) -> Option<String> {
+    if make.is_empty() && model.is_empty() && serial.is_empty() {
+        return None;
+    }
+    // Identities double as cosmic-config keys, i.e. file names.
+    Some(format!("{make}|{model}|{serial}").replace('/', "_"))
+}
+
+/// Everything the daemon needs to bring back the wallpapers a user applied
+/// for one display set: the same-on-all switch, the `all` entry, and the
+/// per-output entries of the outputs that were connected at the time.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OutputProfile {
+    pub same_on_all: bool,
+    pub all: Entry,
+    pub outputs: Vec<Entry>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Context(pub CosmicConfig);
 
 impl Context {
+    /// The wallpaper state last applied for the display set `set_key`.
+    #[must_use]
+    pub fn output_profile(&self, set_key: &str) -> Option<OutputProfile> {
+        self.0
+            .get::<std::collections::HashMap<String, OutputProfile>>(OUTPUT_PROFILES)
+            .ok()?
+            .remove(set_key)
+    }
+
+    /// Record the wallpaper state for the display set `set_key`.
+    pub fn save_output_profile(
+        &self,
+        set_key: &str,
+        profile: &OutputProfile,
+    ) -> Result<(), cosmic_config::Error> {
+        let mut profiles = self
+            .0
+            .get::<std::collections::HashMap<String, OutputProfile>>(OUTPUT_PROFILES)
+            .unwrap_or_default();
+        if profiles.get(set_key) == Some(profile) {
+            return Ok(());
+        }
+        profiles.insert(set_key.to_owned(), profile.clone());
+        self.0.set(OUTPUT_PROFILES, profiles)
+    }
+
     /// Get all stored backgrounds from cosmic-config.
     ///
     /// Returns an empty vector if the key doesn't exist or fails to parse.
@@ -380,6 +433,9 @@ impl Config {
             self.outputs.insert(entry.output.clone());
             self.backgrounds.push(entry);
         }
+        // Keep a stable order so two loads (or a load and in-memory edits)
+        // compare equal when they hold the same entries.
+        self.backgrounds.sort_by(|a, b| a.output.cmp(&b.output));
 
         self.default_background = context.default_background();
     }
@@ -423,10 +479,13 @@ impl Config {
         // what `Entry::output` holds — not the on-disk key ("output.DP-5").
         // Using the key here never matched, so every set_entry pushed a duplicate
         // and `entry()` returned a stale copy until the next reload.
-        if let Some(old) = self.entry_mut(&entry.output) {
+        if entry.output == "all" {
+            self.default_background = entry;
+        } else if let Some(old) = self.entry_mut(&entry.output) {
             *old = entry;
-        } else if entry.output != "all" {
+        } else {
             self.backgrounds.push(entry);
+            self.backgrounds.sort_by(|a, b| a.output.cmp(&b.output));
         }
 
         let new_value = self.outputs.iter().cloned().collect::<Vec<_>>();
@@ -438,5 +497,20 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_identity;
+
+    #[test]
+    fn identity_is_none_without_descriptors_and_is_a_safe_key() {
+        assert_eq!(output_identity("", "", ""), None);
+        assert_eq!(
+            output_identity("LG Electronics", "LG HDR 4K", "0x1/2").as_deref(),
+            Some("LG Electronics|LG HDR 4K|0x1_2")
+        );
+        assert_eq!(output_identity("Dell", "", "").as_deref(), Some("Dell||"));
     }
 }
