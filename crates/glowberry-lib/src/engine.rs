@@ -372,7 +372,7 @@ impl BackgroundEngine {
         // Lazily initialize GPU renderer only if needed
         let gpu_renderer = if has_shader_source {
             tracing::info!("Initializing GPU renderer for shader wallpapers");
-            match gpu::GpuRenderer::new() {
+            match gpu::GpuRenderer::new(&conn_for_state) {
                 Ok(renderer) => Some(renderer),
                 Err(err) => {
                     tracing::error!(
@@ -974,7 +974,7 @@ impl GlowBerry {
         // Ensure GPU renderer is initialized
         if self.gpu_renderer.is_none() {
             tracing::info!("Lazily initializing GPU renderer for shader wallpaper");
-            match gpu::GpuRenderer::new() {
+            match gpu::GpuRenderer::new(&self.connection) {
                 Ok(renderer) => self.gpu_renderer = Some(renderer),
                 Err(err) => {
                     tracing::error!(
