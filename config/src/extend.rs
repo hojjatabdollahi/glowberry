@@ -86,26 +86,35 @@ impl ExtendConfig {
         Ok(())
     }
 
+    /// The saved layer config for exactly this display set, if any.
+    pub fn profile_for_displays(
+        context: &Context,
+        monitor_keys: &[String],
+    ) -> Option<Vec<ExtendLayer>> {
+        let profiles = context.0.get::<DisplayProfiles>(EXTEND_PROFILES).ok()?;
+        profiles.get(&display_key(monitor_keys)).cloned()
+    }
+
     /// Load the layer config for a specific display configuration.
     /// Falls back to: exact match → best partial match → current layers → empty.
     pub fn load_for_displays(context: &Context, monitor_names: &[String]) -> Vec<ExtendLayer> {
-        let key = display_key(monitor_names);
+        if let Some(layers) = Self::profile_for_displays(context, monitor_names) {
+            return layers;
+        }
         let profiles = context
             .0
             .get::<DisplayProfiles>(EXTEND_PROFILES)
             .unwrap_or_default();
 
-        // Exact match
-        if let Some(layers) = profiles.get(&key) {
-            return layers.clone();
-        }
-
         // Find best partial match: profile that shares the most monitors with current set
         let current_set: std::collections::HashSet<&str> =
             monitor_names.iter().map(|s| s.as_str()).collect();
 
+        // Iterate in key order so ties resolve the same way every time.
+        let mut sorted: Vec<(&String, &Vec<ExtendLayer>)> = profiles.iter().collect();
+        sorted.sort_by_key(|(k, _)| *k);
         let mut best: Option<(&str, &Vec<ExtendLayer>, usize)> = None;
-        for (profile_key, layers) in &profiles {
+        for (profile_key, layers) in sorted {
             let profile_monitors: std::collections::HashSet<&str> =
                 profile_key.split('+').collect();
             let overlap = current_set.intersection(&profile_monitors).count();

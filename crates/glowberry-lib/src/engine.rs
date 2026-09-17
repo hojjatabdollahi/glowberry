@@ -10,6 +10,7 @@ use cosmic_protocols::session_lock_layer::v1::client::cosmic_session_lock_layer_
 use eyre::Context;
 use glowberry_config::{
     Config, Source,
+    extend::display_key,
     power_saving::{OnBatteryAction, PowerSavingConfig},
     state::State,
 };
@@ -21,7 +22,9 @@ use sctk::{
         calloop,
         calloop_wayland_source::WaylandSource,
         client::{
-            Connection, Dispatch, Proxy, QueueHandle, Weak, delegate_noop,
+            Connection, Dispatch, Proxy, QueueHandle, Weak,
+            backend::ObjectId,
+            delegate_noop, event_created_child,
             globals::registry_queue_init,
             protocol::{
                 wl_output::{self, WlOutput},
@@ -46,8 +49,14 @@ use sctk::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
+use std::collections::HashMap;
 use std::time::Duration;
 use tracing::error;
+use wayland_protocols_wlr::output_management::v1::client::{
+    zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
+    zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
+    zwlr_output_mode_v1::ZwlrOutputModeV1,
+};
 
 /// Access glibc malloc tunables.
 #[cfg(target_env = "gnu")]
@@ -139,6 +148,7 @@ impl BackgroundEngine {
             .wrap_err("failed to insert main EventLoop into WaylandSource")?;
 
         let config_context = glowberry_config::context();
+        let context_for_state = config_context.as_ref().ok().cloned();
 
         let config = match config_context {
             Ok(config_context) => {
@@ -174,11 +184,13 @@ impl BackgroundEngine {
                                     state.config.same_on_all = conf_context.same_on_all();
 
                                     if state.config.same_on_all {
+                                        // Per-output entries must stop applying too,
+                                        // as they do on a fresh Config::load.
+                                        state.config.backgrounds.clear();
                                         state.config.outputs.clear();
                                     } else {
                                         state.config.load_backgrounds(&conf_context);
                                     }
-                                    state.config.outputs.clear();
                                     changes_applied = true;
                                 }
 
@@ -383,6 +395,9 @@ impl BackgroundEngine {
             viewporter: globals.bind(&qh, 1..=1, ()).unwrap(),
             fractional_scale_manager: globals.bind(&qh, 1..=1, ()).ok(),
             session_lock_layer_manager: globals.bind(&qh, 1..=1, ()).ok(),
+            // Version 2 added make/model/serial_number.
+            _output_manager: globals.bind(&qh, 2..=4, ()).ok(),
+            output_heads: HashMap::new(),
             qh,
             source_tx,
             loop_handle: event_loop.handle(),
@@ -396,6 +411,9 @@ impl BackgroundEngine {
             power_saving_config,
             current_frame_rate_override: None,
             was_animation_paused: false,
+            config_context: context_for_state,
+            profile_timer: None,
+            last_profile_signature: None,
         };
 
         loop {
@@ -408,6 +426,16 @@ impl BackgroundEngine {
 
         Ok(())
     }
+}
+
+/// What the compositor told us about one output head.
+#[derive(Debug, Default)]
+struct OutputHead {
+    name: String,
+    make: String,
+    model: String,
+    serial: String,
+    enabled: bool,
 }
 
 #[derive(Debug)]
@@ -434,6 +462,11 @@ pub struct GlowBerry {
     fractional_scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     /// Keeps our layers visible while the session is locked (cosmic-comp only).
     session_lock_layer_manager: Option<CosmicSessionLockLayerManagerV1>,
+    /// Held so the compositor keeps sending head updates.
+    _output_manager: Option<ZwlrOutputManagerV1>,
+    /// EDID descriptors per connector from wlr-output-management, used to
+    /// resolve stable per-output config keys.
+    output_heads: HashMap<ObjectId, OutputHead>,
     qh: QueueHandle<GlowBerry>,
     source_tx: calloop::channel::SyncSender<(String, notify::Event)>,
     loop_handle: calloop::LoopHandle<'static, GlowBerry>,
@@ -453,6 +486,12 @@ pub struct GlowBerry {
     current_frame_rate_override: Option<u8>,
     /// Whether animation was paused in the last frame (for detecting resume).
     was_animation_paused: bool,
+    /// Config handle for writing per-output entries when a display profile applies.
+    config_context: Option<glowberry_config::Context>,
+    /// Debounce timer for output add/remove bursts.
+    profile_timer: Option<calloop::RegistrationToken>,
+    /// Display set the profile was last applied for; skips redundant restores.
+    last_profile_signature: Option<String>,
 }
 
 // Manual Debug impl since wgpu types don't implement Debug
@@ -731,32 +770,26 @@ impl GlowBerry {
             self.source_tx.clone(),
         );
 
-        let mut backgrounds = self.config.backgrounds.clone();
-        backgrounds.sort_by(|a, b| a.output.cmp(&b.output));
-
-        'outer: for output in &self.active_outputs {
+        for output in &self.active_outputs {
             let Some(output_info) = self.output_state.info(output) else {
                 continue;
             };
 
             let o_name = output_info.name.clone().unwrap_or_default();
-            for background in &backgrounds {
-                if background.output == o_name {
-                    let mut new_wallpaper = Wallpaper::new(
-                        background.clone(),
-                        self.qh.clone(),
-                        self.loop_handle.clone(),
-                        self.source_tx.clone(),
-                    );
+            if let Some(background) = self.entry_for_output(&o_name).cloned() {
+                let mut new_wallpaper = Wallpaper::new(
+                    background,
+                    self.qh.clone(),
+                    self.loop_handle.clone(),
+                    self.source_tx.clone(),
+                );
 
-                    new_wallpaper
-                        .layers
-                        .push(self.new_layer(output.clone(), output_info));
-                    _ = new_wallpaper.save_state();
-                    self.wallpapers.push(new_wallpaper);
-
-                    continue 'outer;
-                }
+                new_wallpaper
+                    .layers
+                    .push(self.new_layer(output.clone(), output_info));
+                _ = new_wallpaper.save_state();
+                self.wallpapers.push(new_wallpaper);
+                continue;
             }
 
             all_wallpaper
@@ -773,6 +806,117 @@ impl GlowBerry {
         if self.gpu_renderer.is_some() && !self.wallpapers.iter().any(Wallpaper::is_shader) {
             tracing::info!("No shader wallpapers remain; releasing GPU renderer");
             self.gpu_renderer = None;
+        }
+    }
+
+    /// Stable identity for a connector from its EDID descriptors, if the
+    /// compositor reported any and no other enabled output shares them (two
+    /// identical monitors without serials stay on connector names so they can
+    /// hold different content).
+    fn output_identity(&self, connector: &str) -> Option<String> {
+        let id = |h: &OutputHead| glowberry_config::output_identity(&h.make, &h.model, &h.serial);
+        let head = self.output_heads.values().find(|h| h.name == connector)?;
+        let identity = id(head)?;
+        let duplicates = self
+            .output_heads
+            .values()
+            .filter(|h| h.enabled && id(h).as_deref() == Some(&identity))
+            .count();
+        (duplicates <= 1).then_some(identity)
+    }
+
+    /// Config entry for a connector: identity key first, then the legacy
+    /// connector-named key.
+    fn entry_for_output(&self, connector: &str) -> Option<&glowberry_config::Entry> {
+        self.output_identity(connector)
+            .and_then(|id| self.config.entry(&id))
+            .or_else(|| self.config.entry(connector))
+    }
+
+    /// Debounce output add/remove/update bursts (a dock brings up several
+    /// outputs in a row), then restore the wallpaper profile for the new set.
+    fn schedule_display_profile(&mut self) {
+        if let Some(token) = self.profile_timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let timer = calloop::timer::Timer::from_duration(Duration::from_millis(750));
+        match self
+            .loop_handle
+            .insert_source(timer, |_, _, state: &mut GlowBerry| {
+                state.profile_timer = None;
+                state.apply_display_profile();
+                calloop::timer::TimeoutAction::Drop
+            }) {
+            Ok(token) => self.profile_timer = Some(token),
+            Err(err) => tracing::error!(?err, "failed to schedule display profile"),
+        }
+    }
+
+    /// Restore the wallpaper state the settings app last applied for exactly
+    /// the current display set (see `OutputProfile`). Sets without a saved
+    /// profile keep the plain per-output behaviour.
+    fn apply_display_profile(&mut self) {
+        let Some(ctx) = self.config_context.clone() else {
+            return;
+        };
+        let mut keys: Vec<String> = self
+            .active_outputs
+            .iter()
+            .filter_map(|output| self.output_state.info(output)?.name)
+            .map(|name| self.output_identity(&name).unwrap_or_else(|| name.clone()))
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        keys.sort();
+        let set_key = display_key(&keys);
+        if self.last_profile_signature.as_deref() == Some(&set_key) {
+            return;
+        }
+        self.last_profile_signature = Some(set_key.clone());
+
+        let Some(profile) = ctx.output_profile(&set_key) else {
+            tracing::debug!(set = %set_key, "no saved wallpaper profile for this display set");
+            return;
+        };
+        tracing::info!(set = %set_key, "Restoring wallpaper profile for display set");
+
+        // Write to disk only, through a scratch copy: each key is written only
+        // when its value differs, and the config watcher then updates the live
+        // config and rebuilds wallpapers exactly as for a write by the app.
+        // Updating `self.config` here would make the watcher see no change.
+        if let Err(err) = ctx.set_same_on_all(profile.same_on_all) {
+            tracing::error!(?err, "failed to write same-on-all");
+        }
+        let mut scratch = self.config.clone();
+        for entry in std::iter::once(profile.all).chain(profile.outputs) {
+            if let Err(err) = scratch.set_entry(&ctx, entry) {
+                tracing::error!(?err, "failed to write profile entry");
+            }
+        }
+    }
+
+    /// Re-resolve every output once the compositor finishes an output update.
+    /// EDID descriptors can arrive after `new_output` already attached a layer
+    /// by connector name, so rebuild if any output now maps to a different entry.
+    fn rebind_outputs(&mut self) {
+        let stale = self.active_outputs.iter().any(|output| {
+            let Some(info) = self.output_state.info(output) else {
+                return false;
+            };
+            let name = info.name.unwrap_or_default();
+            let desired = self
+                .entry_for_output(&name)
+                .map_or("all", |e| e.output.as_str());
+            self.wallpapers
+                .iter()
+                .find(|w| w.layers.iter().any(|l| &l.wl_output == output))
+                .is_some_and(|w| w.entry.output != desired)
+        });
+        if stale {
+            tracing::info!("Output identities changed; reapplying backgrounds");
+            // ponytail: full rebuild on hotplug; move only the affected layer if flicker matters.
+            self.apply_backgrounds();
         }
     }
 
@@ -1156,17 +1300,38 @@ impl OutputHandler for GlowBerry {
             return;
         };
 
-        if let Some(pos) = self
+        if self
             .wallpapers
             .iter()
-            .position(|w| match w.entry.output.as_str() {
-                "all" => !w.layers.iter().any(|l| l.wl_output == wl_output),
-                name => {
-                    Some(name) == output_info.name.as_deref()
-                        && !w.layers.iter().any(|l| l.wl_output == wl_output)
-                }
-            })
+            .any(|w| w.layers.iter().any(|l| l.wl_output == wl_output))
         {
+            return;
+        }
+
+        // Prefer a live wallpaper for this output. `apply_backgrounds` only
+        // builds wallpapers for outputs connected at the time, so an output
+        // plugged in later may have a config entry without a wallpaper; create
+        // one then instead of falling through to "all".
+        let name = output_info.name.clone().unwrap_or_default();
+        let entry = self.entry_for_output(&name).cloned();
+        let pos = entry
+            .as_ref()
+            .and_then(|e| self.wallpapers.iter().position(|w| w.entry.output == e.output))
+            .or_else(|| {
+                let entry = entry?;
+                tracing::info!(output = %name, key = %entry.output, "Creating wallpaper for hotplugged output");
+                let wallpaper = Wallpaper::new(
+                    entry,
+                    self.qh.clone(),
+                    self.loop_handle.clone(),
+                    self.source_tx.clone(),
+                );
+                self.wallpapers.insert(0, wallpaper);
+                Some(0)
+            })
+            .or_else(|| self.wallpapers.iter().position(|w| w.entry.output == "all"));
+
+        if let Some(pos) = pos {
             let layer = self.new_layer(wl_output, output_info);
             self.wallpapers[pos].layers.push(layer);
             if let Err(err) = self.wallpapers[pos].save_state() {
@@ -1176,6 +1341,7 @@ impl OutputHandler for GlowBerry {
 
         // Update connected outputs in state for settings app
         self.save_connected_outputs();
+        self.schedule_display_profile();
     }
 
     fn update_output(
@@ -1184,6 +1350,8 @@ impl OutputHandler for GlowBerry {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
+        // Position/scale/mode changes move the crop windows.
+        self.schedule_display_profile();
         if self.fractional_scale_manager.is_none()
             && self.compositor_state.wl_compositor().version() < 6
         {
@@ -1231,6 +1399,7 @@ impl OutputHandler for GlowBerry {
         let Some(output_info) = self.output_state.info(&output) else {
             // Still try to save connected outputs even if we can't get info
             self.save_connected_outputs();
+            self.schedule_display_profile();
             return;
         };
 
@@ -1248,26 +1417,10 @@ impl OutputHandler for GlowBerry {
         // Update connected outputs in state for settings app
         self.save_connected_outputs();
 
-        let Some(output_wallpaper) =
-            self.wallpapers
-                .iter_mut()
-                .find(|w| match w.entry.output.as_str() {
-                    "all" => true,
-                    name => Some(name) == output_info.name.as_deref(),
-                })
-        else {
-            return;
-        };
-
-        let Some(layer_position) = output_wallpaper
-            .layers
-            .iter()
-            .position(|bg_layer| bg_layer.wl_output == output)
-        else {
-            return;
-        };
-
-        output_wallpaper.layers.remove(layer_position);
+        for wallpaper in &mut self.wallpapers {
+            wallpaper.layers.retain(|l| l.wl_output != output);
+        }
+        self.schedule_display_profile();
     }
 }
 
@@ -1377,6 +1530,68 @@ delegate_noop!(GlowBerry: wp_viewporter::WpViewporter);
 delegate_noop!(GlowBerry: wp_viewport::WpViewport);
 delegate_noop!(GlowBerry: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 delegate_noop!(GlowBerry: ignore CosmicSessionLockLayerManagerV1);
+delegate_noop!(GlowBerry: ignore ZwlrOutputModeV1);
+
+impl Dispatch<ZwlrOutputManagerV1, ()> for GlowBerry {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrOutputManagerV1,
+        event: zwlr_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_output_manager_v1::Event::Head { head } => {
+                state.output_heads.insert(head.id(), OutputHead::default());
+            }
+            zwlr_output_manager_v1::Event::Done { .. } => {
+                state.rebind_outputs();
+                // Identities may have just become known; re-evaluate the profile.
+                state.schedule_display_profile();
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(GlowBerry, ZwlrOutputManagerV1, [
+        zwlr_output_manager_v1::EVT_HEAD_OPCODE => (ZwlrOutputHeadV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwlrOutputHeadV1, ()> for GlowBerry {
+    fn event(
+        state: &mut Self,
+        head: &ZwlrOutputHeadV1,
+        event: zwlr_output_head_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use zwlr_output_head_v1::Event;
+        let id = head.id();
+        if let Event::Finished = event {
+            state.output_heads.remove(&id);
+            if head.version() >= zwlr_output_head_v1::REQ_RELEASE_SINCE {
+                head.release();
+            }
+            return;
+        }
+        let info = state.output_heads.entry(id).or_default();
+        match event {
+            Event::Name { name } => info.name = name,
+            Event::Make { make } => info.make = make,
+            Event::Model { model } => info.model = model,
+            Event::SerialNumber { serial_number } => info.serial = serial_number,
+            Event::Enabled { enabled } => info.enabled = enabled != 0,
+            _ => {}
+        }
+    }
+
+    event_created_child!(GlowBerry, ZwlrOutputHeadV1, [
+        zwlr_output_head_v1::EVT_MODE_OPCODE => (ZwlrOutputModeV1, ()),
+    ]);
+}
 
 impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, Weak<wl_surface::WlSurface>>
     for GlowBerry

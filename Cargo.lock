@@ -2298,6 +2298,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "wayland-backend",
+ "wayland-protocols-wlr",
  "wgpu 29.0.3",
  "zbus",
 ]

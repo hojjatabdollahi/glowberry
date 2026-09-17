@@ -19,7 +19,9 @@ use cosmic_config::{ConfigGet, ConfigSet, CosmicConfigEntry};
 use glowberry_config::extend::ExtendConfig;
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use glowberry_config::state::State;
-use glowberry_config::{Color, Config, Context as ConfigContext, Entry, Gradient, Source};
+use glowberry_config::{
+    Color, Config, Context as ConfigContext, Entry, Gradient, OutputProfile, Source,
+};
 use image::{ImageBuffer, Rgba};
 use slotmap::{DefaultKey, SecondaryMap, SlotMap};
 use std::borrow::Cow;
@@ -175,6 +177,9 @@ pub struct GlowBerrySettings {
     /// paused during this window so we never create wgpu devices concurrently
     /// (which can crash software renderers like llvmpipe).
     shader_thumbnails_loading: bool,
+    /// The config changed under us (daemon restored a display-set profile);
+    /// restage the canvas once the monitor list has been refreshed.
+    restage_on_monitors: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -600,6 +605,7 @@ impl cosmic::Application for GlowBerrySettings {
             live_preview: Arc::new(Mutex::new(LivePreview::default())),
             live_preview_in_flight: false,
             shader_thumbnails_loading: false,
+            restage_on_monitors: false,
         };
 
         // Load prefer_low_power, power saving, extend config, and window opacity from config
@@ -688,6 +694,16 @@ impl cosmic::Application for GlowBerrySettings {
                         .and_then(|ctx| Config::load(&ctx).ok());
                     Message::ConfigOrStateChanged(config)
                 }),
+            );
+            // The daemon records connected outputs in the *state* namespace,
+            // which the config subscription above does not watch.
+            subscriptions.push(
+                cosmic_config::config_state_subscription::<_, State>(
+                    std::any::TypeId::of::<State>(),
+                    glowberry_config::NAME.into(),
+                    State::version(),
+                )
+                .map(|_| Message::ConfigOrStateChanged(None)),
             );
         }
 
@@ -974,22 +990,23 @@ impl cosmic::Application for GlowBerrySettings {
                 }
                 WallpaperEvent::Loaded => {
                     // Get the correct entry based on same_on_all and active_output
-                    let entry = if self.config.same_on_all {
-                        Some(&self.config.default_background)
+                    let source = if self.config.same_on_all {
+                        Some(self.config.default_background.source.clone())
                     } else if let Some(ref output_name) = self.active_output {
-                        self.config.entry(output_name)
+                        self.entry_for_output(output_name).map(|e| e.source.clone())
                     } else {
-                        Some(&self.config.default_background)
+                        Some(self.config.default_background.source.clone())
                     };
 
                     // Only select a wallpaper if config source is a Path
                     // Don't override if user has a Color or Shader selected
-                    if let Some(entry) = entry
-                        && let Source::Path(config_path) = &entry.source
-                    {
+                    if let Some(Source::Path(config_path)) = source {
                         // Find the wallpaper that matches the config path
-                        if let Some((key, _)) =
-                            self.selection.paths.iter().find(|(_, p)| *p == config_path)
+                        if let Some((key, _)) = self
+                            .selection
+                            .paths
+                            .iter()
+                            .find(|(_, p)| **p == config_path)
                         {
                             self.selection.active = Choice::Wallpaper(key);
                             self.categories.selected = Some(Category::Wallpapers);
@@ -1088,26 +1105,18 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::SameWallpaper(value) => {
-                self.config.same_on_all = value;
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.set_same_on_all(value);
-                }
-                // Clear per-output backgrounds when switching to same-on-all
-                if value {
-                    self.config.backgrounds.clear();
-                    self.config.outputs.clear();
-                }
+                self.set_same_on_all(value);
                 self.apply_selection();
             }
 
             Message::OutputChanged(entity) => {
                 self.outputs.activate(entity);
-                if let Some(name) = self.outputs.data::<OutputName>(entity) {
-                    self.active_output = Some(name.0.clone());
+                if let Some(name) = self.outputs.data::<OutputName>(entity).map(|n| n.0.clone()) {
+                    self.active_output = Some(name.clone());
 
                     // Load the wallpaper for this specific output if it exists
-                    if let Some(entry) = self.config.entry(&name.0) {
-                        self.select_entry_source(&entry.source.clone());
+                    if let Some(source) = self.entry_for_output(&name).map(|e| e.source.clone()) {
+                        self.select_entry_source(&source);
                     }
                 }
                 self.cache_display_image();
@@ -1126,12 +1135,12 @@ impl cosmic::Application for GlowBerrySettings {
                     && self.config != config
                 {
                     tracing::debug!("Config changed externally, updating data");
-                    // Refresh our copy of the config, but DON'T call
-                    // init_from_config() here: it resets the selected category and
-                    // selection from the applied wallpaper, and the daemon writes
-                    // state frequently — so doing it on every change would wipe the
-                    // page the user just navigated to (e.g. switching to Colors).
+                    // Our own writes update `self.config` first and compare equal
+                    // here, so a difference means another process changed the
+                    // applied wallpapers (the daemon restoring a display-set
+                    // profile). Show that once the monitors are refreshed below.
                     self.config = config;
+                    self.restage_on_monitors = true;
 
                     // Update prefer_low_power from config
                     if let Some(ctx) = &self.config_context {
@@ -1146,6 +1155,10 @@ impl cosmic::Application for GlowBerrySettings {
 
                 // Always refresh connected outputs (state may have changed)
                 self.populate_outputs_from_config();
+                // Outputs or their arrangement may have changed; refresh the canvas.
+                return Task::perform(crate::monitor_query::query_monitors(), |result| {
+                    cosmic::Action::App(Message::MonitorsLoaded(result.unwrap_or_default()))
+                });
             }
 
             Message::SetGlowBerryDefault(enable) => {
@@ -1269,7 +1282,7 @@ impl cosmic::Application for GlowBerrySettings {
                 if let Some(ctx) = &self.config_context {
                     let mut bezels = glowberry_config::extend::ExtendConfig::load_bezels(ctx);
                     for mon in &self.monitor_geometry {
-                        bezels.insert(mon.bezel_key(), mon.bezel.clone());
+                        bezels.insert(mon.identity(), mon.bezel.clone());
                     }
                     let _ = glowberry_config::extend::ExtendConfig::save_bezels(ctx, &bezels);
                 }
@@ -1287,20 +1300,31 @@ impl cosmic::Application for GlowBerrySettings {
                 if let Some(ctx) = &self.config_context {
                     let bezels = glowberry_config::extend::ExtendConfig::load_bezels(ctx);
                     for mon in &mut monitors {
-                        if let Some(bezel) = bezels.get(&mon.bezel_key()) {
+                        if let Some(bezel) = bezels.get(&mon.identity()) {
                             mon.bezel = bezel.clone();
                         }
                     }
                 }
+                if monitors.is_empty() && !self.monitor_geometry.is_empty() {
+                    // cosmic-randr failed; keep what we have rather than wiping the canvas.
+                    return Task::none();
+                }
+                let names = |m: &[crate::monitor_query::MonitorGeometry]| {
+                    let mut v: Vec<&str> = m.iter().map(|m| m.name.as_str()).collect();
+                    v.sort_unstable();
+                    v.iter().map(ToString::to_string).collect::<Vec<_>>()
+                };
+                let set_changed = names(&self.monitor_geometry) != names(&monitors);
                 self.monitor_geometry = monitors;
-                // Stage the current page's saved content now that monitors exist
-                // (only on first load, so monitor hotplugs don't wipe edits).
-                if self.extend_layers.is_empty() {
-                    let monitor_names: Vec<String> = self
-                        .monitor_geometry
-                        .iter()
-                        .map(|m| m.name.clone())
-                        .collect();
+                // Stage the saved content for this display set on first load and
+                // whenever the set of connected outputs changes. A pure
+                // rearrangement only moves the monitors under the existing layers.
+                if self.extend_layers.is_empty() || set_changed || self.restage_on_monitors {
+                    self.restage_on_monitors = false;
+                    // Identity-keyed entries can only be resolved once the
+                    // monitors are known, so redo the initial page selection.
+                    self.init_from_config();
+                    let monitor_names = self.display_keys();
                     if let Some(ctx) = &self.config_context {
                         let layers = glowberry_config::extend::ExtendConfig::load_for_displays(
                             ctx,
@@ -1323,7 +1347,6 @@ impl cosmic::Application for GlowBerrySettings {
                         return self.load_shader_thumbnails();
                     }
                 }
-                self.extend_fit_view_requested = true;
             }
 
             Message::ExtendAddLayer(wp_key) => {
@@ -1432,10 +1455,7 @@ impl cosmic::Application for GlowBerrySettings {
                 }
 
                 // Ensure per-output mode is active so the daemon loads per-output wallpapers
-                self.config.same_on_all = false;
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.set_same_on_all(false);
-                }
+                self.set_same_on_all(false);
 
                 // 1. Save locked layers directly as per-output wallpapers. Color
                 // and live items carry a source override (color/shader); images
@@ -1462,12 +1482,8 @@ impl cosmic::Application for GlowBerrySettings {
                     }
                 }
                 for (output, source) in locked_entries {
-                    let entry = Entry::new(output, source);
-                    if let Some(ctx) = &self.config_context
-                        && let Err(e) = self.config.set_entry(ctx, entry)
-                    {
-                        tracing::error!("Failed to set locked wallpaper: {}", e);
-                    }
+                    let entry = Entry::new(self.output_key(&output), source);
+                    self.set_entry(entry);
                 }
 
                 // 2. Composite unlocked layers for monitors not covered by locked layers
@@ -1512,16 +1528,12 @@ impl cosmic::Application for GlowBerrySettings {
                             img_scale: l.scale,
                             z_index: l.z_index,
                             locked: l.locked,
-                            target_output: l.target_output.clone(),
+                            target_output: l.target_output.as_deref().map(|c| self.output_key(c)),
                         })
                         .collect();
                     if let Some(ctx) = &self.config_context {
                         let _ = ctx.save_extend_config(&self.extend_config);
-                        let monitor_names: Vec<String> = self
-                            .monitor_geometry
-                            .iter()
-                            .map(|m| m.name.clone())
-                            .collect();
+                        let monitor_names = self.display_keys();
                         let _ = glowberry_config::extend::ExtendConfig::save_for_displays(
                             ctx,
                             &monitor_names,
@@ -1553,13 +1565,10 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::ExtendApplied(result) => match result {
                 Ok(crops) => {
-                    if let Some(ctx) = &self.config_context {
-                        for (output_name, cached_path) in crops {
-                            let entry = Entry::new(output_name, Source::Path(cached_path));
-                            if let Err(e) = self.config.set_entry(ctx, entry) {
-                                tracing::error!("Failed to set wallpaper: {}", e);
-                            }
-                        }
+                    for (output_name, cached_path) in crops {
+                        let entry =
+                            Entry::new(self.output_key(&output_name), Source::Path(cached_path));
+                        self.set_entry(entry);
                     }
                     tracing::info!("Multi-monitor wallpapers applied");
                 }
@@ -1622,16 +1631,9 @@ impl cosmic::Application for GlowBerrySettings {
                 };
 
                 // Apply to config: set wallpaper on all screens
-                self.config.same_on_all = true;
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.set_same_on_all(true);
-                }
+                self.set_same_on_all(true);
                 let entry = Entry::new("all".to_string(), Source::Path(path.clone()));
-                if let Some(ctx) = &self.config_context
-                    && let Err(e) = self.config.set_entry(ctx, entry)
-                {
-                    tracing::error!("Failed to set wallpaper: {}", e);
-                }
+                self.set_entry(entry);
 
                 // Clear existing layers and add one per monitor to show in preview
                 self.extend_layers.clear();
@@ -1703,18 +1705,11 @@ impl cosmic::Application for GlowBerrySettings {
                 };
 
                 // Ensure per-output mode
-                self.config.same_on_all = false;
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.set_same_on_all(false);
-                }
+                self.set_same_on_all(false);
 
                 // Write config directly
-                let entry = Entry::new(screen_name.clone(), Source::Path(path.clone()));
-                if let Some(ctx) = &self.config_context
-                    && let Err(e) = self.config.set_entry(ctx, entry)
-                {
-                    tracing::error!("Failed to set wallpaper: {}", e);
-                }
+                let entry = Entry::new(self.output_key(&screen_name), Source::Path(path.clone()));
+                self.set_entry(entry);
 
                 // Add locked layer to preview on the target monitor
                 if let Some(monitor) = self.monitor_geometry.iter().find(|m| m.name == screen_name)
@@ -1770,16 +1765,9 @@ impl cosmic::Application for GlowBerrySettings {
                     .unwrap_or_else(|| Source::Path(path.clone()));
 
                 // Apply the content to all displays.
-                self.config.same_on_all = true;
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.set_same_on_all(true);
-                }
+                self.set_same_on_all(true);
                 let entry = Entry::new("all".to_string(), source.clone());
-                if let Some(ctx) = &self.config_context
-                    && let Err(e) = self.config.set_entry(ctx, entry)
-                {
-                    tracing::error!("Failed to set wallpaper: {}", e);
-                }
+                self.set_entry(entry);
 
                 // Replace layers with locked per-monitor items.
                 self.fill_monitors_locked(path, image_handle, image_size, color, source);
@@ -1801,16 +1789,9 @@ impl cosmic::Application for GlowBerrySettings {
                     .unwrap_or_else(|| Source::Path(path.clone()));
 
                 // Ensure per-output mode
-                self.config.same_on_all = false;
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.set_same_on_all(false);
-                }
-                let entry = Entry::new(screen_name.clone(), source.clone());
-                if let Some(ctx) = &self.config_context
-                    && let Err(e) = self.config.set_entry(ctx, entry)
-                {
-                    tracing::error!("Failed to set wallpaper: {}", e);
-                }
+                self.set_same_on_all(false);
+                let entry = Entry::new(self.output_key(&screen_name), source.clone());
+                self.set_entry(entry);
 
                 // Add a locked item on the target monitor, removing any existing
                 // one for that output first so it isn't duplicated.
@@ -2217,8 +2198,7 @@ impl GlowBerrySettings {
             &self.config.default_background
         } else if let Some(ref output_name) = self.active_output {
             // Try to find a per-output entry
-            self.config
-                .entry(output_name)
+            self.entry_for_output(output_name)
                 .unwrap_or(&self.config.default_background)
         } else if let Some(first) = self.config.backgrounds.first() {
             // Per-output mode with no specific output selected: reflect what's
@@ -2228,7 +2208,8 @@ impl GlowBerrySettings {
             &self.config.default_background
         };
 
-        self.select_entry_source(&entry.source.clone());
+        let source = entry.source.clone();
+        self.select_entry_source(&source);
     }
 
     fn cache_display_image(&mut self) {
@@ -2417,9 +2398,6 @@ impl GlowBerrySettings {
     }
 
     fn apply_selection(&mut self) {
-        let Some(ctx) = &self.config_context else {
-            return;
-        };
         let Some(source) = self.build_active_source() else {
             return;
         };
@@ -2428,15 +2406,12 @@ impl GlowBerrySettings {
         let output = if self.config.same_on_all {
             "all".to_string()
         } else if let Some(ref name) = self.active_output {
-            name.clone()
+            self.output_key(name)
         } else {
             "all".to_string()
         };
 
-        let entry = Entry::new(output, source);
-        if let Err(e) = self.config.set_entry(ctx, entry) {
-            tracing::error!("Failed to set wallpaper: {}", e);
-        }
+        self.set_entry(Entry::new(output, source));
     }
 
     /// Select a source from entry (used when switching displays or on init)
@@ -2532,6 +2507,117 @@ impl GlowBerrySettings {
             }
         }
         self.cache_display_image();
+    }
+
+    /// Config key for a connected output: its EDID identity when known and
+    /// unique, else the connector name. Two identical monitors without serial
+    /// numbers share an identity, so they keep connector keys and can still
+    /// hold different content (at the cost of not surviving a re-dock).
+    fn output_key(&self, connector: &str) -> String {
+        let Some(id) = self
+            .monitor_geometry
+            .iter()
+            .find(|m| m.name == connector)
+            .and_then(|m| m.edid.as_deref())
+        else {
+            return connector.to_string();
+        };
+        let duplicates = self
+            .monitor_geometry
+            .iter()
+            .filter(|m| m.edid.as_deref() == Some(id))
+            .count();
+        if duplicates > 1 {
+            connector.to_string()
+        } else {
+            id.to_string()
+        }
+    }
+
+    /// Connector name for a saved output key (identity or legacy connector).
+    fn connector_for_key(&self, key: &str) -> String {
+        self.monitor_geometry
+            .iter()
+            .find(|m| m.name == key || self.output_key(&m.name) == key)
+            .map_or_else(|| key.to_string(), |m| m.name.clone())
+    }
+
+    /// Output keys for the connected monitors, for extend profile lookup.
+    fn display_keys(&self) -> Vec<String> {
+        self.monitor_geometry
+            .iter()
+            .map(|m| self.output_key(&m.name))
+            .collect()
+    }
+
+    /// Switch between one wallpaper everywhere and per-output wallpapers,
+    /// keeping the in-memory config shaped like a fresh `Config::load` so an
+    /// external change can be told apart from our own writes.
+    fn set_same_on_all(&mut self, value: bool) {
+        self.config.same_on_all = value;
+        let Some(ctx) = &self.config_context else {
+            return;
+        };
+        if let Err(e) = ctx.set_same_on_all(value) {
+            tracing::error!("Failed to set same-on-all: {}", e);
+        }
+        if value {
+            self.config.backgrounds.clear();
+            self.config.outputs.clear();
+        } else {
+            self.config.load_backgrounds(ctx);
+        }
+    }
+
+    /// Write a wallpaper entry and snapshot the resulting state for the current
+    /// display set, so the daemon can bring it back when this set reconnects.
+    fn set_entry(&mut self, entry: Entry) {
+        let Some(ctx) = &self.config_context else {
+            return;
+        };
+        if let Err(e) = self.config.set_entry(ctx, entry) {
+            tracing::error!("Failed to set wallpaper: {}", e);
+        }
+        self.save_output_profile();
+    }
+
+    fn save_output_profile(&self) {
+        let Some(ctx) = &self.config_context else {
+            return;
+        };
+        if self.monitor_geometry.is_empty() {
+            return;
+        }
+        let profile = OutputProfile {
+            same_on_all: self.config.same_on_all,
+            all: self.config.default_background.clone(),
+            outputs: self
+                .monitor_geometry
+                .iter()
+                .filter_map(|m| self.entry_for_output(&m.name).cloned())
+                .collect(),
+        };
+        let set_key = glowberry_config::extend::display_key(&self.display_keys());
+        if let Err(e) = ctx.save_output_profile(&set_key, &profile) {
+            tracing::warn!(?e, "failed to save display-set wallpaper profile");
+        }
+    }
+
+    /// The source currently applied to a connector, honouring same-on-all.
+    fn applied_source(&self, connector: &str) -> Option<Source> {
+        if self.config.same_on_all {
+            Some(self.config.default_background.source.clone())
+        } else {
+            self.entry_for_output(connector).map(|e| e.source.clone())
+        }
+    }
+
+    /// Per-output entry for a connector: identity key first, then the legacy
+    /// connector-named key.
+    fn entry_for_output(&self, connector: &str) -> Option<&Entry> {
+        self.config
+            .entry(&self.output_key(connector))
+            .or_else(|| self.config.entry(connector))
     }
 
     /// Populate the outputs tab bar from state (connected outputs)
@@ -2680,12 +2766,8 @@ impl GlowBerrySettings {
         image_handle: Option<ImageHandle>,
         image_size: (u32, u32),
     ) {
-        self.config.same_on_all = true;
-        if let Some(ctx) = &self.config_context {
-            let _ = ctx.set_same_on_all(true);
-            let entry = Entry::new("all".to_string(), source.clone());
-            let _ = self.config.set_entry(ctx, entry);
-        }
+        self.set_same_on_all(true);
+        self.set_entry(Entry::new("all".to_string(), source.clone()));
         self.fill_monitors_locked(PathBuf::new(), image_handle, image_size, color, source);
     }
 
@@ -2702,12 +2784,8 @@ impl GlowBerrySettings {
         let Some(monitor) = self.monitor_geometry.get(monitor_idx).cloned() else {
             return;
         };
-        self.config.same_on_all = false;
-        if let Some(ctx) = &self.config_context {
-            let _ = ctx.set_same_on_all(false);
-            let entry = Entry::new(monitor.name.clone(), source.clone());
-            let _ = self.config.set_entry(ctx, entry);
-        }
+        self.set_same_on_all(false);
+        self.set_entry(Entry::new(self.output_key(&monitor.name), source.clone()));
         // Replace any existing item for this output so it isn't duplicated.
         let existing: Vec<DefaultKey> = self
             .extend_layers
@@ -2854,7 +2932,7 @@ impl GlowBerrySettings {
                     .iter()
                     .filter_map(|(k, l)| {
                         Some((
-                            l.target_output.clone()?,
+                            self.output_key(l.target_output.as_deref()?),
                             self.extend_layer_colors.get(k)?.clone(),
                         ))
                     })
@@ -2866,7 +2944,7 @@ impl GlowBerrySettings {
                     .extend_layers
                     .iter()
                     .filter_map(|(k, l)| {
-                        let out = l.target_output.clone()?;
+                        let out = self.output_key(l.target_output.as_deref()?);
                         let src = self.extend_layer_sources.get(k)?.clone();
                         matches!(src, Source::Shader(_)).then_some((out, src))
                     })
@@ -2899,12 +2977,19 @@ impl GlowBerrySettings {
 
         let mut first_active: Option<Choice> = None;
         for monitor in &monitors {
+            let key = self.output_key(&monitor.name);
+            // What the daemon is showing on this display wins when it is of this
+            // page's type; otherwise fall back to the page's saved selection.
+            let applied = self.applied_source(&monitor.name);
             if want_color {
-                let color = color_map
-                    .iter()
-                    .find(|(o, _)| o == &monitor.name)
-                    .map(|(_, c)| c.clone())
-                    .or_else(|| saved_color.clone());
+                let color = match applied {
+                    Some(Source::Color(c)) => Some(c),
+                    _ => color_map
+                        .iter()
+                        .find(|(o, _)| *o == key || o == &monitor.name)
+                        .map(|(_, c)| c.clone())
+                        .or_else(|| saved_color.clone()),
+                };
                 if let Some(color) = color {
                     if first_active.is_none() {
                         first_active = Some(Choice::Color(color.clone()));
@@ -2918,11 +3003,14 @@ impl GlowBerrySettings {
                     );
                 }
             } else {
-                let src = shader_map
-                    .iter()
-                    .find(|(o, _)| o == &monitor.name)
-                    .map(|(_, s)| s.clone())
-                    .or_else(|| saved_shader.clone());
+                let src = match applied {
+                    Some(src @ Source::Shader(_)) => Some(src),
+                    _ => shader_map
+                        .iter()
+                        .find(|(o, _)| *o == key || o == &monitor.name)
+                        .map(|(_, s)| s.clone())
+                        .or_else(|| saved_shader.clone()),
+                };
                 if let Some(src) = src {
                     let idx = self.shader_idx_for_source(&src);
                     let handle = idx.and_then(|i| self.shader_thumbnails.get(i).cloned());
@@ -2979,6 +3067,10 @@ impl GlowBerrySettings {
 
             let z = config_layer.z_index;
             self.extend_next_z = self.extend_next_z.max(z + 1);
+            let target_output = config_layer
+                .target_output
+                .as_deref()
+                .map(|k| self.connector_for_key(k));
             self.extend_layers.insert(ExtendLayerState {
                 source_path: config_layer.source_path.clone(),
                 image_handle,
@@ -2987,7 +3079,7 @@ impl GlowBerrySettings {
                 scale: config_layer.img_scale,
                 z_index: z,
                 locked: config_layer.locked,
-                target_output: config_layer.target_output.clone(),
+                target_output,
             });
         }
     }

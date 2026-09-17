@@ -32,10 +32,9 @@ pub struct MonitorGeometry {
 }
 
 impl MonitorGeometry {
-    /// Key used to store per-display settings (bezels). Uses the EDID identity
-    /// so the same monitor keeps its settings across ports; falls back to the
-    /// connector name when EDID info is unavailable.
-    pub fn bezel_key(&self) -> String {
+    /// Stable per-monitor key (EDID identity, else connector name). Used for
+    /// bezels and as the config key for per-output wallpapers.
+    pub fn identity(&self) -> String {
         self.edid.clone().unwrap_or_else(|| self.name.clone())
     }
 
@@ -187,17 +186,11 @@ pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError>
         let logical_w = (phys_w as f64 / scale).round() as u32;
         let logical_h = (phys_h as f64 / scale).round() as u32;
 
-        // Build a stable EDID identity when any descriptor is present.
-        let edid = if make.is_some() || model.is_some() || serial.is_some() {
-            Some(format!(
-                "{}|{}|{}",
-                make.as_deref().unwrap_or(""),
-                model.as_deref().unwrap_or(""),
-                serial.as_deref().unwrap_or(""),
-            ))
-        } else {
-            None
-        };
+        let edid = glowberry_config::output_identity(
+            make.as_deref().unwrap_or(""),
+            model.as_deref().unwrap_or(""),
+            serial.as_deref().unwrap_or(""),
+        );
 
         monitors.push(MonitorGeometry {
             name: name.to_owned(),
