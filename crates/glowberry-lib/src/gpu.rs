@@ -4,11 +4,29 @@
 
 use pollster::FutureExt;
 use raw_window_handle::{
-    RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
+    DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle, RawWindowHandle,
+    WaylandDisplayHandle, WaylandWindowHandle,
 };
 use sctk::reexports::client::{Connection, Proxy};
 use std::ptr::NonNull;
 use wgpu::SurfaceTargetUnsafe;
+
+/// The daemon's Wayland display, handed to wgpu when the instance is created.
+///
+/// The GL backend initializes EGL against this display. Without it, EGL comes
+/// up on the surfaceless platform and every Wayland surface fails to configure.
+#[derive(Debug)]
+struct WaylandDisplay(Connection);
+
+impl HasDisplayHandle for WaylandDisplay {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        let ptr = NonNull::new(self.0.backend().display_ptr() as *mut _)
+            .ok_or(HandleError::Unavailable)?;
+        let raw = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(ptr));
+        // SAFETY: the connection owns the display and outlives this borrow.
+        Ok(unsafe { DisplayHandle::borrow_raw(raw) })
+    }
+}
 
 /// GPU renderer for shader-based live wallpapers.
 ///
@@ -31,23 +49,20 @@ pub enum GpuError {
 }
 
 impl GpuRenderer {
-    /// Create a new GPU renderer.
+    /// Create a new GPU renderer bound to the Wayland connection whose
+    /// surfaces will later be passed to [`Self::create_surface`].
     ///
     /// Returns an error if no GPU adapter is available or device creation fails.
     /// Callers should fall back to the SHM rendering path on failure.
-    pub fn new() -> Result<Self, GpuError> {
-        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        instance_desc.backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
-        let instance = wgpu::Instance::new(instance_desc);
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                force_fallback_adapter: false,
-                compatible_surface: None,
-            })
-            .block_on()
-            .map_err(GpuError::NoAdapter)?;
+    pub fn new(conn: &Connection) -> Result<Self, GpuError> {
+        // Vulkan first, GL only when no Vulkan adapter exists. Left to wgpu's
+        // own sort, GL's "every Intel GPU is integrated" guess can beat a
+        // discrete Intel adapter on Vulkan under LowPower.
+        let (instance, adapter) =
+            Self::request_adapter(conn, wgpu::Backends::VULKAN).or_else(|err| {
+                tracing::warn!(?err, "No Vulkan adapter; trying GL");
+                Self::request_adapter(conn, wgpu::Backends::GL)
+            })?;
 
         tracing::info!(
             "GPU renderer using: {} ({:?})",
@@ -65,6 +80,27 @@ impl GpuRenderer {
             device,
             queue,
         })
+    }
+
+    fn request_adapter(
+        conn: &Connection,
+        backends: wgpu::Backends,
+    ) -> Result<(wgpu::Instance, wgpu::Adapter), wgpu::RequestAdapterError> {
+        let mut instance_desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
+            WaylandDisplay(conn.clone()),
+        ));
+        instance_desc.backends = backends;
+        let instance = wgpu::Instance::new(instance_desc);
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .block_on()?;
+
+        Ok((instance, adapter))
     }
 
     /// Create a wgpu surface from a Wayland surface.
