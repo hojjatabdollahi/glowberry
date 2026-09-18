@@ -4130,7 +4130,8 @@ fn is_path_order_correct() -> bool {
 
 /// Enable or disable GlowBerry as the default background service.
 ///
-/// When enabled, creates a symlink at ~/.local/bin/cosmic-bg -> ~/.local/bin/glowberry.
+/// When enabled, creates a symlink at ~/.local/bin/cosmic-bg -> the glowberry daemon,
+/// which lives next to this binary (~/.local/bin for `just install`, /usr/bin for the .deb).
 /// When disabled, removes the symlink so the original /usr/bin/cosmic-bg is used.
 ///
 /// No elevated privileges needed since we operate in ~/.local/bin/.
@@ -4140,7 +4141,6 @@ async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
     let local_bin = home.join(".local/bin");
     let symlink_path = local_bin.join("cosmic-bg");
-    let glowberry_bin = local_bin.join("glowberry");
 
     // Check PATH order when enabling
     if enable {
@@ -4165,6 +4165,12 @@ async fn set_glowberry_default(enable: bool) -> Result<bool, String> {
     }
 
     if enable {
+        let glowberry_bin = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join("glowberry")))
+            .filter(|p| p.is_file())
+            .ok_or("Cannot find the glowberry daemon next to glowberry-settings")?;
+
         // Ensure ~/.local/bin exists
         std::fs::create_dir_all(&local_bin)
             .map_err(|e| format!("Failed to create ~/.local/bin: {}", e))?;

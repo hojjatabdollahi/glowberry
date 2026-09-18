@@ -14,4 +14,5 @@ install:
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
     find v1 -type f -exec install -Dm0644 {} {{default-schema-target}}/{} \;
 uninstall:
-    rm {{desktop-dst}} {{metainfo-dst}}
+    rm -f {{desktop-dst}} {{metainfo-dst}}
+    rm -rf {{default-schema-target}}

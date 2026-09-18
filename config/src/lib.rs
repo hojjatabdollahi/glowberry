@@ -7,7 +7,11 @@ pub mod state;
 use cosmic_config::{Config as CosmicConfig, ConfigGet, ConfigSet};
 use derive_setters::Setters;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::HashSet, path::PathBuf};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 /// Package version from Cargo.toml.
@@ -281,6 +285,21 @@ pub enum ShaderContent {
     Code(String),
 }
 
+/// Resolve a stored shader path, falling back to a same-named shader in the XDG
+/// data dirs when the stored file is gone (e.g. config written against
+/// `~/.local/share/glowberry/shaders/` after the shaders moved to `/usr/share`).
+pub fn resolve_shader_path(path: &Path) -> PathBuf {
+    if path.exists() {
+        return path.to_path_buf();
+    }
+    path.file_name()
+        .and_then(|name| {
+            xdg::BaseDirectories::with_prefix("glowberry")
+                .find_data_file(Path::new("shaders").join(name))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 /// Supported shader languages.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ShaderLanguage {
@@ -512,5 +531,30 @@ mod tests {
             Some("LG Electronics|LG HDR 4K|0x1_2")
         );
         assert_eq!(output_identity("Dell", "", "").as_deref(), Some("Dell||"));
+    }
+}
+
+#[cfg(test)]
+mod resolve_shader_path_tests {
+    use super::resolve_shader_path;
+    use std::path::Path;
+
+    #[test]
+    fn relocated_shader_is_found_by_file_name() {
+        let tmp = std::env::temp_dir().join(format!("glowberry-resolve-{}", std::process::id()));
+        let shaders = tmp.join("glowberry/shaders");
+        std::fs::create_dir_all(&shaders).unwrap();
+        let relocated = shaders.join("relocated.wgsl");
+        std::fs::write(&relocated, "").unwrap();
+        // SAFETY: single-threaded test; nothing else in this crate reads XDG_DATA_DIRS.
+        unsafe { std::env::set_var("XDG_DATA_DIRS", &tmp) };
+
+        let stale = Path::new("/nonexistent/old/relocated.wgsl");
+        assert_eq!(resolve_shader_path(stale), relocated);
+        assert_eq!(resolve_shader_path(&relocated), relocated);
+        let missing = Path::new("/nonexistent/old/missing.wgsl");
+        assert_eq!(resolve_shader_path(missing), missing);
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

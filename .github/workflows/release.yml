@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+  # Cloudsmith config is supplied via GitHub Secrets:
+  #   CLOUDSMITH_API_KEY — your Cloudsmith API key
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build .deb and publish
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libwayland-dev \
+            libseat-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libinput-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libexpat1-dev \
+            libvulkan-dev
+
+      # Toolchain comes from rust-toolchain.toml via the runner's rustup.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches workspace version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "glowberry") | .version')"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_version}; expected v${cargo_version}"
+            exit 1
+          fi
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace
+
+      - name: Build .deb package
+        run: SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo deb --no-build
+
+      - name: Locate .deb file
+        id: deb
+        run: |
+          DEB=$(ls target/debian/*.deb | head -1)
+          echo "path=$DEB" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .deb to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.deb.outputs.path }}
+
+      - name: Install Cloudsmith CLI
+        run: pip install --upgrade cloudsmith-cli
+
+      - name: Push .deb to Cloudsmith
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          cloudsmith push deb \
+            "cosmetics/glowberry/pop/noble" \
+            "${{ steps.deb.outputs.path }}"

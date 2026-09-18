@@ -80,6 +80,11 @@ check *args:
 # Runs a clippy check with JSON message format
 check-json: (check '--message-format=json')
 
+# Build a .deb package into target/debian (needs `cargo install cargo-deb`)
+deb *args:
+    cargo build --release --locked --workspace {{args}}
+    SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo deb --no-build
+
 # Run with debug logs
 run *args:
     env RUST_LOG=debug RUST_BACKTRACE=1 cargo run --release {{args}}
@@ -153,7 +158,9 @@ _check-glowberry-disabled:
 uninstall-daemon:
     rm -f {{bin-dst}}
     rm -f {{cosmic-bg-link}}
-    rm -rf {{shaders-dir}}
+    # Only remove the bundled shaders; user-added ones stay
+    for f in examples/*.wgsl; do rm -f {{shaders-dir}}/$(basename "$f"); done
+    rmdir {{shaders-dir}} {{base-dir}}/share/glowberry 2>/dev/null || true
     rm -f {{switch-script-dst}}
     @just data/uninstall
     @just data/icons/uninstall

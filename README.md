@@ -44,7 +44,7 @@ This installs GlowBerry to `~/.local/bin/glowberry` and creates a symlink at `~/
 
 ## Enabling GlowBerry
 
-GlowBerry works by intercepting cosmic-session's call to `cosmic-bg`. The installer creates a symlink at `~/.local/bin/cosmic-bg` that points to `~/.local/bin/glowberry`. Since `~/.local/bin` is searched before `/usr/bin` in PATH, cosmic-session will run GlowBerry instead.
+GlowBerry works by intercepting cosmic-session's call to `cosmic-bg`. A symlink at `~/.local/bin/cosmic-bg` points to the `glowberry` binary (`~/.local/bin/glowberry` for a source install, `/usr/bin/glowberry` for the `.deb`). Since `~/.local/bin` is searched before `/usr/bin` in PATH, cosmic-session will run GlowBerry instead. `just install` creates the symlink for you; after installing the `.deb`, run `glowberry-switch enable` once.
 
 > [!IMPORTANT]
 > For this to work, `~/.local/bin` must appear before `/usr/bin` in your PATH. You can verify this by running:
@@ -78,7 +78,7 @@ You can also enable/disable GlowBerry from the settings application (`glowberry-
 If you prefer to set it up manually:
 
 ```sh
-# Enable GlowBerry
+# Enable GlowBerry (use /usr/bin/glowberry if installed from the .deb)
 ln -sf ~/.local/bin/glowberry ~/.local/bin/cosmic-bg
 pkill cosmic-bg  # Restart the service
 
@@ -93,7 +93,7 @@ Shader wallpapers are WGSL files. GlowBerry searches for shaders in XDG data dir
 - `~/.local/share/glowberry/shaders/` (user-local, installed by default)
 - Directories listed in `$XDG_DATA_DIRS` (e.g. `/usr/share/glowberry/shaders/`)
 
-Example shaders are included in the `examples/` directory and installed automatically by `just install`.
+Example shaders are included in the `examples/` directory and installed automatically by `just install` (to `~/.local/share`) and by the `.deb` (to `/usr/share`).
 
 To install additional shaders manually:
 ```sh
@@ -102,8 +102,17 @@ cp my_shader.wgsl ~/.local/share/glowberry/shaders/
 
 ## Uninstall
 
+Source install:
+
 ```sh
 just uninstall
+```
+
+Debian package (disable the override first so cosmic-bg comes back):
+
+```sh
+glowberry-switch disable
+sudo apt remove glowberry
 ```
 
 ### Removing a legacy system-wide installation

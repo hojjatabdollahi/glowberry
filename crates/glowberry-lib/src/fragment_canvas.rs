@@ -104,7 +104,9 @@ impl FragmentCanvas {
 
         // Load shader code
         let shader_code = match &source.shader {
-            ShaderContent::Path(path) => std::fs::read_to_string(path)?,
+            ShaderContent::Path(path) => {
+                std::fs::read_to_string(glowberry_config::resolve_shader_path(path))?
+            }
             ShaderContent::Code(code) => code.clone(),
         };
 

@@ -357,7 +357,7 @@ impl Wallpaper {
         let path = match &self.entry.source {
             Source::Path(path) => path.clone(),
             Source::Shader(shader) => match &shader.shader {
-                ShaderContent::Path(path) => path.clone(),
+                ShaderContent::Path(path) => glowberry_config::resolve_shader_path(path),
                 ShaderContent::Code(_) => return,
             },
             Source::Color(_) => return,

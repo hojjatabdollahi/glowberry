@@ -12,7 +12,9 @@
 set -e
 
 LOCAL_BIN="$HOME/.local/bin"
-GLOWBERRY_BIN="$LOCAL_BIN/glowberry"
+# The daemon lives next to this script (~/.local/bin via `just install`, /usr/bin via the .deb)
+GLOWBERRY_BIN="$(dirname "$(readlink -f "$0")")/glowberry"
+[ -f "$GLOWBERRY_BIN" ] || GLOWBERRY_BIN="$(command -v glowberry || true)"
 SYMLINK_PATH="$LOCAL_BIN/cosmic-bg"
 ORIGINAL_COSMIC_BG="/usr/bin/cosmic-bg"
 
@@ -28,7 +30,7 @@ Commands:
 
 How it works:
     GlowBerry intercepts cosmic-session's call to cosmic-bg by placing a symlink
-    at ~/.local/bin/cosmic-bg that points to ~/.local/bin/glowberry. Since
+    at ~/.local/bin/cosmic-bg that points to the glowberry binary. Since
     ~/.local/bin is searched before /usr/bin in PATH, cosmic-session will
     run GlowBerry instead of the original cosmic-bg.
 
@@ -95,8 +97,8 @@ warn_path_order() {
 
 enable_glowberry() {
     if ! [ -f "$GLOWBERRY_BIN" ]; then
-        echo "Error: GlowBerry not found at $GLOWBERRY_BIN"
-        echo "Please install GlowBerry first with: just install"
+        echo "Error: glowberry binary not found"
+        echo "Please install GlowBerry first (just install, or the .deb package)"
         exit 1
     fi
 

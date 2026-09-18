@@ -27,7 +27,7 @@ walkdir = "2.5"
 members = ["config", "crates/glowberry-lib", "apps/glowberry-settings"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.93"
 license = "MPL-2.0"
@@ -44,3 +44,79 @@ features = ["calloop"]
 
 [profile.release]
 opt-level = 3
+
+[package.metadata.deb]
+maintainer = "Hojjat Abdollahi"
+copyright = "2026, Hojjat Abdollahi"
+license-file = ["LICENSE.md", "0"]
+extended-description = """\
+GlowBerry replaces cosmic-bg on the COSMIC desktop with a background service \
+that can render live GPU shader wallpapers (WGSL) as well as static images, \
+solid colors and gradients, with per-output configuration and power saving. \
+After installing, run `glowberry-switch enable` (or use the settings app) to \
+make cosmic-session start GlowBerry instead of cosmic-bg."""
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+  [
+    "target/release/glowberry",
+    "usr/bin/",
+    "755",
+  ],
+  [
+    "target/release/glowberry-settings",
+    "usr/bin/",
+    "755",
+  ],
+  [
+    "scripts/glowberry-switch",
+    "usr/bin/",
+    "755",
+  ],
+  [
+    "data/io.github.hojjatabdollahi.glowberry.desktop",
+    "usr/share/applications/",
+    "644",
+  ],
+  [
+    "apps/glowberry-settings/data/io.github.hojjatabdollahi.glowberry-settings.desktop",
+    "usr/share/applications/",
+    "644",
+  ],
+  [
+    "data/io.github.hojjatabdollahi.glowberry.metainfo.xml",
+    "usr/share/metainfo/",
+    "644",
+  ],
+  [
+    "data/icons/io.github.hojjatabdollahi.glowberry.svg",
+    "usr/share/icons/hicolor/scalable/apps/",
+    "644",
+  ],
+  [
+    "data/icons/io.github.hojjatabdollahi.glowberry-symbolic.svg",
+    "usr/share/icons/hicolor/symbolic/apps/",
+    "644",
+  ],
+  [
+    "apps/glowberry-settings/data/icons/io.github.hojjatabdollahi.glowberry-settings.svg",
+    "usr/share/icons/hicolor/scalable/apps/",
+    "644",
+  ],
+  [
+    "apps/glowberry-settings/data/icons/io.github.hojjatabdollahi.glowberry-settings-symbolic.svg",
+    "usr/share/icons/hicolor/symbolic/apps/",
+    "644",
+  ],
+  [
+    "examples/*.wgsl",
+    "usr/share/glowberry/shaders/",
+    "644",
+  ],
+  [
+    "data/v1/*",
+    "usr/share/cosmic/io.github.hojjatabdollahi.glowberry/v1/",
+    "644",
+  ],
+]

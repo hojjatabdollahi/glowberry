@@ -12,4 +12,4 @@ install:
     install -Dm0644 {{symbolic-src}} {{symbolic-dst}}
 
 uninstall:
-    rm {{scalable-dst}} {{symbolic-dst}}
+    rm -f {{scalable-dst}} {{symbolic-dst}}
