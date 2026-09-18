@@ -80,6 +80,12 @@ check *args:
 # Runs a clippy check with JSON message format
 check-json: (check '--message-format=json')
 
+# Set the workspace version and refresh Cargo.lock so `--locked` builds still pass
+bump version:
+    sed -i 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    cargo update --workspace
+    @echo "Now: git commit -am 'chore: bump version to v{{version}}' && git tag v{{version}} && git push origin main v{{version}}"
+
 # Build a .deb package into target/debian (needs `cargo install cargo-deb`)
 deb *args:
     cargo build --release --locked --workspace {{args}}
