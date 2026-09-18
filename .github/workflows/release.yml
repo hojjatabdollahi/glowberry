@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build-and-publish:
-    name: Build .deb and publish
+    name: Build .deb, draft a pre-release, push to Cloudsmith
     runs-on: ubuntu-24.04
 
     steps:
@@ -66,10 +66,14 @@ jobs:
           DEB=$(ls target/debian/*.deb | head -1)
           echo "path=$DEB" >> "$GITHUB_OUTPUT"
 
-      - name: Upload .deb to GitHub Release
+      # Draft pre-release: nothing is public until you publish it by hand.
+      - name: Attach .deb to a draft pre-release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.deb.outputs.path }}
+          draft: true
+          prerelease: true
+          generate_release_notes: true
 
       - name: Install Cloudsmith CLI
         run: pip install --upgrade cloudsmith-cli
