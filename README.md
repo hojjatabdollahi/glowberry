@@ -24,6 +24,51 @@ Multi monitor support:
 
 ## Installation
 
+### Debian package (Pop!_OS / Ubuntu 24.04)
+
+Download the `.deb` from the [latest release](https://github.com/hojjatabdollahi/glowberry/releases) and install it:
+
+```sh
+sudo apt install ./glowberry_*.deb
+```
+
+Or add the Cloudsmith repository and install from there:
+
+```sh
+curl -1sLf 'https://dl.cloudsmith.io/public/cosmetics/glowberry/setup.deb.sh' | sudo -E bash
+sudo apt install glowberry
+```
+
+The package installs `glowberry`, `glowberry-settings` and `glowberry-switch` to `/usr/bin`, plus the bundled shaders to `/usr/share/glowberry/shaders/`. It does not touch `/usr/bin/cosmic-bg`; enabling GlowBerry is still per-user (see [Enabling GlowBerry](#enabling-glowberry)):
+
+```sh
+glowberry-switch enable
+```
+
+To build the package yourself, install [cargo-deb](https://github.com/kornelski/cargo-deb) and run `just deb`. The result lands in `target/debian/`.
+
+#### Switching from a `just install` to the package
+
+Files in `~/.local` shadow the ones in `/usr`, so remove the source install first. From your checkout:
+
+```sh
+just uninstall                          # removes ~/.local/bin/glowberry*, shaders, desktop files, defaults
+sudo apt install ./glowberry_*.deb
+glowberry-switch enable                 # re-points ~/.local/bin/cosmic-bg at /usr/bin/glowberry
+```
+
+`just uninstall` only removes the bundled shaders; anything you added to `~/.local/share/glowberry/shaders/` is kept. If you no longer have the checkout, delete these by hand:
+
+```sh
+rm -f ~/.local/bin/{glowberry,glowberry-settings,glowberry-switch,cosmic-bg}
+rm -f ~/.local/share/applications/io.github.hojjatabdollahi.glowberry{,-settings}.desktop
+rm -f ~/.local/share/metainfo/io.github.hojjatabdollahi.glowberry.metainfo.xml
+rm -f ~/.local/share/icons/hicolor/{scalable,symbolic}/apps/io.github.hojjatabdollahi.glowberry*
+rm -rf ~/.local/share/cosmic/io.github.hojjatabdollahi.glowberry
+```
+
+### From source
+
 Build and install with [just](https://github.com/casey/just):
 
 ```sh
