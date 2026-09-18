@@ -24,36 +24,36 @@ Multi monitor support:
 
 ## Installation
 
-### Debian package (Pop!_OS / Ubuntu 24.04)
+### From the Cloudsmith Debian repository (recommended)
 
-Download the `.deb` from the [latest release](https://github.com/hojjatabdollahi/glowberry/releases) and install it:
+[![Cloudsmith](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.cloudsmith.io%2Fv1%2Fpackages%2Fcosmetics%2Fglowberry%2F%3Fpage%3D1%26page_size%3D1%26sort%3D-version&query=%24%5B0%5D.version&label=cloudsmith&logo=cloudsmith&color=blue)](https://cloudsmith.io/~cosmetics/repos/glowberry/packages/) <img alt="Static Badge" src="https://img.shields.io/badge/OSS%20hosting%20by-cloudsmith-blue?logo=cloudsmith&style=flat-square&link=https%3A%2F%2Fcloudsmith.com"> </img>
 
-```sh
-sudo apt install ./glowberry_*.deb
-```
+GlowBerry repository hosting is graciously provided by [Cloudsmith](https://cloudsmith.com).
 
-Or add the Cloudsmith repository and install from there:
+For Pop!_OS / Ubuntu 24.04 (Noble):
 
 ```sh
+# Add the Cloudsmith repository
 curl -1sLf 'https://dl.cloudsmith.io/public/cosmetics/glowberry/setup.deb.sh' | sudo -E bash
+
+# Install GlowBerry
 sudo apt install glowberry
 ```
 
-The package installs `glowberry`, `glowberry-settings` and `glowberry-switch` to `/usr/bin`, plus the bundled shaders to `/usr/share/glowberry/shaders/`. It does not touch `/usr/bin/cosmic-bg`; enabling GlowBerry is still per-user (see [Enabling GlowBerry](#enabling-glowberry)):
+Packages are built automatically on every release. The package installs `glowberry`, `glowberry-settings` and `glowberry-switch` to `/usr/bin`, plus the bundled shaders to `/usr/share/glowberry/shaders/`. It does not touch `/usr/bin/cosmic-bg`; enabling GlowBerry is still per-user (see [Enabling GlowBerry](#enabling-glowberry)):
 
 ```sh
 glowberry-switch enable
 ```
 
-To build the package yourself, install [cargo-deb](https://github.com/kornelski/cargo-deb) and run `just deb`. The result lands in `target/debian/`.
-
 #### Switching from a `just install` to the package
+If you previously installed Glowberry using `just` and now want to use the `deb` repository, you need to uninstall the `just` version first.
 
 Files in `~/.local` shadow the ones in `/usr`, so remove the source install first. From your checkout:
 
 ```sh
 just uninstall                          # removes ~/.local/bin/glowberry*, shaders, desktop files, defaults
-sudo apt install ./glowberry_*.deb
+sudo apt install glowberry
 glowberry-switch enable                 # re-points ~/.local/bin/cosmic-bg at /usr/bin/glowberry
 ```
 
