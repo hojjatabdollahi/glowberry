@@ -67,6 +67,8 @@ pub enum ContextPage {
     #[default]
     Settings,
     About,
+    /// Settings for the picked live wallpaper
+    Inspector,
 }
 
 /// Main application state
@@ -534,6 +536,8 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn init(mut core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
+        // The context drawer is a side panel, not an overlay over the content.
+        core.window.context_is_overlay = false;
         // Disable the default content container so we can apply our own background with opacity
         core.window.content_container = false;
 
@@ -692,6 +696,10 @@ impl cosmic::Application for GlowBerrySettings {
 
         // Initialize selection from config (needs outputs to be populated first for per-display mode)
         app.init_from_config();
+        if matches!(app.selection.active, Choice::Shader(_)) {
+            app.context_page = ContextPage::Inspector;
+            app.set_show_context(true);
+        }
 
         // Set the window title and start loading shader thumbnails
         let title_task = if let Some(id) = app.core.main_window_id() {
@@ -783,7 +791,13 @@ impl cosmic::Application for GlowBerrySettings {
         // Picking from the library switches the canvas to that kind's mode,
         // as the old category tabs did.
         if let Some(category) = message.picks() {
-            self.ensure_category(category);
+            self.ensure_category(category.clone());
+            if category == Category::Shaders {
+                self.context_page = ContextPage::Inspector;
+                self.set_show_context(true);
+            } else if self.context_page == ContextPage::Inspector {
+                self.set_show_context(false);
+            }
         }
 
         match message {
@@ -1941,23 +1955,11 @@ impl cosmic::Application for GlowBerrySettings {
     fn view(&self) -> Element<'_, Self::Message> {
         let mut children: Vec<Element<'_, Message>> = Vec::with_capacity(6);
 
-        let is_wallpaper_mode = matches!(self.categories.selected, Some(Category::Wallpapers));
-
         // 1. Preview area (always slot 1) — the multi-monitor canvas in every
         // mode (wallpaper, color, live).
         children.push(self.view_multi_monitor_canvas());
 
-        // 2. Settings list (not for wallpapers)
-        if !is_wallpaper_mode {
-            children.push(
-                container(self.view_settings_list())
-                    .width(Length::Fill)
-                    .align_x(Alignment::Center)
-                    .into(),
-            );
-        }
-
-        // 3. Library: images, live wallpapers, and colors in one grid. It
+        // 2. Library: images, live wallpapers, and colors in one grid. It
         // takes the remaining height and scrolls on its own.
         children.push(
             container(self.view_library())
@@ -2031,6 +2033,21 @@ impl cosmic::Application for GlowBerrySettings {
                 Message::ToggleContextPage(ContextPage::Settings),
             )
             .title(fl!("settings")),
+            ContextPage::Inspector => {
+                let title = match self.selection.active {
+                    Choice::Shader(idx) => self
+                        .available_shaders
+                        .get(idx)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| fl!("category-shaders")),
+                    _ => fl!("category-shaders"),
+                };
+                context_drawer::context_drawer(
+                    self.view_settings_list(),
+                    Message::ToggleContextPage(ContextPage::Inspector),
+                )
+                .title(title)
+            }
         })
     }
 
