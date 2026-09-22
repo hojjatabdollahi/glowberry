@@ -165,8 +165,8 @@ pub struct GlowBerrySettings {
     /// The help dock was closed; remembered in config
     tips_hidden: bool,
 
-    /// Which layer's context menu is showing in the canvas, and where
-    layer_context_menu: Option<(DefaultKey, (f32, f32))>,
+    /// The canvas context menu that is open, and where
+    canvas_menu: Option<(CanvasMenu, (f32, f32))>,
     /// Layers on the virtual desktop canvas: locked ones fill one display,
     /// free ones are images spanning wherever the user puts them.
     extend_layers: SlotMap<DefaultKey, ExtendLayerState>,
@@ -289,9 +289,19 @@ pub enum Message {
     PickColor(usize),
     /// Put a live wallpaper on the selected displays
     PickShader(usize),
+    /// A library card's context menu
+    Card(CardAction),
 
     /// A display was clicked in the canvas (connector, add to selection)
     DisplaySelected(String, bool),
+    /// Right-click on a display in the canvas (connector, x, y)
+    DisplayRightClick(String, f32, f32),
+    /// Remove whatever is on a display
+    DisplayClear(String),
+    /// Put what a display shows on every display
+    DisplayDuplicateAll(String),
+    /// Span the image a display shows across every display
+    DisplaySpanAll(String),
     /// Empty canvas was clicked: back to all displays
     CanvasBackgroundClicked,
     /// Select every display
@@ -332,8 +342,6 @@ pub enum Message {
     AddWallpaperFolder,
     /// Paths chosen from a picker were added as wallpaper sources
     WallpaperSourcesPicked(Vec<PathBuf>),
-    /// Remove a user-added wallpaper source by index
-    RemoveWallpaperSource(usize),
 
     /// Toggle context drawer page
     ToggleContextPage(ContextPage),
@@ -375,6 +383,8 @@ pub enum Message {
     ExtendLayerDown,
     /// Center the selected layer on the virtual desktop
     ExtendCenter,
+    /// Fit a free layer over all displays
+    ExtendLayerFit(DefaultKey),
     /// Reset canvas camera to fit all content
     ExtendFitView,
     /// Clear all layers
@@ -396,20 +406,41 @@ pub enum Message {
     Revert,
 }
 
-/// Context menu actions for wallpaper thumbnails
+/// A library item, as a copyable handle for menus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WallpaperAction {
+pub enum Item {
+    Image(DefaultKey),
+    Color(usize),
+    Shader(usize),
+}
+
+/// Context menu actions on library cards
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardAction {
+    /// Put the item on every display
+    PutOnAll(Item),
+    /// Put the item on one display (index into `monitor_geometry`)
+    PutOn(Item, usize),
+    /// Span an image across every display
+    SpanAll(DefaultKey),
     /// Remove a user-added source (index into `wallpaper_sources`).
     RemoveSource(usize),
 }
 
-impl menu::Action for WallpaperAction {
+impl menu::Action for CardAction {
     type Message = Message;
     fn message(&self) -> Message {
-        match self {
-            WallpaperAction::RemoveSource(idx) => Message::RemoveWallpaperSource(*idx),
-        }
+        Message::Card(*self)
     }
+}
+
+/// What the canvas context menu is about
+#[derive(Clone, Debug)]
+enum CanvasMenu {
+    /// A free (spanning) image layer
+    Layer(DefaultKey),
+    /// A display, including the locked item on it
+    Display(String),
 }
 
 /// Default colors shown in the library
@@ -575,7 +606,7 @@ impl cosmic::Application for GlowBerrySettings {
             inspector_open: false,
             tip_index: 0,
             tips_hidden: false,
-            layer_context_menu: None,
+            canvas_menu: None,
             extend_layers: SlotMap::new(),
             extend_layer_colors: SecondaryMap::new(),
             extend_layer_sources: SecondaryMap::new(),
@@ -711,15 +742,75 @@ impl cosmic::Application for GlowBerrySettings {
             Message::LibraryFilter(entity) => self.library_filter.activate(entity),
             Message::LibrarySearch(query) => self.library_query = query,
 
-            Message::PickImage(key) => self.pick_image(key),
+            Message::PickImage(key) => {
+                let targets = self.target_monitors();
+                let placement = self.placement();
+                self.pick_image(key, &targets, placement);
+            }
             Message::PickColor(idx) => {
-                if let Some(color) = DEFAULT_COLORS.get(idx).cloned() {
-                    self.pick_color(color);
+                let targets = self.target_monitors();
+                self.pick(Item::Color(idx), &targets, Placement::Each);
+            }
+            Message::PickShader(idx) => {
+                let targets = self.target_monitors();
+                self.pick_shader(idx, &targets);
+            }
+            Message::Card(action) => match action {
+                CardAction::PutOnAll(item) => {
+                    let all = self.monitor_geometry.clone();
+                    self.pick(item, &all, Placement::Each);
+                }
+                CardAction::PutOn(item, i) => {
+                    if let Some(m) = self.monitor_geometry.get(i).cloned() {
+                        self.pick(item, &[m], Placement::Each);
+                    }
+                }
+                CardAction::SpanAll(key) => {
+                    let all = self.monitor_geometry.clone();
+                    self.pick_image(key, &all, Placement::Span);
+                }
+                CardAction::RemoveSource(idx) => {
+                    if idx < self.wallpaper_sources.len() {
+                        self.wallpaper_sources.remove(idx);
+                        if let Some(ctx) = &self.config_context {
+                            let _ = ctx
+                                .0
+                                .set("wallpaper-sources", self.wallpaper_sources.clone());
+                        }
+                    }
+                }
+            },
+
+            Message::DisplayRightClick(name, x, y) => {
+                self.canvas_menu = Some((CanvasMenu::Display(name), (x, y)));
+            }
+
+            Message::DisplayClear(name) => {
+                self.canvas_menu = None;
+                self.remove_locked_on(&name);
+                self.renormalize_z_indices();
+            }
+
+            Message::DisplayDuplicateAll(name) => {
+                self.canvas_menu = None;
+                self.spread_display(&name, Placement::Each);
+            }
+
+            Message::DisplaySpanAll(name) => {
+                self.canvas_menu = None;
+                self.spread_display(&name, Placement::Span);
+            }
+
+            Message::ExtendLayerFit(key) => {
+                self.canvas_menu = None;
+                if let Some(mut layer) = self.extend_layers.get(key).cloned() {
+                    fit_layer_to(&mut layer, &self.monitor_geometry);
+                    self.extend_layers[key] = layer;
                 }
             }
-            Message::PickShader(idx) => self.pick_shader(idx),
 
             Message::DisplaySelected(name, additive) => {
+                self.canvas_menu = None;
                 if additive {
                     if let Some(pos) = self.selected_displays.iter().position(|n| *n == name) {
                         self.selected_displays.remove(pos);
@@ -734,7 +825,7 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::CanvasBackgroundClicked => {
                 self.extend_selected_layer = None;
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 self.selected_displays.clear();
                 self.sync_choice_to_targets();
             }
@@ -760,7 +851,8 @@ impl cosmic::Application for GlowBerrySettings {
                 if let Some(Shown::Image { path, .. }) = self.shared_shown(&targets)
                     && let Some((key, _)) = self.selection.paths.iter().find(|(_, p)| **p == path)
                 {
-                    self.pick_image(key);
+                    let placement = self.placement();
+                    self.pick_image(key, &targets, placement);
                 }
             }
 
@@ -956,17 +1048,6 @@ impl cosmic::Application for GlowBerrySettings {
                 }
             }
 
-            Message::RemoveWallpaperSource(idx) => {
-                if idx < self.wallpaper_sources.len() {
-                    self.wallpaper_sources.remove(idx);
-                    if let Some(ctx) = &self.config_context {
-                        let _ = ctx
-                            .0
-                            .set("wallpaper-sources", self.wallpaper_sources.clone());
-                    }
-                }
-            }
-
             Message::ToggleContextPage(page) => {
                 if self.context_page == page {
                     self.set_show_context(!self.core.window.show_context);
@@ -1121,20 +1202,20 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ExtendRemoveLayer(key) => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 self.remove_layer(key);
                 self.renormalize_z_indices();
             }
 
             Message::ExtendLayerMoved(key, x, y) => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 if let Some(layer) = self.extend_layers.get_mut(key) {
                     layer.offset = (x, y);
                 }
             }
 
             Message::ExtendLayerScaled(key, scale) => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 if let Some(layer) = self.extend_layers.get_mut(key) {
                     layer.scale = scale;
                 }
@@ -1142,7 +1223,7 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::ExtendLayerSelected(maybe_key) => {
                 self.extend_selected_layer = maybe_key;
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
             }
 
             Message::ExtendLayerUp => {
@@ -1182,20 +1263,20 @@ impl cosmic::Application for GlowBerrySettings {
                 if self.extend_layers.get(key).is_some_and(|l| !l.locked) {
                     self.extend_selected_layer = Some(key);
                 }
-                self.layer_context_menu = Some((key, (x, y)));
+                self.canvas_menu = Some((CanvasMenu::Layer(key), (x, y)));
             }
 
             Message::ExtendLayerMenuClose => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
             }
 
             Message::ExtendLayerBringForward(key) => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 self.swap_z(key, true);
             }
 
             Message::ExtendLayerSendBack(key) => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 self.swap_z(key, false);
             }
 
@@ -1443,11 +1524,23 @@ impl GlowBerrySettings {
         z
     }
 
-    fn pick_image(&mut self, key: DefaultKey) {
+    /// Put a library item on `targets`.
+    fn pick(&mut self, item: Item, targets: &[MonitorGeometry], placement: Placement) {
+        match item {
+            Item::Image(key) => self.pick_image(key, targets, placement),
+            Item::Color(idx) => {
+                if let Some(color) = DEFAULT_COLORS.get(idx).cloned() {
+                    self.pick_color(color, targets);
+                }
+            }
+            Item::Shader(idx) => self.pick_shader(idx, targets),
+        }
+    }
+
+    fn pick_image(&mut self, key: DefaultKey, targets: &[MonitorGeometry], placement: Placement) {
         let Some(path) = self.selection.paths.get(key).cloned() else {
             return;
         };
-        let targets = self.target_monitors();
         if targets.is_empty() {
             return;
         }
@@ -1459,10 +1552,10 @@ impl GlowBerrySettings {
         let size = image::image_dimensions(&path).unwrap_or((800, 600));
         self.selection.active = Choice::Wallpaper(key);
 
-        for m in &targets {
+        for m in targets {
             self.remove_locked_on(&m.name);
         }
-        if self.placement() == Placement::Span {
+        if placement == Placement::Span {
             let z = self.next_z();
             let mut layer = ExtendLayerState {
                 source_path: path,
@@ -1474,11 +1567,11 @@ impl GlowBerrySettings {
                 locked: false,
                 target_output: None,
             };
-            fit_layer_to(&mut layer, &targets);
+            fit_layer_to(&mut layer, targets);
             let k = self.extend_layers.insert(layer);
             self.extend_selected_layer = Some(k);
         } else {
-            for m in &targets {
+            for m in targets {
                 self.insert_locked_item(
                     m,
                     None,
@@ -1493,10 +1586,9 @@ impl GlowBerrySettings {
         self.after_pick();
     }
 
-    fn pick_color(&mut self, color: Color) {
-        let targets = self.target_monitors();
+    fn pick_color(&mut self, color: Color, targets: &[MonitorGeometry]) {
         self.selection.active = Choice::Color(color.clone());
-        for m in &targets {
+        for m in targets {
             self.remove_locked_on(&m.name);
             self.insert_locked_item(
                 m,
@@ -1511,17 +1603,16 @@ impl GlowBerrySettings {
         self.after_pick();
     }
 
-    fn pick_shader(&mut self, idx: usize) {
+    fn pick_shader(&mut self, idx: usize, targets: &[MonitorGeometry]) {
         if idx >= self.available_shaders.len() {
             return;
         }
-        let targets = self.target_monitors();
         self.selection.active = Choice::Shader(idx);
         let Some(source) = self.build_active_source() else {
             return;
         };
         let handle = self.shader_thumbnails.get(idx).cloned();
-        for m in &targets {
+        for m in targets {
             self.remove_locked_on(&m.name);
             self.insert_locked_item(
                 m,
@@ -1536,10 +1627,39 @@ impl GlowBerrySettings {
         self.after_pick();
     }
 
+    /// Put what one display shows on every display, side by side or spanned.
+    fn spread_display(&mut self, connector: &str, placement: Placement) {
+        let Some(m) = self
+            .monitor_geometry
+            .iter()
+            .find(|m| m.name == connector)
+            .cloned()
+        else {
+            return;
+        };
+        let all = self.monitor_geometry.clone();
+        match self.shown_on(&m) {
+            Shown::Image { path, .. } => {
+                let key = self
+                    .selection
+                    .paths
+                    .iter()
+                    .find(|(_, p)| **p == path)
+                    .map(|(k, _)| k);
+                if let Some(key) = key {
+                    self.pick_image(key, &all, placement);
+                }
+            }
+            Shown::Color(c) => self.pick_color(c, &all),
+            Shown::Shader(idx) => self.pick_shader(idx, &all),
+            Shown::Nothing => {}
+        }
+    }
+
     fn after_pick(&mut self) {
         self.prune_hidden_free_layers();
         self.renormalize_z_indices();
-        self.layer_context_menu = None;
+        self.canvas_menu = None;
     }
 
     /// Insert one locked item filling `monitor` (colors fill exactly;
@@ -1985,7 +2105,7 @@ impl GlowBerrySettings {
         self.extend_layer_sources.clear();
         self.extend_layer_fit.clear();
         self.extend_selected_layer = None;
-        self.layer_context_menu = None;
+        self.canvas_menu = None;
         self.extend_next_z = 0;
 
         for saved in self.extend_config.layers.clone() {
@@ -2530,6 +2650,7 @@ impl GlowBerrySettings {
             Message::ExtendLayerSelected,
         )
         .on_display_click(Message::DisplaySelected)
+        .on_display_right_click(Message::DisplayRightClick)
         .on_background_click(Message::CanvasBackgroundClicked)
         .on_right_click(Message::ExtendLayerRightClick)
         .fit_requested(self.extend_fit_view_requested);
@@ -2622,39 +2743,88 @@ impl GlowBerrySettings {
         }
         let canvas: Element<'_, Message> = stack.width(Length::Fill).height(Length::Fill).into();
 
-        // Right-click menu on a layer.
+        // Context menu on a display or on a free layer.
         let mut popover = widget::popover(canvas);
-        if let Some((key, (cx, cy))) = self.layer_context_menu {
-            let locked = self.extend_layers.get(key).is_some_and(|l| l.locked);
-            let mut items: Vec<Element<'_, Message>> = Vec::new();
-            if !locked {
-                items.push(
-                    button::text(fl!("ctx-bring-forward"))
-                        .on_press(Message::ExtendLayerBringForward(key))
-                        .width(Length::Fill)
-                        .into(),
-                );
-                items.push(
-                    button::text(fl!("ctx-send-back"))
-                        .on_press(Message::ExtendLayerSendBack(key))
-                        .width(Length::Fill)
-                        .into(),
-                );
-                items.push(widget::divider::horizontal::light().into());
-            }
-            items.push(
-                button::text(fl!("ctx-remove"))
-                    .on_press(Message::ExtendRemoveLayer(key))
+        if let Some((menu, (cx, cy))) = &self.canvas_menu {
+            // Flat rows like a real menu; the destructive one only tints its label.
+            let entry = |label: String, msg: Message| -> Element<'_, Message> {
+                button::custom(text::body(label))
+                    .on_press(msg)
                     .width(Length::Fill)
-                    .class(cosmic::theme::Button::Destructive)
-                    .into(),
-            );
+                    .padding([8, 12])
+                    .class(cosmic::theme::Button::MenuItem)
+                    .into()
+            };
+            let danger = |label: String, msg: Message| -> Element<'_, Message> {
+                let red: cosmic::iced::Color =
+                    cosmic::theme::active().cosmic().destructive.base.into();
+                button::custom(text::body(label).class(cosmic::theme::Text::Color(red)))
+                    .on_press(msg)
+                    .width(Length::Fill)
+                    .padding([8, 12])
+                    .class(cosmic::theme::Button::MenuItem)
+                    .into()
+            };
+            let many = self.monitor_geometry.len() > 1;
+            let mut items: Vec<Element<'_, Message>> = Vec::new();
+            match menu {
+                CanvasMenu::Layer(key) => {
+                    items.push(entry(
+                        fl!("ctx-bring-forward"),
+                        Message::ExtendLayerBringForward(*key),
+                    ));
+                    items.push(entry(
+                        fl!("ctx-send-back"),
+                        Message::ExtendLayerSendBack(*key),
+                    ));
+                    items.push(entry(fl!("ctx-fit"), Message::ExtendLayerFit(*key)));
+                    items.push(widget::divider::horizontal::light().into());
+                    items.push(danger(fl!("ctx-remove"), Message::ExtendRemoveLayer(*key)));
+                }
+                CanvasMenu::Display(name) => {
+                    let shown = self
+                        .monitor_geometry
+                        .iter()
+                        .find(|m| m.name == *name)
+                        .map_or(Shown::Nothing, |m| self.shown_on(m));
+                    items.push(entry(
+                        fl!("ctx-select"),
+                        Message::DisplaySelected(name.clone(), false),
+                    ));
+                    if many {
+                        items.push(entry(
+                            fl!("ctx-add-selection"),
+                            Message::DisplaySelected(name.clone(), true),
+                        ));
+                    }
+                    if many && shown != Shown::Nothing {
+                        items.push(widget::divider::horizontal::light().into());
+                        items.push(entry(
+                            fl!("ctx-duplicate-all"),
+                            Message::DisplayDuplicateAll(name.clone()),
+                        ));
+                        if matches!(shown, Shown::Image { .. }) {
+                            items.push(entry(
+                                fl!("ctx-span-all"),
+                                Message::DisplaySpanAll(name.clone()),
+                            ));
+                        }
+                    }
+                    if shown != Shown::Nothing {
+                        items.push(widget::divider::horizontal::light().into());
+                        items.push(danger(
+                            fl!("ctx-clear-display"),
+                            Message::DisplayClear(name.clone()),
+                        ));
+                    }
+                }
+            }
 
             let popup = container(
                 widget::column::with_children(items)
                     .spacing(2)
                     .padding(8)
-                    .width(Length::Fixed(200.0)),
+                    .width(Length::Fixed(220.0)),
             )
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
@@ -2685,8 +2855,8 @@ impl GlowBerrySettings {
             popover = popover
                 .popup(popup)
                 .position(widget::popover::Position::Point(cosmic::iced::Point {
-                    x: cx,
-                    y: cy,
+                    x: *cx,
+                    y: *cy,
                 }))
                 .on_close(Message::ExtendLayerMenuClose);
         }
@@ -3165,6 +3335,33 @@ impl GlowBerrySettings {
             .into()
     }
 
+    /// Context menu shared by every library card: put the item on all
+    /// displays, on one of them, or (images) span it across all of them.
+    fn card_menu(&self, item: Item) -> Vec<menu::Item<CardAction, String>> {
+        let mut items = vec![menu::Item::Button(
+            fl!("put-on-all"),
+            None,
+            CardAction::PutOnAll(item),
+        )];
+        if self.monitor_geometry.len() > 1 {
+            for (i, m) in self.monitor_geometry.iter().enumerate() {
+                items.push(menu::Item::Button(
+                    fl!("put-on", display = m.name.clone()),
+                    None,
+                    CardAction::PutOn(item, i),
+                ));
+            }
+            if let Item::Image(key) = item {
+                items.push(menu::Item::Button(
+                    fl!("span-all"),
+                    None,
+                    CardAction::SpanAll(key),
+                ));
+            }
+        }
+        items
+    }
+
     fn wallpaper_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
         self.selection
             .selection_handles
@@ -3180,24 +3377,17 @@ impl GlowBerrySettings {
                     self.staged_badge(|s| matches!(s, Shown::Image { path: p, .. } if p == path));
                 let card = library_card(card_thumb(thumb, None, on.map(accent_pill), None), name);
 
-                // Right-click: remove a user-added source (not the bundled ones).
-                match self.wallpaper_source_index_for(path) {
-                    Some(src_idx) => Some(
-                        widget::context_menu(
-                            card,
-                            Some(menu::items(
-                                &HashMap::new(),
-                                vec![menu::Item::Button(
-                                    fl!("wp-remove-source"),
-                                    None,
-                                    WallpaperAction::RemoveSource(src_idx),
-                                )],
-                            )),
-                        )
-                        .into(),
-                    ),
-                    None => Some(card),
+                let mut items = self.card_menu(Item::Image(id));
+                // User-added sources can be removed again; bundled ones can't.
+                if let Some(src_idx) = self.wallpaper_source_index_for(path) {
+                    items.push(menu::Item::Divider);
+                    items.push(menu::Item::Button(
+                        fl!("wp-remove-source"),
+                        None,
+                        CardAction::RemoveSource(src_idx),
+                    ));
                 }
+                Some(widget::context_menu(card, Some(menu::items(&HashMap::new(), items))).into())
             })
             .collect()
     }
@@ -3219,10 +3409,9 @@ impl GlowBerrySettings {
                 .class(button::ButtonClass::Image)
                 .on_press(Message::PickColor(idx));
                 let on = self.staged_badge(|s| matches!(s, Shown::Color(c) if c == color));
-                Some(library_card(
-                    card_thumb(swatch, None, on.map(accent_pill), None),
-                    name,
-                ))
+                let card = library_card(card_thumb(swatch, None, on.map(accent_pill), None), name);
+                let items = self.card_menu(Item::Color(idx));
+                Some(widget::context_menu(card, Some(menu::items(&HashMap::new(), items))).into())
             })
             .collect()
     }
@@ -3242,10 +3431,12 @@ impl GlowBerrySettings {
                 let load = info
                     .load
                     .map(|l| dark_pill(fl!("gpu-pill", load = load_label(l))));
-                Some(library_card(
+                let card = library_card(
                     card_thumb(thumb, Some(live_badge()), on.map(accent_pill), load),
                     info.name.clone(),
-                ))
+                );
+                let items = self.card_menu(Item::Shader(idx));
+                Some(widget::context_menu(card, Some(menu::items(&HashMap::new(), items))).into())
             })
             .collect()
     }

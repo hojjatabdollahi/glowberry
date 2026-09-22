@@ -107,3 +107,14 @@ tip-5 = Scroll on the canvas to zoom and drag the background to pan. The fit but
 tip-6 = Right-click something on the canvas to bring it forward, send it back, or remove it.
 tip-next = Next tip
 tip-hide = Hide tips
+
+# Context menus
+put-on-all = Put on all displays
+put-on = Put on { $display }
+span-all = Span across all displays
+ctx-select = Select
+ctx-add-selection = Add to selection
+ctx-duplicate-all = Duplicate on all displays
+ctx-span-all = Span across all displays
+ctx-clear-display = Clear display
+ctx-fit = Fit to all displays

@@ -78,6 +78,7 @@ pub struct ExtendEditor<'a, Message> {
     on_scale: Box<dyn Fn(DefaultKey, f64) -> Message + 'a>,
     on_select: Box<dyn Fn(Option<DefaultKey>) -> Message + 'a>,
     on_display_click: Option<Box<dyn Fn(String, bool) -> Message + 'a>>,
+    on_display_right_click: Option<Box<dyn Fn(String, f32, f32) -> Message + 'a>>,
     on_background_click: Option<Message>,
     on_right_click: Option<Box<dyn Fn(DefaultKey, f32, f32) -> Message + 'a>>,
     fit_requested: bool,
@@ -102,6 +103,7 @@ impl<'a, Message> ExtendEditor<'a, Message> {
             on_scale: Box::new(on_scale),
             on_select: Box::new(on_select),
             on_display_click: None,
+            on_display_right_click: None,
             on_background_click: None,
             on_right_click: None,
             fit_requested: false,
@@ -114,6 +116,13 @@ impl<'a, Message> ExtendEditor<'a, Message> {
     /// is true while Ctrl or Shift is held.
     pub fn on_display_click(mut self, f: impl Fn(String, bool) -> Message + 'a) -> Self {
         self.on_display_click = Some(Box::new(f));
+        self
+    }
+
+    /// Called when a display (or the locked item on it) is right-clicked:
+    /// `(connector, x, y)` with the position relative to the widget.
+    pub fn on_display_right_click(mut self, f: impl Fn(String, f32, f32) -> Message + 'a) -> Self {
+        self.on_display_right_click = Some(Box::new(f));
         self
     }
 
@@ -655,29 +664,46 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 }
             }
 
-            // Right click on layers
+            // Right click: a free layer gets the layer menu, anything else
+            // over a display gets the display menu.
             core::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                if let Some(position) = cursor.position_in(bounds)
-                    && let Some(on_right_click) = &self.on_right_click
-                {
+                if let Some(position) = cursor.position_in(bounds) {
                     let state = tree.state.downcast_ref::<State>();
                     let abs_pos = Point {
                         x: bounds.x + position.x,
                         y: bounds.y + position.y,
                     };
-
-                    let locked: Vec<&LayerView> = self.layers.iter().filter(|l| l.locked).collect();
-                    let mut unlocked: Vec<&LayerView> =
+                    let display = self
+                        .monitors
+                        .iter()
+                        .find(|m| monitor_widget_rect(state, m, &bounds).contains(abs_pos))
+                        .map(|m| m.name.clone());
+                    let over_locked = display.as_deref().is_some_and(|d| {
+                        self.layers
+                            .iter()
+                            .any(|l| l.locked && l.target_output == Some(d))
+                    });
+                    let mut free: Vec<&LayerView> =
                         self.layers.iter().filter(|l| !l.locked).collect();
-                    unlocked.sort_by_key(|l| std::cmp::Reverse(l.z_index));
+                    free.sort_by_key(|l| std::cmp::Reverse(l.z_index));
+                    let free_hit = if over_locked {
+                        None
+                    } else {
+                        free.iter()
+                            .find(|l| layer_widget_rect(state, l, &bounds).contains(abs_pos))
+                            .map(|l| l.id)
+                    };
 
-                    for layer in locked.iter().chain(unlocked.iter()) {
-                        let rect = layer_hit_rect(state, layer, self.monitors, &bounds);
-                        if rect.contains(abs_pos) {
-                            shell.publish(on_right_click(layer.id, position.x, position.y));
-                            shell.capture_event();
-                            break;
-                        }
+                    if let Some(id) = free_hit
+                        && let Some(on_right_click) = &self.on_right_click
+                    {
+                        shell.publish(on_right_click(id, position.x, position.y));
+                        shell.capture_event();
+                    } else if let Some(name) = display
+                        && let Some(on_display_right_click) = &self.on_display_right_click
+                    {
+                        shell.publish(on_display_right_click(name, position.x, position.y));
+                        shell.capture_event();
                     }
                 }
             }
