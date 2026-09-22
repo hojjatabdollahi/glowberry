@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! The display canvas: the connected displays drawn at their real positions,
+//! with the staged content on top. Clicking a display selects it; free
+//! (spanning) image layers can be dragged and resized.
+
 use crate::monitor_query::MonitorGeometry;
 use cosmic::Renderer;
 use cosmic::iced::core::renderer::Quad;
@@ -8,12 +12,13 @@ use cosmic::iced::core::{
     self as core, Border, Clipboard, Element, Layout, Length, Rectangle, Renderer as IcedRenderer,
     Shell, Size, Widget,
 };
-use cosmic::iced::core::{Point, layout, mouse, renderer};
+use cosmic::iced::core::{Point, keyboard, layout, mouse, renderer};
 use cosmic::iced::widget::image::Handle as ImageHandle;
 use slotmap::DefaultKey;
 
 const PADDING: f32 = 10.0;
 const MONITOR_CORNER_RADIUS: f32 = 4.0;
+const MONITOR_BORDER_WIDTH: f32 = 1.5;
 const SELECTION_BORDER_WIDTH: f32 = 2.5;
 const HANDLE_SIZE: f32 = 12.0;
 const HANDLE_HIT_SIZE: f32 = 16.0;
@@ -27,15 +32,19 @@ pub struct LayerView<'a> {
     pub offset_y: f64,
     pub img_scale: f64,
     pub z_index: usize,
+    /// Only free layers can be selected; locked ones belong to their display.
     pub selected: bool,
+    /// Locked layers fill one display and are not draggable.
     pub locked: bool,
-    /// For color items (color/live modes): fill this layer with a solid color
-    /// or gradient instead of an image.
+    /// The display a locked layer belongs to; it is clipped to that display.
+    pub target_output: Option<&'a str>,
+    /// For color items: fill this layer with a solid color or gradient
+    /// instead of an image.
     pub color: Option<&'a glowberry_config::Color>,
 }
 
 /// Build a fill background for a color item (solid or gradient), applying the
-/// given opacity. Mirrors the gradient construction used by the flat preview.
+/// given opacity. Mirrors the gradient construction used by the library swatch.
 fn color_background(color: &glowberry_config::Color, opacity: f32) -> cosmic::iced::Background {
     use cosmic::iced::{Background, Color as IcedColor, Degrees, Gradient, gradient::Linear};
     match color {
@@ -55,29 +64,17 @@ fn color_background(color: &glowberry_config::Color, opacity: f32) -> cosmic::ic
     }
 }
 
-// Bezel shades for the 3D bevel, lit from the top-left. Even the darkest shade
-// stays well above black so the frame is visible against any image.
-const BEZEL_LIGHT: [f32; 3] = [0.42, 0.42, 0.45];
-const BEZEL_MID: [f32; 3] = [0.20, 0.20, 0.22];
-const BEZEL_DARK: [f32; 3] = [0.10, 0.10, 0.11];
-
-/// Linear-gradient fill for one bezel side, giving a beveled 3D look. `angle_deg`
-/// follows iced/CSS (0° = up, clockwise); stop 0 is `a`, stop 1 is `b`.
-fn bezel_gradient(angle_deg: f32, a: [f32; 3], b: [f32; 3]) -> cosmic::iced::Background {
-    use cosmic::iced::{Background, Color as IcedColor, Degrees, Gradient, gradient::Linear};
-    let linear = Linear::new(Degrees(angle_deg))
-        .add_stop(0.0, IcedColor::from_rgb(a[0], a[1], a[2]))
-        .add_stop(1.0, IcedColor::from_rgb(b[0], b[1], b[2]));
-    Background::Gradient(Gradient::Linear(linear))
-}
-
 #[allow(clippy::type_complexity)]
 pub struct ExtendEditor<'a, Message> {
     monitors: &'a [MonitorGeometry],
     layers: Vec<LayerView<'a>>,
+    /// Connector names of the selected displays (empty = all).
+    selected_displays: &'a [String],
     on_move: Box<dyn Fn(DefaultKey, f64, f64) -> Message + 'a>,
     on_scale: Box<dyn Fn(DefaultKey, f64) -> Message + 'a>,
     on_select: Box<dyn Fn(Option<DefaultKey>) -> Message + 'a>,
+    on_display_click: Option<Box<dyn Fn(String, bool) -> Message + 'a>>,
+    on_background_click: Option<Message>,
     on_right_click: Option<Box<dyn Fn(DefaultKey, f32, f32) -> Message + 'a>>,
     fit_requested: bool,
     width: Length,
@@ -88,6 +85,7 @@ impl<'a, Message> ExtendEditor<'a, Message> {
     pub fn new(
         monitors: &'a [MonitorGeometry],
         layers: Vec<LayerView<'a>>,
+        selected_displays: &'a [String],
         on_move: impl Fn(DefaultKey, f64, f64) -> Message + 'a,
         on_scale: impl Fn(DefaultKey, f64) -> Message + 'a,
         on_select: impl Fn(Option<DefaultKey>) -> Message + 'a,
@@ -95,14 +93,30 @@ impl<'a, Message> ExtendEditor<'a, Message> {
         Self {
             monitors,
             layers,
+            selected_displays,
             on_move: Box::new(on_move),
             on_scale: Box::new(on_scale),
             on_select: Box::new(on_select),
+            on_display_click: None,
+            on_background_click: None,
             on_right_click: None,
             fit_requested: false,
             width: Length::Fill,
-            height: Length::Fixed(400.0),
+            height: Length::Fill,
         }
+    }
+
+    /// Called when a display is clicked: `(connector, additive)`. `additive`
+    /// is true while Ctrl or Shift is held.
+    pub fn on_display_click(mut self, f: impl Fn(String, bool) -> Message + 'a) -> Self {
+        self.on_display_click = Some(Box::new(f));
+        self
+    }
+
+    /// Emitted when the empty canvas is clicked.
+    pub fn on_background_click(mut self, message: Message) -> Self {
+        self.on_background_click = Some(message);
+        self
     }
 
     pub fn on_right_click(mut self, f: impl Fn(DefaultKey, f32, f32) -> Message + 'a) -> Self {
@@ -132,6 +146,7 @@ struct State {
     drag_start: Point,
     offset_at_drag_start: (f64, f64),
     scale_at_drag_start: f64,
+    modifiers: keyboard::Modifiers,
     // Camera state (persistent, not recomputed each frame)
     camera_zoom: f32,
     camera_pan: (f32, f32),
@@ -159,6 +174,7 @@ impl Default for State {
             drag_start: Point::ORIGIN,
             offset_at_drag_start: (0.0, 0.0),
             scale_at_drag_start: 1.0,
+            modifiers: keyboard::Modifiers::default(),
             camera_zoom: 1.0,
             camera_pan: (0.0, 0.0),
             camera_initialized: false,
@@ -239,6 +255,34 @@ fn layer_widget_rect(state: &State, layer: &LayerView, bounds: &Rectangle) -> Re
         width: lw as f32 * state.camera_zoom,
         height: lh as f32 * state.camera_zoom,
     }
+}
+
+fn monitor_widget_rect(state: &State, monitor: &MonitorGeometry, bounds: &Rectangle) -> Rectangle {
+    let (mx, my) = state.virtual_to_widget(monitor.position.0 as f64, monitor.position.1 as f64);
+    Rectangle {
+        x: bounds.x + mx,
+        y: bounds.y + my,
+        width: monitor.logical_size.0 as f32 * state.camera_zoom,
+        height: monitor.logical_size.1 as f32 * state.camera_zoom,
+    }
+}
+
+/// Where a layer is drawn and hit-tested: free layers use their own rect,
+/// locked ones the rect of the display they fill.
+fn layer_hit_rect(
+    state: &State,
+    layer: &LayerView,
+    monitors: &[MonitorGeometry],
+    bounds: &Rectangle,
+) -> Rectangle {
+    if layer.locked
+        && let Some(m) = layer
+            .target_output
+            .and_then(|name| monitors.iter().find(|m| m.name == name))
+    {
+        return monitor_widget_rect(state, m, bounds);
+    }
+    layer_widget_rect(state, layer, bounds)
 }
 
 fn corner_hit_rect(cx: f32, cy: f32) -> Rectangle {
@@ -396,7 +440,11 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
         let bounds = layout.bounds();
 
         match event {
-            // Left click: select/move/resize layers
+            core::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                tree.state.downcast_mut::<State>().modifiers = *modifiers;
+            }
+
+            // Left click: select a display, or grab a free layer
             core::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(position) = cursor.position_in(bounds) {
                     let state = tree.state.downcast_mut::<State>();
@@ -405,7 +453,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                         y: bounds.y + position.y,
                     };
 
-                    // Check resize handles on selected unlocked layer
+                    // Resize handles on the selected free layer win over everything.
                     if let Some(selected) = self.layers.iter().find(|l| l.selected && !l.locked) {
                         let rect = layer_widget_rect(state, selected, &bounds);
                         if let Some(mode) = hit_test_handles(&rect, abs_pos) {
@@ -419,40 +467,57 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                         }
                     }
 
-                    // Hit-test layers
-                    let locked: Vec<&LayerView> = self.layers.iter().filter(|l| l.locked).collect();
-                    let mut unlocked: Vec<&LayerView> =
+                    let display = self
+                        .monitors
+                        .iter()
+                        .find(|m| monitor_widget_rect(state, m, &bounds).contains(abs_pos))
+                        .map(|m| m.name.clone());
+                    let over_locked = display.as_deref().is_some_and(|d| {
+                        self.layers
+                            .iter()
+                            .any(|l| l.locked && l.target_output == Some(d))
+                    });
+                    // Topmost free layer under the cursor, unless a locked item hides it.
+                    let mut free: Vec<&LayerView> =
                         self.layers.iter().filter(|l| !l.locked).collect();
-                    unlocked.sort_by_key(|l| std::cmp::Reverse(l.z_index));
-
-                    let mut hit = None;
-                    for layer in locked.iter().chain(unlocked.iter()) {
-                        let rect = layer_widget_rect(state, layer, &bounds);
-                        if rect.contains(abs_pos) {
-                            hit = Some((layer.id, layer.locked));
-                            break;
-                        }
-                    }
-
-                    if let Some((layer_id, is_locked)) = hit {
-                        if !is_locked
-                            && let Some(layer) = self.layers.iter().find(|l| l.id == layer_id)
-                        {
-                            state.drag_mode = Some(DragMode::MoveLayer);
-                            state.dragging_layer = Some(layer_id);
-                            state.drag_start = position;
-                            state.offset_at_drag_start = (layer.offset_x, layer.offset_y);
-                            state.scale_at_drag_start = layer.img_scale;
-                        }
-                        shell.publish((self.on_select)(Some(layer_id)));
+                    free.sort_by_key(|l| std::cmp::Reverse(l.z_index));
+                    let grabbed = if over_locked {
+                        None
                     } else {
-                        // Empty area: deselect and start panning the camera so a
-                        // click-drag on the background moves the view.
-                        state.drag_mode = Some(DragMode::PanCamera);
-                        state.dragging_layer = None;
-                        state.drag_start = position;
-                        state.camera_pan_start = state.camera_pan;
-                        shell.publish((self.on_select)(None));
+                        free.iter()
+                            .find(|l| layer_widget_rect(state, l, &bounds).contains(abs_pos))
+                            .map(|l| (l.id, l.offset_x, l.offset_y, l.img_scale))
+                    };
+                    let additive = state.modifiers.control() || state.modifiers.shift();
+
+                    if let Some(name) = &display
+                        && let Some(on_display_click) = &self.on_display_click
+                    {
+                        shell.publish(on_display_click(name.clone(), additive));
+                    }
+                    match grabbed {
+                        Some((id, ox, oy, scale)) => {
+                            state.drag_mode = Some(DragMode::MoveLayer);
+                            state.dragging_layer = Some(id);
+                            state.drag_start = position;
+                            state.offset_at_drag_start = (ox, oy);
+                            state.scale_at_drag_start = scale;
+                            shell.publish((self.on_select)(Some(id)));
+                        }
+                        None if display.is_some() => {
+                            shell.publish((self.on_select)(None));
+                        }
+                        None => {
+                            // Empty area: back to all displays and start panning
+                            // so a click-drag on the background moves the view.
+                            state.drag_mode = Some(DragMode::PanCamera);
+                            state.dragging_layer = None;
+                            state.drag_start = position;
+                            state.camera_pan_start = state.camera_pan;
+                            if let Some(msg) = &self.on_background_click {
+                                shell.publish(msg.clone());
+                            }
+                        }
                     }
                     shell.capture_event();
                 }
@@ -484,6 +549,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                         DragMode::PanCamera => {
                             state.camera_pan =
                                 (state.camera_pan_start.0 + dx, state.camera_pan_start.1 + dy);
+                            shell.request_redraw();
                             shell.capture_event();
                         }
                         DragMode::MoveLayer => {
@@ -580,6 +646,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     state.camera_zoom = new_zoom;
                     state.user_adjusted = true;
 
+                    shell.request_redraw();
                     shell.capture_event();
                 }
             }
@@ -601,7 +668,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     unlocked.sort_by_key(|l| std::cmp::Reverse(l.z_index));
 
                     for layer in locked.iter().chain(unlocked.iter()) {
-                        let rect = layer_widget_rect(state, layer, &bounds);
+                        let rect = layer_hit_rect(state, layer, self.monitors, &bounds);
                         if rect.contains(abs_pos) {
                             shell.publish(on_right_click(layer.id, position.x, position.y));
                             shell.capture_event();
@@ -628,14 +695,11 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
 
         if let Some(mode) = state.drag_mode {
             return match mode {
-                DragMode::MoveLayer => mouse::Interaction::Grabbing,
-                DragMode::PanCamera => mouse::Interaction::Grabbing,
-                DragMode::ResizeNW | DragMode::ResizeSE => {
-                    mouse::Interaction::ResizingDiagonallyDown
-                }
-                DragMode::ResizeNE | DragMode::ResizeSW => {
-                    mouse::Interaction::ResizingDiagonallyDown
-                }
+                DragMode::MoveLayer | DragMode::PanCamera => mouse::Interaction::Grabbing,
+                DragMode::ResizeNW
+                | DragMode::ResizeSE
+                | DragMode::ResizeNE
+                | DragMode::ResizeSW => mouse::Interaction::ResizingDiagonallyDown,
             };
         }
 
@@ -652,14 +716,23 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 }
             }
 
-            for layer in &self.layers {
-                let rect = layer_widget_rect(state, layer, &bounds);
-                if rect.contains(abs_pos) {
-                    if layer.locked {
-                        return mouse::Interaction::NotAllowed;
-                    }
-                    return mouse::Interaction::Grab;
-                }
+            let over_locked = self.layers.iter().any(|l| {
+                l.locked && layer_hit_rect(state, l, self.monitors, &bounds).contains(abs_pos)
+            });
+            if !over_locked
+                && self
+                    .layers
+                    .iter()
+                    .any(|l| !l.locked && layer_widget_rect(state, l, &bounds).contains(abs_pos))
+            {
+                return mouse::Interaction::Grab;
+            }
+            if self
+                .monitors
+                .iter()
+                .any(|m| monitor_widget_rect(state, m, &bounds).contains(abs_pos))
+            {
+                return mouse::Interaction::Pointer;
             }
             // Empty area is pannable.
             return mouse::Interaction::Grab;
@@ -682,35 +755,33 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
         let theme = cosmic::theme::active();
         let cosmic_theme = theme.cosmic();
 
-        // Widget background
-        renderer.fill_quad(
-            Quad {
-                bounds,
-                border: Border {
-                    color: cosmic_theme.palette.neutral_5.into(),
-                    radius: 8.0.into(),
-                    width: 1.0,
-                },
-                shadow: Default::default(),
-                snap: true,
-            },
-            core::Background::Color(cosmic_theme.palette.neutral_2.into()),
-        );
-
         // Clip all content to widget bounds
         renderer.with_layer(bounds, |renderer| {
-            // Draw unlocked layers first (by z_index), then locked on top
+            // Draw free layers first (by z_index), then locked on top
             let mut unlocked: Vec<&LayerView> = self.layers.iter().filter(|l| !l.locked).collect();
             unlocked.sort_by_key(|l| l.z_index);
             let locked: Vec<&LayerView> = self.layers.iter().filter(|l| l.locked).collect();
 
-            // 1. Draw layer images (unlocked by z, then locked)
+            // 1. Layer images
             for layer in unlocked.iter().chain(locked.iter()) {
                 let layer_rect = layer_widget_rect(state, layer, &bounds);
-                let opacity = if layer.selected { 1.0 } else { 0.75 };
+                let opacity = if layer.locked || layer.selected {
+                    1.0
+                } else {
+                    0.85
+                };
+                // Locked items are cover-fit, so they overflow their display;
+                // clip them to it.
+                let clip = if layer.locked {
+                    layer_hit_rect(state, layer, self.monitors, &bounds)
+                        .intersection(&bounds)
+                        .unwrap_or_default()
+                } else {
+                    bounds
+                };
 
                 if let Some(color) = layer.color {
-                    if let Some(clipped) = layer_rect.intersection(&bounds) {
+                    if let Some(clipped) = layer_rect.intersection(&clip) {
                         renderer.fill_quad(
                             Quad {
                                 bounds: clipped,
@@ -734,9 +805,9 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                             snap: true,
                         },
                         layer_rect,
-                        bounds,
+                        clip,
                     );
-                } else if let Some(clipped) = layer_rect.intersection(&bounds) {
+                } else if let Some(clipped) = layer_rect.intersection(&clip) {
                     let mut c = cosmic_theme.palette.neutral_6;
                     c.alpha = opacity * 0.5;
                     renderer.fill_quad(
@@ -751,210 +822,70 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                 }
             }
 
-            // 2. Draw selection borders, resize handles, and lock badges
-            for layer in unlocked.iter().chain(locked.iter()) {
+            // 2. Selection border and resize handles on the selected free layer
+            for layer in unlocked.iter().filter(|l| l.selected) {
                 let layer_rect = layer_widget_rect(state, layer, &bounds);
-
-                if layer.selected {
-                    let border_color = if layer.locked {
-                        cosmic_theme.palette.neutral_7
-                    } else {
-                        cosmic_theme.accent_color()
-                    };
-                    if let Some(clipped) = layer_rect.intersection(&bounds) {
-                        renderer.fill_quad(
-                            Quad {
-                                bounds: clipped,
-                                border: Border {
-                                    color: border_color.into(),
-                                    radius: 0.0.into(),
-                                    width: SELECTION_BORDER_WIDTH,
-                                },
-                                shadow: Default::default(),
-                                snap: true,
+                let accent = cosmic_theme.accent_color();
+                if let Some(clipped) = layer_rect.intersection(&bounds) {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: clipped,
+                            border: Border {
+                                color: accent.into(),
+                                radius: 0.0.into(),
+                                width: SELECTION_BORDER_WIDTH,
                             },
-                            core::Background::Color(core::Color::TRANSPARENT),
-                        );
-                    }
-
-                    if !layer.locked {
-                        let accent = cosmic_theme.accent_color();
-                        let corners = [
-                            (layer_rect.x, layer_rect.y),
-                            (layer_rect.x + layer_rect.width, layer_rect.y),
-                            (layer_rect.x, layer_rect.y + layer_rect.height),
-                            (
-                                layer_rect.x + layer_rect.width,
-                                layer_rect.y + layer_rect.height,
-                            ),
-                        ];
-                        for (cx, cy) in corners {
-                            draw_corner_handle(renderer, cx, cy, accent);
-                        }
-                    }
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        core::Background::Color(core::Color::TRANSPARENT),
+                    );
                 }
-
-                if layer.locked {
-                    let badge_size = 18.0_f32;
-                    let badge_rect = Rectangle {
-                        x: layer_rect.x + layer_rect.width - badge_size - 4.0,
-                        y: layer_rect.y + 4.0,
-                        width: badge_size,
-                        height: badge_size,
-                    };
-                    if bounds.contains(Point::new(badge_rect.center_x(), badge_rect.center_y())) {
-                        renderer.fill_quad(
-                            Quad {
-                                bounds: badge_rect,
-                                border: Border {
-                                    radius: 4.0.into(),
-                                    ..Default::default()
-                                },
-                                shadow: Default::default(),
-                                snap: true,
-                            },
-                            core::Background::Color({
-                                let mut c = cosmic_theme.palette.neutral_1;
-                                c.alpha = 0.85;
-                                c.into()
-                            }),
-                        );
-                        core::text::Renderer::fill_text(
-                            renderer,
-                            core::Text {
-                                content: String::from("\u{1F512}"),
-                                size: core::Pixels(11.0),
-                                line_height: core::text::LineHeight::Relative(1.2),
-                                font: cosmic::font::default(),
-                                bounds: badge_rect.size(),
-                                align_x: cosmic::iced::core::text::Alignment::Center,
-                                align_y: cosmic::iced::core::alignment::Vertical::Center,
-                                shaping: core::text::Shaping::Advanced,
-                                wrapping: core::text::Wrapping::None,
-                                ellipsize: core::text::Ellipsize::None,
-                            },
-                            core::Point {
-                                x: badge_rect.center_x(),
-                                y: badge_rect.center_y(),
-                            },
-                            cosmic_theme.palette.neutral_10.into(),
-                            bounds,
-                        );
-                    }
+                let corners = [
+                    (layer_rect.x, layer_rect.y),
+                    (layer_rect.x + layer_rect.width, layer_rect.y),
+                    (layer_rect.x, layer_rect.y + layer_rect.height),
+                    (
+                        layer_rect.x + layer_rect.width,
+                        layer_rect.y + layer_rect.height,
+                    ),
+                ];
+                for (cx, cy) in corners {
+                    draw_corner_handle(renderer, cx, cy, accent);
                 }
             }
         }); // end with_layer for images + selection
 
-        // Monitor outlines in a separate layer so they're always on top
+        // Display frames in a separate layer so they're always on top
         renderer.with_layer(bounds, |renderer| {
             for monitor in self.monitors.iter() {
-                let (mx, my) =
-                    state.virtual_to_widget(monitor.position.0 as f64, monitor.position.1 as f64);
-                let mw = monitor.logical_size.0 as f32 * state.camera_zoom;
-                let mh = monitor.logical_size.1 as f32 * state.camera_zoom;
+                let mon_rect = monitor_widget_rect(state, monitor, &bounds);
+                let selected = self.selected_displays.contains(&monitor.name);
 
-                let bz = &monitor.bezel;
-                let bt = bz.top as f32 * state.camera_zoom;
-                let bb = bz.bottom as f32 * state.camera_zoom;
-                let bl = bz.left as f32 * state.camera_zoom;
-                let br = bz.right as f32 * state.camera_zoom;
-
-                // Outer rect including bezels
-                let outer_rect = Rectangle {
-                    x: bounds.x + mx - bl,
-                    y: bounds.y + my - bt,
-                    width: mw + bl + br,
-                    height: mh + bt + bb,
+                let (color, width) = if selected {
+                    (cosmic_theme.accent_color(), SELECTION_BORDER_WIDTH)
+                } else {
+                    (cosmic_theme.palette.neutral_7, MONITOR_BORDER_WIDTH)
                 };
-
-                // Inner rect (the screen area)
-                let mon_rect = Rectangle {
-                    x: bounds.x + mx,
-                    y: bounds.y + my,
-                    width: mw,
-                    height: mh,
-                };
-
-                // Draw four bezel rectangles (top, bottom, left, right)
-                // Top bezel
-                if bt > 0.0 {
-                    renderer.fill_quad(
-                        Quad {
-                            bounds: Rectangle {
-                                x: outer_rect.x,
-                                y: outer_rect.y,
-                                width: outer_rect.width,
-                                height: bt,
-                            },
-                            border: Border {
-                                radius: [MONITOR_CORNER_RADIUS, MONITOR_CORNER_RADIUS, 0.0, 0.0]
-                                    .into(),
-                                ..Default::default()
-                            },
-                            shadow: Default::default(),
-                            snap: true,
+                renderer.fill_quad(
+                    Quad {
+                        bounds: mon_rect,
+                        border: Border {
+                            color: color.into(),
+                            radius: MONITOR_CORNER_RADIUS.into(),
+                            width,
                         },
-                        bezel_gradient(180.0, BEZEL_LIGHT, BEZEL_MID),
-                    );
-                }
-                // Bottom bezel
-                if bb > 0.0 {
-                    renderer.fill_quad(
-                        Quad {
-                            bounds: Rectangle {
-                                x: outer_rect.x,
-                                y: mon_rect.y + mh,
-                                width: outer_rect.width,
-                                height: bb,
-                            },
-                            border: Border {
-                                radius: [0.0, 0.0, MONITOR_CORNER_RADIUS, MONITOR_CORNER_RADIUS]
-                                    .into(),
-                                ..Default::default()
-                            },
-                            shadow: Default::default(),
-                            snap: true,
-                        },
-                        bezel_gradient(180.0, BEZEL_MID, BEZEL_DARK),
-                    );
-                }
-                // Left bezel
-                if bl > 0.0 {
-                    renderer.fill_quad(
-                        Quad {
-                            bounds: Rectangle {
-                                x: outer_rect.x,
-                                y: mon_rect.y,
-                                width: bl,
-                                height: mh,
-                            },
-                            border: Border::default(),
-                            shadow: Default::default(),
-                            snap: true,
-                        },
-                        bezel_gradient(90.0, BEZEL_LIGHT, BEZEL_MID),
-                    );
-                }
-                // Right bezel
-                if br > 0.0 {
-                    renderer.fill_quad(
-                        Quad {
-                            bounds: Rectangle {
-                                x: mon_rect.x + mw,
-                                y: mon_rect.y,
-                                width: br,
-                                height: mh,
-                            },
-                            border: Border::default(),
-                            shadow: Default::default(),
-                            snap: true,
-                        },
-                        bezel_gradient(90.0, BEZEL_MID, BEZEL_DARK),
-                    );
-                }
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    core::Background::Color(core::Color::TRANSPARENT),
+                );
 
                 let label = monitor.name.clone();
-                let label_w = (label.len() as f32 * 7.0 + 12.0).min(mon_rect.width - 4.0);
+                let label_w = label.len() as f32 * 7.0 + 12.0;
+                if mon_rect.width < label_w + 8.0 || mon_rect.height < 28.0 {
+                    continue;
+                }
                 let label_bg = Rectangle {
                     x: mon_rect.x + (mon_rect.width - label_w) / 2.0,
                     y: mon_rect.y + mon_rect.height / 2.0 - 10.0,
@@ -990,7 +921,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                         align_x: cosmic::iced::core::text::Alignment::Center,
                         align_y: cosmic::iced::core::alignment::Vertical::Center,
                         shaping: core::text::Shaping::Basic,
-                        wrapping: core::text::Wrapping::Word,
+                        wrapping: core::text::Wrapping::None,
                         ellipsize: core::text::Ellipsize::None,
                     },
                     core::Point {
