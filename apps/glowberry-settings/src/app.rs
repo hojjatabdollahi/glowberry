@@ -1947,10 +1947,8 @@ impl cosmic::Application for GlowBerrySettings {
         // mode (wallpaper, color, live).
         children.push(self.view_multi_monitor_canvas());
 
-        // 2. Settings list (always slot 2 — empty for wallpapers)
-        if is_wallpaper_mode {
-            children.push(widget::Space::new().into());
-        } else {
+        // 2. Settings list (not for wallpapers)
+        if !is_wallpaper_mode {
             children.push(
                 container(self.view_settings_list())
                     .width(Length::Fill)
@@ -1959,48 +1957,51 @@ impl cosmic::Application for GlowBerrySettings {
             );
         }
 
-        // Slot 3 (category selector moved to header toggle)
-        children.push(widget::Space::new().into());
-
-        // Library: images, live wallpapers, and colors in one grid
+        // 3. Library: images, live wallpapers, and colors in one grid. It
+        // takes the remaining height and scrolls on its own.
         children.push(
             container(self.view_library())
                 .width(Length::Fill)
+                .height(Length::Fill)
                 .align_x(Alignment::Center)
                 .into(),
         );
 
-        // Wrap everything in a scrollable container
-        let scrollable_content = widget::scrollable(
+        container(
             widget::column::with_children(children)
                 .spacing(22)
                 .padding(20)
                 .width(Length::Fill)
+                .height(Length::Fill)
                 .align_x(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fill);
+        .height(Length::Fill)
+        .class(self.window_bg())
+        .into()
+    }
 
-        // Apply custom background with opacity
-        let opacity = self.window_opacity;
-        container(scrollable_content)
+    fn footer(&self) -> Option<Element<'_, Self::Message>> {
+        let bar = widget::row::with_children(vec![
+            text::body(self.canvas_hint()).into(),
+            widget::Space::new().width(Length::Fill).into(),
+            button::text(fl!("extend-apply"))
+                .on_press(Message::ApplyExtend)
+                .class(cosmic::theme::Button::Suggested)
+                .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        Some(
+            container(widget::column::with_children(vec![
+                widget::divider::horizontal::default().into(),
+                container(bar).padding([12, 20]).into(),
+            ]))
             .width(Length::Fill)
-            .height(Length::Fill)
-            .class(cosmic::theme::Container::custom(move |theme| {
-                let cosmic = theme.cosmic();
-                let mut bg_color: cosmic::iced::Color =
-                    cosmic.background(theme.transparent).base.into();
-                bg_color.a = opacity;
-                cosmic::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(bg_color)),
-                    icon_color: Some(cosmic.background(theme.transparent).on.into()),
-                    text_color: Some(cosmic.background(theme.transparent).on.into()),
-                    border: cosmic::iced::Border::default(),
-                    shadow: cosmic::iced::Shadow::default(),
-                    snap: false,
-                }
-            }))
-            .into()
+            .class(self.window_bg())
+            .into(),
+        )
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
@@ -2048,6 +2049,39 @@ impl cosmic::Application for GlowBerrySettings {
 }
 
 impl GlowBerrySettings {
+    /// Window background at the configured opacity.
+    fn window_bg(&self) -> cosmic::theme::Container<'static> {
+        let opacity = self.window_opacity;
+        cosmic::theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            let mut bg_color: cosmic::iced::Color =
+                cosmic.background(theme.transparent).base.into();
+            bg_color.a = opacity;
+            cosmic::widget::container::Style {
+                background: Some(cosmic::iced::Background::Color(bg_color)),
+                icon_color: Some(cosmic.background(theme.transparent).on.into()),
+                text_color: Some(cosmic.background(theme.transparent).on.into()),
+                border: cosmic::iced::Border::default(),
+                shadow: cosmic::iced::Shadow::default(),
+                snap: false,
+            }
+        })
+    }
+
+    /// One line telling the user what the canvas expects next.
+    fn canvas_hint(&self) -> String {
+        let locked_content_mode = matches!(
+            self.categories.selected,
+            Some(Category::Colors | Category::Shaders)
+        );
+        match (self.extend_layers.is_empty(), locked_content_mode) {
+            (true, true) => fl!("live-no-items"),
+            (true, false) => fl!("extend-no-layers"),
+            (false, true) => fl!("live-hint"),
+            (false, false) => fl!("extend-hint"),
+        }
+    }
+
     /// Build the settings drawer content
     fn settings_drawer_view(&self) -> Element<'_, Message> {
         // Build power saving section
@@ -3717,46 +3751,8 @@ impl GlowBerrySettings {
                 .on_close(Message::ExtendLayerMenuClose);
         }
 
-        // Canvas row: editor (buttons are overlaid inside the canvas).
-        let canvas_row: Element<'_, Message> = canvas_popover.into();
-
-        // Bottom controls: clear all + apply
-        let mut bottom: Vec<Element<'_, Message>> = Vec::new();
-
-        bottom.push(
-            button::text(fl!("extend-apply"))
-                .on_press(Message::ApplyExtend)
-                .class(cosmic::theme::Button::Suggested)
-                .into(),
-        );
-
-        let bottom_row = widget::row::with_children(bottom)
-            .spacing(8)
-            .align_y(Alignment::Center);
-
-        // Hint text
-        let hint_text = match (self.extend_layers.is_empty(), locked_content_mode) {
-            (true, true) => fl!("live-no-items"),
-            (true, false) => fl!("extend-no-layers"),
-            (false, true) => fl!("live-hint"),
-            (false, false) => fl!("extend-hint"),
-        };
-        let hint: Element<'_, Message> = text::body(hint_text)
-            .align_x(Alignment::Center)
-            .width(Length::Fill)
-            .into();
-
-        widget::column::with_children(vec![
-            canvas_row,
-            hint,
-            container(bottom_row)
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
-                .into(),
-        ])
-        .spacing(8)
-        .width(Length::Fill)
-        .into()
+        // The hint and Apply live in the footer.
+        canvas_popover.into()
     }
 
     /// Index of the user-added source a wallpaper path belongs to (the file
@@ -3825,10 +3821,14 @@ impl GlowBerrySettings {
                 .row_spacing(16)
                 .into()
         };
+        let grid = widget::scrollable(container(grid).width(Length::Fill).padding([0, 12, 12, 0]))
+            .width(Length::Fill)
+            .height(Length::Fill);
 
-        widget::column::with_children(vec![toolbar.into(), grid])
+        widget::column::with_children(vec![toolbar.into(), grid.into()])
             .spacing(12)
             .width(Length::Fill)
+            .height(Length::Fill)
             .into()
     }
 
