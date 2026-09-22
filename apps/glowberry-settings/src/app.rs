@@ -19,8 +19,8 @@ use cosmic::iced::Subscription;
 use cosmic::iced::widget::image::Handle as ImageHandle;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{
-    self, button, container, dropdown, menu, segmented_button, segmented_control, settings, slider,
-    text, toggler,
+    self, button, container, dropdown, segmented_button, segmented_control, settings, slider, text,
+    toggler,
 };
 use cosmic::{ApplicationExt, Element};
 use cosmic_config::{ConfigGet, ConfigSet};
@@ -167,6 +167,8 @@ pub struct GlowBerrySettings {
 
     /// The canvas context menu that is open, and where
     canvas_menu: Option<(CanvasMenu, (f32, f32))>,
+    /// The library card whose context menu is open
+    card_menu: Option<Item>,
     /// Layers on the virtual desktop canvas: locked ones fill one display,
     /// free ones are images spanning wherever the user puts them.
     extend_layers: SlotMap<DefaultKey, ExtendLayerState>,
@@ -289,8 +291,12 @@ pub enum Message {
     PickColor(usize),
     /// Put a live wallpaper on the selected displays
     PickShader(usize),
-    /// A library card's context menu
+    /// A library card's context menu entry was chosen
     Card(CardAction),
+    /// A library card was right-clicked
+    CardMenuOpen(Item),
+    /// The library card menu was dismissed
+    CardMenuClose,
 
     /// A display was clicked in the canvas (connector, add to selection)
     DisplaySelected(String, bool),
@@ -425,13 +431,6 @@ pub enum CardAction {
     SpanAll(DefaultKey),
     /// Remove a user-added source (index into `wallpaper_sources`).
     RemoveSource(usize),
-}
-
-impl menu::Action for CardAction {
-    type Message = Message;
-    fn message(&self) -> Message {
-        Message::Card(*self)
-    }
 }
 
 /// What the canvas context menu is about
@@ -607,6 +606,7 @@ impl cosmic::Application for GlowBerrySettings {
             tip_index: 0,
             tips_hidden: false,
             canvas_menu: None,
+            card_menu: None,
             extend_layers: SlotMap::new(),
             extend_layer_colors: SecondaryMap::new(),
             extend_layer_sources: SecondaryMap::new(),
@@ -737,6 +737,9 @@ impl cosmic::Application for GlowBerrySettings {
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         // Clear one-shot flags
         self.extend_fit_view_requested = false;
+        if matches!(message, Message::Card(_)) {
+            self.card_menu = None;
+        }
 
         match message {
             Message::LibraryFilter(entity) => self.library_filter.activate(entity),
@@ -755,6 +758,11 @@ impl cosmic::Application for GlowBerrySettings {
                 let targets = self.target_monitors();
                 self.pick_shader(idx, &targets);
             }
+            Message::CardMenuOpen(item) => {
+                self.canvas_menu = None;
+                self.card_menu = Some(item);
+            }
+            Message::CardMenuClose => self.card_menu = None,
             Message::Card(action) => match action {
                 CardAction::PutOnAll(item) => {
                     let all = self.monitor_geometry.clone();
@@ -2746,25 +2754,8 @@ impl GlowBerrySettings {
         // Context menu on a display or on a free layer.
         let mut popover = widget::popover(canvas);
         if let Some((menu, (cx, cy))) = &self.canvas_menu {
-            // Flat rows like a real menu; the destructive one only tints its label.
-            let entry = |label: String, msg: Message| -> Element<'_, Message> {
-                button::custom(text::body(label))
-                    .on_press(msg)
-                    .width(Length::Fill)
-                    .padding([8, 12])
-                    .class(cosmic::theme::Button::MenuItem)
-                    .into()
-            };
-            let danger = |label: String, msg: Message| -> Element<'_, Message> {
-                let red: cosmic::iced::Color =
-                    cosmic::theme::active().cosmic().destructive.base.into();
-                button::custom(text::body(label).class(cosmic::theme::Text::Color(red)))
-                    .on_press(msg)
-                    .width(Length::Fill)
-                    .padding([8, 12])
-                    .class(cosmic::theme::Button::MenuItem)
-                    .into()
-            };
+            let entry = menu_entry;
+            let danger = menu_danger;
             let many = self.monitor_geometry.len() > 1;
             let mut items: Vec<Element<'_, Message>> = Vec::new();
             match menu {
@@ -2820,37 +2811,7 @@ impl GlowBerrySettings {
                 }
             }
 
-            let popup = container(
-                widget::column::with_children(items)
-                    .spacing(2)
-                    .padding(8)
-                    .width(Length::Fixed(220.0)),
-            )
-            .class(cosmic::theme::Container::custom(|theme| {
-                let cosmic = theme.cosmic();
-                cosmic::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(
-                        cosmic.background(theme.transparent).component.base.into(),
-                    )),
-                    icon_color: Some(cosmic.background(theme.transparent).component.on.into()),
-                    text_color: Some(cosmic.background(theme.transparent).component.on.into()),
-                    border: cosmic::iced::Border {
-                        radius: cosmic.corner_radii.radius_m.into(),
-                        width: 1.0,
-                        color: cosmic
-                            .background(theme.transparent)
-                            .component
-                            .divider
-                            .into(),
-                    },
-                    shadow: cosmic::iced::Shadow {
-                        color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
-                        offset: cosmic::iced::Vector::new(0.0, 2.0),
-                        blur_radius: 8.0,
-                    },
-                    snap: false,
-                }
-            }));
+            let popup = menu_popup(items);
 
             popover = popover
                 .popup(popup)
@@ -3335,31 +3296,54 @@ impl GlowBerrySettings {
             .into()
     }
 
-    /// Context menu shared by every library card: put the item on all
-    /// displays, on one of them, or (images) span it across all of them.
-    fn card_menu(&self, item: Item) -> Vec<menu::Item<CardAction, String>> {
-        let mut items = vec![menu::Item::Button(
+    /// Wrap a library card so a right-click opens its menu: put the item on
+    /// all displays, on one of them, or (images) span it across all of them.
+    fn card_with_menu<'a>(
+        &'a self,
+        card: Element<'a, Message>,
+        item: Item,
+        remove_source: Option<usize>,
+    ) -> Element<'a, Message> {
+        let card = widget::mouse_area(card).on_right_press(Message::CardMenuOpen(item));
+        if self.card_menu != Some(item) {
+            return card.into();
+        }
+
+        let mut rows = vec![menu_entry(
             fl!("put-on-all"),
-            None,
-            CardAction::PutOnAll(item),
+            Message::Card(CardAction::PutOnAll(item)),
         )];
         if self.monitor_geometry.len() > 1 {
             for (i, m) in self.monitor_geometry.iter().enumerate() {
-                items.push(menu::Item::Button(
+                rows.push(menu_entry(
                     fl!("put-on", display = m.name.clone()),
-                    None,
-                    CardAction::PutOn(item, i),
+                    Message::Card(CardAction::PutOn(item, i)),
                 ));
             }
             if let Item::Image(key) = item {
-                items.push(menu::Item::Button(
+                rows.push(menu_entry(
                     fl!("span-all"),
-                    None,
-                    CardAction::SpanAll(key),
+                    Message::Card(CardAction::SpanAll(key)),
                 ));
             }
         }
-        items
+        // User-added sources can be removed again; bundled ones can't.
+        if let Some(idx) = remove_source {
+            rows.push(widget::divider::horizontal::light().into());
+            rows.push(menu_danger(
+                fl!("wp-remove-source"),
+                Message::Card(CardAction::RemoveSource(idx)),
+            ));
+        }
+
+        widget::popover(card)
+            .popup(menu_popup(rows))
+            .position(widget::popover::Position::Point(cosmic::iced::Point {
+                x: THUMB_WIDTH as f32 / 2.0,
+                y: THUMB_HEIGHT as f32 / 2.0,
+            }))
+            .on_close(Message::CardMenuClose)
+            .into()
     }
 
     fn wallpaper_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
@@ -3377,17 +3361,8 @@ impl GlowBerrySettings {
                     self.staged_badge(|s| matches!(s, Shown::Image { path: p, .. } if p == path));
                 let card = library_card(card_thumb(thumb, None, on.map(accent_pill), None), name);
 
-                let mut items = self.card_menu(Item::Image(id));
-                // User-added sources can be removed again; bundled ones can't.
-                if let Some(src_idx) = self.wallpaper_source_index_for(path) {
-                    items.push(menu::Item::Divider);
-                    items.push(menu::Item::Button(
-                        fl!("wp-remove-source"),
-                        None,
-                        CardAction::RemoveSource(src_idx),
-                    ));
-                }
-                Some(widget::context_menu(card, Some(menu::items(&HashMap::new(), items))).into())
+                let remove = self.wallpaper_source_index_for(path);
+                Some(self.card_with_menu(card, Item::Image(id), remove))
             })
             .collect()
     }
@@ -3410,8 +3385,7 @@ impl GlowBerrySettings {
                 .on_press(Message::PickColor(idx));
                 let on = self.staged_badge(|s| matches!(s, Shown::Color(c) if c == color));
                 let card = library_card(card_thumb(swatch, None, on.map(accent_pill), None), name);
-                let items = self.card_menu(Item::Color(idx));
-                Some(widget::context_menu(card, Some(menu::items(&HashMap::new(), items))).into())
+                Some(self.card_with_menu(card, Item::Color(idx), None))
             })
             .collect()
     }
@@ -3435,8 +3409,7 @@ impl GlowBerrySettings {
                     card_thumb(thumb, Some(live_badge()), on.map(accent_pill), load),
                     info.name.clone(),
                 );
-                let items = self.card_menu(Item::Shader(idx));
-                Some(widget::context_menu(card, Some(menu::items(&HashMap::new(), items))).into())
+                Some(self.card_with_menu(card, Item::Shader(idx), None))
             })
             .collect()
     }
@@ -3546,6 +3519,58 @@ impl GlowBerrySettings {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/// A flat menu row, like a real menu.
+fn menu_entry<'a>(label: String, msg: Message) -> Element<'a, Message> {
+    button::custom(text::body(label))
+        .on_press(msg)
+        .width(Length::Fill)
+        .padding([8, 12])
+        .class(cosmic::theme::Button::MenuItem)
+        .into()
+}
+
+/// A menu row for a destructive action: only its label is tinted.
+fn menu_danger<'a>(label: String, msg: Message) -> Element<'a, Message> {
+    let red: cosmic::iced::Color = cosmic::theme::active().cosmic().destructive.base.into();
+    button::custom(text::body(label).class(cosmic::theme::Text::Color(red)))
+        .on_press(msg)
+        .width(Length::Fill)
+        .padding([8, 12])
+        .class(cosmic::theme::Button::MenuItem)
+        .into()
+}
+
+/// The floating card that holds menu rows.
+fn menu_popup<'a>(rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    container(
+        widget::column::with_children(rows)
+            .spacing(2)
+            .padding(8)
+            .width(Length::Fixed(220.0)),
+    )
+    .class(cosmic::theme::Container::custom(|theme| {
+        let cosmic = theme.cosmic();
+        let component = &cosmic.background(theme.transparent).component;
+        container::Style {
+            background: Some(cosmic::iced::Background::Color(component.base.into())),
+            icon_color: Some(component.on.into()),
+            text_color: Some(component.on.into()),
+            border: cosmic::iced::Border {
+                radius: cosmic.corner_radii.radius_m.into(),
+                width: 1.0,
+                color: component.divider.into(),
+            },
+            shadow: cosmic::iced::Shadow {
+                color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                offset: cosmic::iced::Vector::new(0.0, 2.0),
+                blur_radius: 8.0,
+            },
+            snap: false,
+        }
+    }))
+    .into()
+}
 
 /// Wrap a widget (typically an icon button) with a hover tooltip.
 fn with_tip<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Element<'a, Message> {
