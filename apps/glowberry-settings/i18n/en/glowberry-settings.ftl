@@ -97,3 +97,13 @@ pause-lid-closed = Pause when lid closed
 # About
 repository = Repository
 about = About
+
+# Help dock
+tip-1 = Click a display to choose it. Ctrl-click to choose several. Click the empty canvas to choose all of them.
+tip-2 = Pick an image, a live wallpaper, or a color from the library to put it on the chosen displays.
+tip-3 = With several displays chosen, Placement can span one image across them. Drag its corners on the canvas to resize it.
+tip-4 = Nothing changes on your desktop until you press Apply. Revert throws the staged changes away.
+tip-5 = Scroll on the canvas to zoom and drag the background to pan. The fit button brings everything back into view.
+tip-6 = Right-click something on the canvas to bring it forward, send it back, or remove it.
+tip-next = Next tip
+tip-hide = Hide tips

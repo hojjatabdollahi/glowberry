@@ -54,6 +54,9 @@ const THUMB_HEIGHT: u32 = 105;
 const LIVE_PREVIEW_WIDTH: u32 = 320;
 const LIVE_PREVIEW_HEIGHT: u32 = 180;
 
+/// Number of usage tips in the help dock (`tip-1` .. `tip-N` in the strings).
+const TIP_COUNT: usize = 6;
+
 /// Intrinsic size of a live item on the canvas. The preview frame is stretched
 /// to cover the display, so only the aspect matters.
 const LIVE_ITEM_SIZE: (u32, u32) = (1920, 1080);
@@ -157,6 +160,10 @@ pub struct GlowBerrySettings {
     window_height: f32,
     /// Whether the inspector is shown while the window is narrow
     inspector_open: bool,
+    /// Which usage tip the help dock shows
+    tip_index: usize,
+    /// The help dock was closed; remembered in config
+    tips_hidden: bool,
 
     /// Which layer's context menu is showing in the canvas, and where
     layer_context_menu: Option<(DefaultKey, (f32, f32))>,
@@ -291,6 +298,10 @@ pub enum Message {
     SelectAllDisplays,
     /// Show or hide the inspector on a narrow window
     ToggleInspector,
+    /// Show the next usage tip in the help dock
+    NextTip,
+    /// Close the help dock for good
+    HideTips,
     /// Placement changed (same on each / span across)
     SetPlacement(segmented_button::Entity),
     /// Image fit changed for the selected displays
@@ -562,6 +573,8 @@ impl cosmic::Application for GlowBerrySettings {
             window_width: 0.0,
             window_height: 0.0,
             inspector_open: false,
+            tip_index: 0,
+            tips_hidden: false,
             layer_context_menu: None,
             extend_layers: SlotMap::new(),
             extend_layer_colors: SecondaryMap::new(),
@@ -586,6 +599,7 @@ impl cosmic::Application for GlowBerrySettings {
             app.power_saving = ctx.power_saving_config();
             app.window_opacity = ctx.window_opacity();
             app.extend_config = ctx.extend_config();
+            app.tips_hidden = ctx.0.get::<bool>("tips-hidden").unwrap_or(false);
 
             // Set dropdown indices based on loaded config
             app.selected_on_battery_action = match app.power_saving.on_battery_action {
@@ -726,6 +740,13 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ToggleInspector => self.inspector_open = !self.inspector_open,
+            Message::NextTip => self.tip_index = (self.tip_index + 1) % TIP_COUNT,
+            Message::HideTips => {
+                self.tips_hidden = true;
+                if let Some(ctx) = &self.config_context {
+                    let _ = ctx.0.set("tips-hidden", true);
+                }
+            }
 
             Message::SelectAllDisplays => {
                 self.selected_displays.clear();
@@ -2567,28 +2588,39 @@ impl GlowBerrySettings {
             fl!("tip-fit"),
         ));
 
-        let canvas: Element<'_, Message> = cosmic::iced::widget::stack![
-            container(editor).width(Length::Fill).height(Length::Fill),
-            container(widget::column::with_children(bottom_left).spacing(4))
+        let mut stack = cosmic::iced::widget::Stack::new()
+            .push(container(editor).width(Length::Fill).height(Length::Fill))
+            .push(
+                container(widget::column::with_children(bottom_left).spacing(4))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Start)
+                    .align_y(Alignment::End)
+                    .padding(6),
+            )
+            .push(
+                container(
+                    widget::row::with_children(top_right)
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                )
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .align_x(Alignment::Start)
-                .align_y(Alignment::End)
+                .align_x(Alignment::End)
+                .align_y(Alignment::Start)
                 .padding(6),
-            container(
-                widget::row::with_children(top_right)
-                    .spacing(4)
-                    .align_y(Alignment::Center)
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::End)
-            .align_y(Alignment::Start)
-            .padding(6),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
+            );
+        if self.tips_visible() {
+            stack = stack.push(
+                container(self.view_tips())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::End)
+                    .align_y(Alignment::End)
+                    .padding(10),
+            );
+        }
+        let canvas: Element<'_, Message> = stack.width(Length::Fill).height(Length::Fill).into();
 
         // Right-click menu on a layer.
         let mut popover = widget::popover(canvas);
@@ -2662,6 +2694,72 @@ impl GlowBerrySettings {
         popover.into()
     }
 
+    /// The help dock has room only on a reasonably wide canvas.
+    fn tips_visible(&self) -> bool {
+        !self.tips_hidden && (self.window_width == 0.0 || self.window_width >= 720.0)
+    }
+
+    /// A translucent card in the canvas corner with one usage tip, a button
+    /// for the next one, and a close button.
+    fn view_tips(&self) -> Element<'_, Message> {
+        let tip = match self.tip_index % TIP_COUNT {
+            0 => fl!("tip-1"),
+            1 => fl!("tip-2"),
+            2 => fl!("tip-3"),
+            3 => fl!("tip-4"),
+            4 => fl!("tip-5"),
+            _ => fl!("tip-6"),
+        };
+        let row = widget::row::with_children(vec![
+            widget::icon::from_name("dialog-information-symbolic")
+                .size(16)
+                .into(),
+            text::body(tip).width(Length::Fixed(320.0)).into(),
+            with_tip(
+                widget::button::icon(widget::icon::from_name("go-next-symbolic"))
+                    .on_press(Message::NextTip),
+                fl!("tip-next"),
+            ),
+            with_tip(
+                widget::button::icon(widget::icon::from_name("window-close-symbolic"))
+                    .on_press(Message::HideTips),
+                fl!("tip-hide"),
+            ),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+        container(row)
+            .padding([8, 12])
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                let mut bg: cosmic::iced::Color =
+                    cosmic.background(theme.transparent).component.base.into();
+                bg.a = 0.9;
+                container::Style {
+                    background: Some(cosmic::iced::Background::Color(bg)),
+                    icon_color: Some(cosmic.background(theme.transparent).component.on.into()),
+                    text_color: Some(cosmic.background(theme.transparent).component.on.into()),
+                    border: cosmic::iced::Border {
+                        radius: cosmic.corner_radii.radius_m.into(),
+                        width: 1.0,
+                        color: cosmic
+                            .background(theme.transparent)
+                            .component
+                            .divider
+                            .into(),
+                    },
+                    shadow: cosmic::iced::Shadow {
+                        color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                        offset: cosmic::iced::Vector::new(0.0, 4.0),
+                        blur_radius: 16.0,
+                    },
+                    snap: false,
+                }
+            }))
+            .into()
+    }
+
     /// Title of the inspector drawer: the selected display, or how many.
     fn inspector_title(&self) -> String {
         let targets = self.target_monitors();
@@ -2673,13 +2771,16 @@ impl GlowBerrySettings {
     }
 
     /// The inspector: the selected display(s), what they show, and its settings.
+    /// Free text and the content header sit flat on the panel; the settings
+    /// rows share one list container so the controls read as a group.
     fn view_inspector(&self) -> Element<'_, Message> {
         let targets = self.target_monitors();
+        let mut head: Vec<Element<'_, Message>> = Vec::new();
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
 
         if targets.is_empty() {
-            rows.push(text::body(fl!("no-displays")).into());
-            return rows_with_dividers(rows);
+            head.push(text::body(fl!("no-displays")).into());
+            return widget::column::with_children(head).into();
         }
 
         let subtitle = match targets.as_slice() {
@@ -2690,7 +2791,7 @@ impl GlowBerrySettings {
                 .collect::<Vec<_>>()
                 .join(", "),
         };
-        rows.push(text::body(subtitle).into());
+        head.push(text::body(subtitle).into());
 
         let shared = self.shared_shown(&targets);
         let show_placement = matches!(
@@ -2708,7 +2809,7 @@ impl GlowBerrySettings {
 
         match shared {
             None => {
-                rows.push(text::body(fl!("mixed-content")).into());
+                head.push(text::body(fl!("mixed-content")).into());
                 for m in &targets {
                     let what = self.describe_shown(&self.shown_on(m));
                     rows.push(
@@ -2723,7 +2824,7 @@ impl GlowBerrySettings {
                 }
             }
             Some(Shown::Nothing) => {
-                rows.push(text::body(fl!("nothing-staged")).into());
+                head.push(text::body(fl!("nothing-staged")).into());
                 if show_placement {
                     rows.push(placement());
                 }
@@ -2758,7 +2859,7 @@ impl GlowBerrySettings {
                         .into(),
                     None => widget::Space::new().width(88).height(50).into(),
                 };
-                rows.push(content_header(thumb, name, detail));
+                head.push(content_header(thumb, name, detail));
                 if show_placement {
                     rows.push(placement());
                 }
@@ -2771,7 +2872,11 @@ impl GlowBerrySettings {
                     rows.push(
                         settings::item(
                             fl!("fit"),
-                            dropdown(&self.fit_options, Some(fit_idx), Message::SetImageFit),
+                            framed(dropdown(
+                                &self.fit_options,
+                                Some(fit_idx),
+                                Message::SetImageFit,
+                            )),
                         )
                         .into(),
                     );
@@ -2783,23 +2888,35 @@ impl GlowBerrySettings {
                     Color::Single(_) => fl!("solid-color"),
                     Color::Gradient(_) => fl!("color-gradient"),
                 };
-                rows.push(content_header(color_image(color, 88, 50), kind, name));
+                head.push(content_header(color_image(color, 88, 50), kind, name));
             }
             Some(Shown::Shader(idx)) => {
+                head.push(self.shader_header(idx));
                 self.shader_settings(&mut rows, idx);
             }
         }
 
-        rows_with_dividers(rows)
+        if !rows.is_empty() {
+            let list = rows
+                .into_iter()
+                .fold(widget::list_column(), |list, row| list.add(row));
+            head.push(list.into());
+        }
+        widget::column::with_children(head)
+            .spacing(12)
+            .width(Length::Fill)
+            .into()
     }
 
-    /// Rows for a live wallpaper: who made it, how heavy it is, and its knobs.
-    fn shader_settings<'a>(&'a self, rows: &mut Vec<Element<'a, Message>>, idx: usize) {
+    /// Thumbnail, name and author of a live wallpaper.
+    fn shader_header(&self, idx: usize) -> Element<'_, Message> {
         let Some(info) = self.available_shaders.get(idx) else {
-            return;
+            return widget::Space::new().into();
         };
-        let meta = info.parsed.as_ref().map(|p| &p.metadata);
-        let author = meta
+        let author = info
+            .parsed
+            .as_ref()
+            .map(|p| &p.metadata)
             .filter(|m| !m.author.is_empty())
             .map(|m| fl!("adapted-by", author = m.author.clone()))
             .unwrap_or_default();
@@ -2811,7 +2928,15 @@ impl GlowBerrySettings {
                 .into(),
             None => widget::Space::new().width(88).height(50).into(),
         };
-        rows.push(content_header(thumb, info.name.clone(), author));
+        content_header(thumb, info.name.clone(), author)
+    }
+
+    /// Settings rows for a live wallpaper: how heavy it is and its knobs.
+    fn shader_settings<'a>(&'a self, rows: &mut Vec<Element<'a, Message>>, idx: usize) {
+        let Some(info) = self.available_shaders.get(idx) else {
+            return;
+        };
+        let meta = info.parsed.as_ref().map(|p| &p.metadata);
 
         if let Some(load) = info.load {
             rows.push(settings::item(fl!("gpu-load"), text::body(load_label(load))).into());
@@ -2819,22 +2944,22 @@ impl GlowBerrySettings {
         rows.push(
             settings::item(
                 fl!("frame-rate"),
-                dropdown(
+                framed(dropdown(
                     &self.frame_rate_options,
                     Some(self.selected_shader_frame_rate),
                     Message::ShaderFrameRate,
-                ),
+                )),
             )
             .into(),
         );
         rows.push(
             settings::item(
                 fl!("render-quality"),
-                dropdown(
+                framed(dropdown(
                     &self.render_scale_options,
                     Some(self.selected_shader_render_scale),
                     Message::ShaderRenderScale,
-                ),
+                )),
             )
             .into(),
         );
@@ -2865,25 +2990,30 @@ impl GlowBerrySettings {
                 };
                 let kind = param.param_type;
                 rows.push(
-                    settings::item(
-                        &param.label,
+                    // Label and value on one line, slider full width below:
+                    // a fixed-width slider beside the label does not fit the
+                    // panel and pushes every row to a different edge.
+                    widget::column::with_children(vec![
                         widget::row::with_children(vec![
-                            slider(min..=max, value, move |v| {
-                                let value = match kind {
-                                    ParamType::F32 => ParamValue::F32(v),
-                                    ParamType::I32 => ParamValue::I32(v as i32),
-                                };
-                                Message::ShaderParamChanged(idx, name.clone(), value)
-                            })
-                            .on_release(Message::ShaderParamReleased)
-                            .step(step)
-                            .width(Length::Fixed(140.0))
-                            .into(),
-                            widget::text(shown).width(Length::Fixed(44.0)).into(),
+                            text::body(param.label.clone()).width(Length::Fill).into(),
+                            text::body(shown).into(),
                         ])
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    )
+                        .align_y(Alignment::Center)
+                        .into(),
+                        slider(min..=max, value, move |v| {
+                            let value = match kind {
+                                ParamType::F32 => ParamValue::F32(v),
+                                ParamType::I32 => ParamValue::I32(v as i32),
+                            };
+                            Message::ShaderParamChanged(idx, name.clone(), value)
+                        })
+                        .on_release(Message::ShaderParamReleased)
+                        .step(step)
+                        .width(Length::Fill)
+                        .into(),
+                    ])
+                    .spacing(6)
+                    .width(Length::Fill)
                     .into(),
                 );
             }
@@ -3135,11 +3265,11 @@ impl GlowBerrySettings {
 
         power_saving_section = power_saving_section.add(settings::item(
             fl!("on-battery"),
-            dropdown(
+            framed(dropdown(
                 &self.on_battery_action_options,
                 Some(self.selected_on_battery_action),
                 Message::SetOnBatteryAction,
-            ),
+            )),
         ));
 
         {
@@ -3152,11 +3282,11 @@ impl GlowBerrySettings {
             if self.power_saving.pause_on_low_battery {
                 let dropdown_row = settings::item(
                     fl!("low-battery-threshold"),
-                    dropdown(
+                    framed(dropdown(
                         &self.low_battery_threshold_options,
                         Some(self.selected_low_battery_threshold),
                         Message::SetLowBatteryThreshold,
-                    ),
+                    )),
                 );
 
                 power_saving_section = power_saving_section.add(
@@ -3322,18 +3452,24 @@ fn color_name(color: &Color) -> String {
     }
 }
 
-/// Inspector rows separated by light dividers, no box around them.
-fn rows_with_dividers(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
-    let mut children: Vec<Element<'_, Message>> = Vec::with_capacity(rows.len() * 2);
-    for (i, row) in rows.into_iter().enumerate() {
-        if i > 0 {
-            children.push(widget::divider::horizontal::light().into());
-        }
-        children.push(container(row).width(Length::Fill).padding([6, 0]).into());
-    }
-    widget::column::with_children(children)
-        .spacing(4)
-        .width(Length::Fill)
+/// A dropdown with a visible button background, so it reads as a control
+/// before it is hovered.
+fn framed<'a>(control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(control)
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            container::Style {
+                background: Some(cosmic::iced::Background::Color(cosmic.button.base.into())),
+                icon_color: Some(cosmic.button.on.into()),
+                text_color: Some(cosmic.button.on.into()),
+                border: cosmic::iced::Border {
+                    radius: cosmic.corner_radii.radius_s.into(),
+                    ..Default::default()
+                },
+                shadow: cosmic::iced::Shadow::default(),
+                snap: false,
+            }
+        }))
         .into()
 }
 

@@ -17,7 +17,11 @@ use cosmic::iced::widget::image::Handle as ImageHandle;
 use slotmap::DefaultKey;
 
 const PADDING: f32 = 10.0;
-const MONITOR_CORNER_RADIUS: f32 = 4.0;
+const MONITOR_CORNER_RADIUS: f32 = 6.0;
+/// Width of the background-colored frame painted just outside each display to
+/// round off the content clipped to it. Must be at least 0.42 x the radius so
+/// the sharp corner underneath is fully covered.
+const CORNER_MASK: f32 = 3.0;
 const MONITOR_BORDER_WIDTH: f32 = 1.5;
 const SELECTION_BORDER_WIDTH: f32 = 2.5;
 const HANDLE_SIZE: f32 = 12.0;
@@ -858,6 +862,33 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
 
         // Display frames in a separate layer so they're always on top
         renderer.with_layer(bounds, |renderer| {
+            // Rounded corners: iced clips rectangularly, so a frame in the
+            // window background color, drawn just outside each display with a
+            // rounded inner edge, covers the corners of the content beneath.
+            // All masks go first so a neighbour's band can't cover a border.
+            let bg: core::Color = cosmic_theme.bg_color().into();
+            for monitor in self.monitors.iter() {
+                let r = monitor_widget_rect(state, monitor, &bounds);
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle {
+                            x: r.x - CORNER_MASK,
+                            y: r.y - CORNER_MASK,
+                            width: r.width + 2.0 * CORNER_MASK,
+                            height: r.height + 2.0 * CORNER_MASK,
+                        },
+                        border: Border {
+                            color: bg,
+                            radius: (MONITOR_CORNER_RADIUS + CORNER_MASK).into(),
+                            width: CORNER_MASK,
+                        },
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    core::Background::Color(core::Color::TRANSPARENT),
+                );
+            }
+
             for monitor in self.monitors.iter() {
                 let mon_rect = monitor_widget_rect(state, monitor, &bounds);
                 let selected = self.selected_displays.contains(&monitor.name);
@@ -881,23 +912,26 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     core::Background::Color(core::Color::TRANSPARENT),
                 );
 
+                // Display name: a pill in the bottom-left corner, hidden when
+                // the display is drawn too small to hold it.
                 let label = monitor.name.clone();
-                let label_w = label.len() as f32 * 7.0 + 12.0;
-                if mon_rect.width < label_w + 8.0 || mon_rect.height < 28.0 {
+                let label_w = label.len() as f32 * 9.5 + 24.0;
+                let label_h = 30.0;
+                if mon_rect.width < label_w + 24.0 || mon_rect.height < label_h + 24.0 {
                     continue;
                 }
                 let label_bg = Rectangle {
-                    x: mon_rect.x + (mon_rect.width - label_w) / 2.0,
-                    y: mon_rect.y + mon_rect.height / 2.0 - 10.0,
+                    x: mon_rect.x + 12.0,
+                    y: mon_rect.y + mon_rect.height - label_h - 12.0,
                     width: label_w,
-                    height: 20.0,
+                    height: label_h,
                 };
 
                 renderer.fill_quad(
                     Quad {
                         bounds: label_bg,
                         border: Border {
-                            radius: 10.0.into(),
+                            radius: (label_h / 2.0).into(),
                             ..Default::default()
                         },
                         shadow: Default::default(),
@@ -914,7 +948,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
                     renderer,
                     core::Text {
                         content: label,
-                        size: core::Pixels(14.0),
+                        size: core::Pixels(16.0),
                         line_height: core::text::LineHeight::Relative(1.2),
                         font: cosmic::font::bold(),
                         bounds: label_bg.size(),
