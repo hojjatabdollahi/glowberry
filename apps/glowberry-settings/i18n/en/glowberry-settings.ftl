@@ -118,3 +118,12 @@ wp-span-all = Span across all screens
 wp-show-on = Show on
 wp-remove-source = Remove from grid
 apply-all = Apply on all screens
+
+# Library
+filter-all = All
+filter-images = Images
+filter-live = Live
+filter-colors = Colors
+search-library = Search
+library-empty = Nothing matches your search.
+color-gradient = Gradient

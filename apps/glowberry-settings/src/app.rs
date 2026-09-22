@@ -12,7 +12,8 @@ use cosmic::iced::Subscription;
 use cosmic::iced::widget::image::Handle as ImageHandle;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{
-    self, button, container, dropdown, menu, segmented_button, settings, slider, text, toggler,
+    self, button, container, dropdown, menu, segmented_button, segmented_control, settings, slider,
+    text, toggler,
 };
 use cosmic::{ApplicationExt, Element};
 use cosmic_config::{ConfigGet, ConfigSet, CosmicConfigEntry};
@@ -88,6 +89,11 @@ pub struct GlowBerrySettings {
 
     /// Category dropdown model
     categories: dropdown::multi::Model<String, Category>,
+
+    /// Library filter: all, images, live, colors
+    library_filter: segmented_button::SingleSelectModel,
+    /// Library search text
+    library_query: String,
 
     /// Wallpaper selection context
     selection: SelectionContext,
@@ -234,14 +240,25 @@ pub enum Category {
     Shaders,
 }
 
+/// Which kinds the library grid shows
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibraryFilter {
+    All,
+    Images,
+    Live,
+    Colors,
+}
+
 /// Application messages
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Message {
     /// Category changed (from dropdown)
     ChangeCategory(Category),
-    /// Category toggle changed (from header toggle, index: 0=wallpapers, 1=colors, 2=shaders)
-    CategoryToggle(usize),
+    /// Library filter changed
+    LibraryFilter(segmented_button::Entity),
+    /// Library search text changed
+    LibrarySearch(String),
     /// Wallpaper selected
     Select(DefaultKey),
     /// Color selected
@@ -379,6 +396,26 @@ pub enum Message {
     ExtendLayerBringForward(DefaultKey),
     /// Send a specific layer back (z-1)
     ExtendLayerSendBack(DefaultKey),
+}
+
+impl Message {
+    /// The library kind this message picks from, if any.
+    fn picks(&self) -> Option<Category> {
+        Some(match self {
+            Self::WallpaperCustomize(_)
+            | Self::WallpaperDuplicateAll(_)
+            | Self::WallpaperSpanAll(_)
+            | Self::WallpaperShowOn(..)
+            | Self::WallpaperShowOnIdx(..) => Category::Wallpapers,
+            Self::ColorSelect(_) | Self::ColorApplyAll(_) | Self::ColorShowOn(..) => {
+                Category::Colors
+            }
+            Self::ShaderSelect(_) | Self::ShaderApplyAll(_) | Self::ShaderShowOn(..) => {
+                Category::Shaders
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// Context menu actions for wallpaper thumbnails
@@ -523,6 +560,17 @@ impl cosmic::Application for GlowBerrySettings {
         ));
         categories.selected = Some(Category::Wallpapers);
 
+        let library_filter = segmented_button::Model::builder()
+            .insert(|b| {
+                b.text(fl!("filter-all"))
+                    .data(LibraryFilter::All)
+                    .activate()
+            })
+            .insert(|b| b.text(fl!("filter-images")).data(LibraryFilter::Images))
+            .insert(|b| b.text(fl!("filter-live")).data(LibraryFilter::Live))
+            .insert(|b| b.text(fl!("filter-colors")).data(LibraryFilter::Colors))
+            .build();
+
         // Default wallpaper folder - search XDG data directories
         let current_folder = find_wallpaper_folder();
 
@@ -555,6 +603,8 @@ impl cosmic::Application for GlowBerrySettings {
             active_output: None,
             show_tab_bar: false,
             categories,
+            library_filter,
+            library_query: String::new(),
             selection: SelectionContext::default(),
             available_shaders,
             shader_thumbnails,
@@ -730,26 +780,18 @@ impl cosmic::Application for GlowBerrySettings {
         // Clear one-shot flags
         self.extend_fit_view_requested = false;
 
+        // Picking from the library switches the canvas to that kind's mode,
+        // as the old category tabs did.
+        if let Some(category) = message.picks() {
+            self.ensure_category(category);
+        }
+
         match message {
-            Message::CategoryToggle(index) => {
-                let category = match index {
-                    0 => Category::Wallpapers,
-                    1 => Category::Colors,
-                    _ => Category::Shaders,
-                };
-                return self.update(Message::ChangeCategory(category));
-            }
+            Message::LibraryFilter(entity) => self.library_filter.activate(entity),
+            Message::LibrarySearch(query) => self.library_query = query,
 
             Message::ChangeCategory(category) => {
-                self.layer_context_menu = None;
-                let changed = self.categories.selected.as_ref() != Some(&category);
-                self.categories.selected = Some(category.clone());
-
-                if changed {
-                    // Load this page's saved working state so switching tabs
-                    // isn't a fresh start.
-                    self.load_category_canvas(&category);
-                }
+                self.ensure_category(category.clone());
 
                 if category == Category::Shaders {
                     // Load shaders if needed
@@ -1920,15 +1962,9 @@ impl cosmic::Application for GlowBerrySettings {
         // Slot 3 (category selector moved to header toggle)
         children.push(widget::Space::new().into());
 
-        // Selection grid
-        let grid = match self.categories.selected {
-            Some(Category::Wallpapers) => self.view_wallpaper_grid(),
-            Some(Category::Colors) => self.view_color_grid(),
-            Some(Category::Shaders) => self.view_shader_grid(),
-            None => widget::Space::new().into(),
-        };
+        // Library: images, live wallpapers, and colors in one grid
         children.push(
-            container(grid)
+            container(self.view_library())
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .into(),
@@ -1965,25 +2001,6 @@ impl cosmic::Application for GlowBerrySettings {
                 }
             }))
             .into()
-    }
-
-    fn header_center(&self) -> Vec<Element<'_, Self::Message>> {
-        let selected = match self.categories.selected {
-            Some(Category::Wallpapers) => 0,
-            Some(Category::Colors) => 1,
-            Some(Category::Shaders) => 2,
-            None => 0,
-        };
-        vec![
-            cosmetics::widgets::toggle::toggle3(
-                "preferences-desktop-wallpaper-symbolic",
-                "applications-graphics-symbolic",
-                "applications-multimedia-symbolic",
-                selected,
-            )
-            .on_select(Message::CategoryToggle)
-            .into(),
-        ]
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
@@ -2872,6 +2889,17 @@ impl GlowBerrySettings {
     /// reopening the window) isn't a fresh start. A page whose type matches the
     /// currently-applied wallpaper shows that; otherwise it shows the page's last
     /// saved selection (`saved-color` / `saved-shader`).
+    /// Switch the canvas to `category`'s mode, restoring that mode's saved
+    /// working state, unless it is already active.
+    fn ensure_category(&mut self, category: Category) {
+        if self.categories.selected.as_ref() == Some(&category) {
+            return;
+        }
+        self.layer_context_menu = None;
+        self.categories.selected = Some(category.clone());
+        self.load_category_canvas(&category);
+    }
+
     fn load_category_canvas(&mut self, category: &Category) {
         self.extend_layers.clear();
         self.extend_layer_colors.clear();
@@ -3739,16 +3767,90 @@ impl GlowBerrySettings {
             .position(|src| src.as_path() == path || (src.is_dir() && path.starts_with(src)))
     }
 
-    fn view_wallpaper_grid(&self) -> Element<'_, Message> {
-        let buttons: Vec<Element<'_, Message>> = self
-            .selection
+    /// The library: one grid of images, live wallpapers, and colors, with a
+    /// kind filter and a name search above it.
+    fn view_library(&self) -> Element<'_, Message> {
+        let filter = self
+            .library_filter
+            .active_data::<LibraryFilter>()
+            .copied()
+            .unwrap_or(LibraryFilter::All);
+        let query = self.library_query.trim().to_lowercase();
+        let matches = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
+
+        let mut cards: Vec<Element<'_, Message>> = Vec::new();
+        if matches!(filter, LibraryFilter::All | LibraryFilter::Images) {
+            cards.extend(self.wallpaper_cards(&matches));
+        }
+        if matches!(filter, LibraryFilter::All | LibraryFilter::Live) {
+            cards.extend(self.shader_cards(&matches));
+        }
+        if matches!(filter, LibraryFilter::All | LibraryFilter::Colors) {
+            cards.extend(self.color_cards(&matches));
+        }
+
+        let toolbar = widget::row::with_children(vec![
+            segmented_control::horizontal(&self.library_filter)
+                .on_activate(Message::LibraryFilter)
+                .width(Length::Shrink)
+                .into(),
+            widget::search_input(fl!("search-library"), &self.library_query)
+                .on_input(Message::LibrarySearch)
+                .on_clear(Message::LibrarySearch(String::new()))
+                .width(Length::Fixed(260.0))
+                .into(),
+            widget::Space::new().width(Length::Fill).into(),
+            button::text(fl!("add-images"))
+                .leading_icon(widget::icon::from_name("list-add-symbolic"))
+                .on_press(Message::AddWallpaperImages)
+                .into(),
+            button::text(fl!("add-folder"))
+                .leading_icon(widget::icon::from_name("folder-new-symbolic"))
+                .on_press(Message::AddWallpaperFolder)
+                .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        let grid: Element<'_, Message> = if cards.is_empty() {
+            let msg = if filter == LibraryFilter::Live && self.available_shaders.is_empty() {
+                fl!("no-shaders")
+            } else {
+                fl!("library-empty")
+            };
+            container(text::body(msg)).padding(24).into()
+        } else {
+            widget::flex_row(cards)
+                .column_spacing(12)
+                .row_spacing(16)
+                .into()
+        };
+
+        widget::column::with_children(vec![toolbar.into(), grid])
+            .spacing(12)
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn wallpaper_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
+        self.selection
             .selection_handles
             .iter()
-            .map(|(id, handle)| {
+            .filter_map(|(id, handle)| {
+                let path = self.selection.paths.get(id)?;
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().replace(['_', '-'], " "))
+                    .unwrap_or_default();
+                if !matches(&name) {
+                    return None;
+                }
+
                 // Left-click = add to canvas
-                let img_button: Element<'_, Message> = widget::button::image(handle.clone())
-                    .on_press(Message::WallpaperCustomize(id))
-                    .into();
+                let card = library_card(
+                    widget::button::image(handle.clone()).on_press(Message::WallpaperCustomize(id)),
+                    name,
+                );
 
                 // Right-click context menu
                 let mut ctx_items = vec![
@@ -3770,9 +3872,7 @@ impl GlowBerrySettings {
 
                 // Removing an added wallpaper: only offered for user-added
                 // sources, not the bundled ones.
-                if let Some(path) = self.selection.paths.get(id)
-                    && let Some(src_idx) = self.wallpaper_source_index_for(path)
-                {
+                if let Some(src_idx) = self.wallpaper_source_index_for(path) {
                     ctx_items.push(menu::Item::Divider);
                     ctx_items.push(menu::Item::Button(
                         fl!("wp-remove-source"),
@@ -3781,51 +3881,38 @@ impl GlowBerrySettings {
                     ));
                 }
 
-                widget::context_menu(img_button, Some(menu::items(&HashMap::new(), ctx_items)))
-                    .into()
+                Some(
+                    widget::context_menu(card, Some(menu::items(&HashMap::new(), ctx_items)))
+                        .into(),
+                )
             })
-            .collect();
-
-        let grid = widget::flex_row(buttons).column_spacing(12).row_spacing(16);
-
-        // Toolbar: add images / add folder.
-        let toolbar = widget::row::with_children(vec![
-            button::text(fl!("add-images"))
-                .leading_icon(widget::icon::from_name("list-add-symbolic"))
-                .on_press(Message::AddWallpaperImages)
-                .into(),
-            button::text(fl!("add-folder"))
-                .leading_icon(widget::icon::from_name("folder-new-symbolic"))
-                .on_press(Message::AddWallpaperFolder)
-                .into(),
-        ])
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-        widget::column::with_children(vec![toolbar.into(), grid.into()])
-            .spacing(12)
-            .into()
+            .collect()
     }
 
-    fn view_color_grid(&self) -> Element<'_, Message> {
+    fn color_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
         let selected = if let Choice::Color(ref c) = self.selection.active {
             Some(c)
         } else {
             None
         };
 
-        let buttons: Vec<Element<'_, Message>> = DEFAULT_COLORS
+        DEFAULT_COLORS
             .iter()
             .enumerate()
-            .map(|(idx, color)| {
-                let content = color_image(color.clone(), 70, 70);
-                let swatch: Element<'_, Message> =
-                    button::custom_image_button(content, None::<Message>)
-                        .padding(0)
-                        .selected(selected == Some(color))
-                        .class(button::ButtonClass::Image)
-                        .on_press(Message::ColorSelect(color.clone()))
-                        .into();
+            .filter_map(|(idx, color)| {
+                let name = color_name(color);
+                if !matches(&name) {
+                    return None;
+                }
+                let swatch = button::custom_image_button(
+                    color_image(color.clone(), 158, 105),
+                    None::<Message>,
+                )
+                .padding(0)
+                .selected(selected == Some(color))
+                .class(button::ButtonClass::Image)
+                .on_press(Message::ColorSelect(color.clone()));
+                let card = library_card(swatch, name);
 
                 let mut ctx_items = vec![menu::Item::Button(
                     fl!("apply-all"),
@@ -3839,51 +3926,45 @@ impl GlowBerrySettings {
                         ColorAction::ShowOn(idx, m),
                     ));
                 }
-                widget::context_menu(swatch, Some(menu::items(&HashMap::new(), ctx_items))).into()
+                Some(
+                    widget::context_menu(card, Some(menu::items(&HashMap::new(), ctx_items)))
+                        .into(),
+                )
             })
-            .collect();
-
-        widget::flex_row(buttons)
-            .column_spacing(12)
-            .row_spacing(16)
-            .into()
+            .collect()
     }
 
-    fn view_shader_grid(&self) -> Element<'_, Message> {
+    fn shader_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
         let selected = if let Choice::Shader(idx) = self.selection.active {
             Some(idx)
         } else {
             None
         };
 
-        if self.available_shaders.is_empty() {
-            return widget::text(fl!("no-shaders")).into();
-        }
-
-        let buttons: Vec<Element<'_, Message>> = self
-            .shader_thumbnails
+        self.shader_thumbnails
             .iter()
             .enumerate()
-            .map(|(idx, handle)| {
+            .filter_map(|(idx, handle)| {
                 let name = self
                     .available_shaders
                     .get(idx)
                     .map(|s| s.name.as_str())
                     .unwrap_or("Unknown");
-
-                let item: Element<'_, Message> = widget::column::with_children(vec![
+                if !matches(name) {
+                    return None;
+                }
+                let thumb = cosmic::iced::widget::stack![
                     widget::button::image(handle.clone())
                         .selected(selected == Some(idx))
-                        .on_press(Message::ShaderSelect(idx))
-                        .into(),
-                    widget::text::caption(name)
-                        .width(Length::Fixed(158.0))
-                        .align_x(Alignment::Center)
-                        .into(),
-                ])
-                .spacing(4)
-                .align_x(Alignment::Center)
-                .into();
+                        .on_press(Message::ShaderSelect(idx)),
+                    container(live_badge())
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(Alignment::Start)
+                        .align_y(Alignment::Start)
+                        .padding(8),
+                ];
+                let card = library_card(thumb, name.to_string());
 
                 let mut ctx_items = vec![menu::Item::Button(
                     fl!("apply-all"),
@@ -3897,18 +3978,64 @@ impl GlowBerrySettings {
                         ShaderAction::ShowOn(idx, m),
                     ));
                 }
-                widget::context_menu(item, Some(menu::items(&HashMap::new(), ctx_items))).into()
+                Some(
+                    widget::context_menu(card, Some(menu::items(&HashMap::new(), ctx_items)))
+                        .into(),
+                )
             })
-            .collect();
-
-        widget::flex_row(buttons)
-            .column_spacing(12)
-            .row_spacing(16)
-            .into()
+            .collect()
     }
 }
 
 // Helper functions
+
+/// A library grid cell: the thumbnail with its name underneath.
+fn library_card<'a>(
+    content: impl Into<Element<'a, Message>>,
+    name: String,
+) -> Element<'a, Message> {
+    widget::column::with_children(vec![
+        content.into(),
+        widget::text::caption(name)
+            .width(Length::Fixed(158.0))
+            .align_x(Alignment::Center)
+            .into(),
+    ])
+    .spacing(4)
+    .align_x(Alignment::Center)
+    .into()
+}
+
+/// Small play glyph marking a card as a live wallpaper.
+fn live_badge<'a>() -> Element<'a, Message> {
+    container(widget::icon::from_name("media-playback-start-symbolic").size(12))
+        .padding([3, 5])
+        .class(cosmic::theme::Container::custom(|_| container::Style {
+            background: Some(cosmic::iced::Background::Color(
+                cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.55),
+            )),
+            icon_color: Some(cosmic::iced::Color::WHITE),
+            text_color: Some(cosmic::iced::Color::WHITE),
+            border: cosmic::iced::Border {
+                radius: 10.0.into(),
+                ..Default::default()
+            },
+            shadow: cosmic::iced::Shadow::default(),
+            snap: false,
+        }))
+        .into()
+}
+
+/// Display name for a color: its hex code, or "Gradient".
+fn color_name(color: &Color) -> String {
+    match color {
+        Color::Single([r, g, b]) => {
+            let c = |v: &f32| (v * 255.0).round() as u8;
+            format!("#{:02x}{:02x}{:02x}", c(r), c(g), c(b))
+        }
+        Color::Gradient(_) => fl!("color-gradient"),
+    }
+}
 
 /// Wrap a widget (typically an icon button) with a hover tooltip.
 fn with_tip<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Element<'a, Message> {
