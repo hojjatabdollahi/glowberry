@@ -2949,10 +2949,22 @@ impl GlowBerrySettings {
                 for m in &targets {
                     let what = self.describe_shown(&self.shown_on(m));
                     rows.push(
-                        button::text(format!("{}: {what}", m.name))
-                            .on_press(Message::DisplaySelected(m.name.clone(), false))
-                            .width(Length::Fill)
-                            .into(),
+                        // Display on the first line, what it shows below.
+                        // A custom button grows with its text; a text button
+                        // has a fixed height and clips the second line.
+                        button::custom(
+                            widget::column::with_children(vec![
+                                text::body(m.name.clone()).into(),
+                                text::caption(what).into(),
+                            ])
+                            .spacing(2)
+                            .width(Length::Fill),
+                        )
+                        .on_press(Message::DisplaySelected(m.name.clone(), false))
+                        .width(Length::Fill)
+                        .padding([6, 8])
+                        .class(cosmic::theme::Button::MenuItem)
+                        .into(),
                     );
                 }
                 if show_placement {
