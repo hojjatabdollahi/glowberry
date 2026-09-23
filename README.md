@@ -8,10 +8,11 @@ An enhanced background/wallpaper service with live shader support for COSMIC DE.
 
 Disclaimer: This project extends the functionality of cosmic-bg with live shader wallpapers. When set up correctly, cosmic-session will run GlowBerry instead of cosmic-bg.
 
-https://github.com/user-attachments/assets/44c1a6a2-4c13-4d02-b108-48284f1a5def
 
-Multi monitor support:
-<img width="1523" height="987" alt="image" src="https://github.com/user-attachments/assets/1662eae0-4b26-4338-9c72-970c2de5ef91" />
+
+https://github.com/user-attachments/assets/c30f61bf-b4cc-4c7c-8154-7bef86edf023
+
+
 
 
 ## Features
