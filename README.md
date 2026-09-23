@@ -10,7 +10,11 @@ Disclaimer: This project extends the functionality of cosmic-bg with live shader
 
 
 
-https://github.com/user-attachments/assets/c30f61bf-b4cc-4c7c-8154-7bef86edf023
+
+
+https://github.com/user-attachments/assets/6f32c315-d92e-4540-a30c-326900ca58cd
+
+
 
 
 
