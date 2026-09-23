@@ -2966,7 +2966,7 @@ impl GlowBerrySettings {
                         .on_press(Message::DisplaySelected(m.name.clone(), false))
                         .width(Length::Fill)
                         .padding(0)
-                        .class(cosmic::theme::Button::Transparent)
+                        .class(cosmic::theme::Button::ListItem([0.0; 4]))
                         .into(),
                     );
                 }
