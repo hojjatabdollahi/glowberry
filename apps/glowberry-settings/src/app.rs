@@ -295,8 +295,9 @@ pub enum Message {
     Card(CardAction),
     /// A library card was right-clicked
     CardMenuOpen(Item),
-    /// The library card menu was dismissed
-    CardMenuClose,
+    /// A library card's menu was dismissed. Carries the card so a stale close
+    /// can't wipe out a menu opened on another card by the same click.
+    CardMenuClose(Item),
 
     /// A display was clicked in the canvas (connector, add to selection)
     DisplaySelected(String, bool),
@@ -762,7 +763,11 @@ impl cosmic::Application for GlowBerrySettings {
                 self.canvas_menu = None;
                 self.card_menu = Some(item);
             }
-            Message::CardMenuClose => self.card_menu = None,
+            Message::CardMenuClose(item) => {
+                if self.card_menu == Some(item) {
+                    self.card_menu = None;
+                }
+            }
             Message::Card(action) => match action {
                 CardAction::PutOnAll(item) => {
                     let all = self.monitor_geometry.clone();
@@ -3342,7 +3347,7 @@ impl GlowBerrySettings {
                 x: THUMB_WIDTH as f32 / 2.0,
                 y: THUMB_HEIGHT as f32 / 2.0,
             }))
-            .on_close(Message::CardMenuClose)
+            .on_close(Message::CardMenuClose(item))
             .into()
     }
 
