@@ -3,49 +3,77 @@
 app-title = GlowBerry
 app-description = Wallpaper settings for COSMIC desktop
 
-# Menu
-view = View
-
-# Categories
-category-wallpapers = Wallpapers
-category-colors = Colors
-category-shaders = Live Wallpapers
-
-# Settings
-same-on-all = Same on all displays
-fit = Fit
-frame-rate = Frame Rate
-
-# Fit options
-fit-fill = Fill
-fit-fit = Fit
-
-# Frame rate options
-fps-15 = 15 FPS
-fps-30 = 30 FPS
-fps-60 = 60 FPS
-render-quality = Render Quality
-quality-full = Full
-quality-half = Half (best efficiency)
-quality-quarter = Quarter
-
-# Loading states
-loading-wallpapers = Loading wallpapers...
+# Library
+filter-all = All
+filter-images = Images
+filter-live = Live
+filter-colors = Colors
+search-library = Search
+library-empty = Nothing matches your search.
 no-shaders = No shaders found. Install shaders to ~/.local/share/glowberry/shaders/
+add-images = Add images
+add-folder = Add folder
+wp-remove-source = Remove from library
+color-gradient = Gradient
+solid-color = Solid color
+gpu-pill = { $load } GPU
+badge-all = all
+badge-some = { $n } of { $total }
 
-# Shader metadata
-shader-author = Author
-shader-source = Source
-shader-license = License
+# Canvas
+select-all-displays = Select all displays
+tip-layer-up = Move layer up
+tip-layer-down = Move layer down
+tip-center = Center layer on the displays
+tip-delete = Delete layer
+tip-clear-all = Remove everything from the canvas
+tip-fit = Fit all displays in view
+ctx-bring-forward = Bring Forward
+ctx-send-back = Send Back
+ctx-remove = Remove
 
-# Shader details
-show-details = Show Details
-hide-details = Hide Details
-reset-to-defaults = Reset to Defaults
-shader-resource-usage = Resource Usage
+# Inspector
+all-displays = All Displays
+n-displays = { $n } displays
+no-displays = No displays found.
+mixed-content = These displays show different things. Pick from the library to set them all at once, or choose one.
+nothing-staged = Nothing here yet. Pick something from the library.
+nothing-yet = Nothing yet
+spanning = One image across { $displays }
+spanned-image = { $name }, spanned
+placement = Placement
+placement-each = Same on each
+placement-span = Span across
+fit = Fit
+fit-zoom = Zoom to fill
+fit-inside = Fit inside
+fit-stretch = Stretch
+adapted-by = Adapted by { $author }
+gpu-load = GPU load
 resource-low = Low
 resource-medium = Medium
 resource-high = High
+frame-rate = Frame rate
+fps-15 = 15 FPS
+fps-30 = 30 FPS
+fps-60 = 60 FPS
+render-quality = Render quality
+quality-full = Full
+quality-half = Half (best efficiency)
+quality-quarter = Quarter
+reset-to-defaults = Reset to defaults
+shader-source = Source
+shader-license = License
+
+# Footer
+hint-empty = Pick something from the library to put it on your displays.
+status-applied = Everything applied
+status-changed = { $n ->
+    [one] 1 display changed, not applied yet
+   *[other] { $n } displays changed, not applied yet
+}
+apply = Apply
+revert = Revert
 
 # Settings drawer
 settings = Settings
@@ -54,10 +82,7 @@ use-glowberry = Use GlowBerry as default
 path-order-warning = Warning: ~/.local/bin must come before /usr/bin in PATH for this to work
 appearance = Appearance
 window-opacity = Window Opacity
-performance = Performance
 prefer-low-power = Prefer low power GPU
-
-# Power saving section
 power-saving = Power Saving
 on-battery = On battery power
 action-nothing = Do nothing
@@ -71,50 +96,25 @@ pause-lid-closed = Pause when lid closed
 
 # About
 repository = Repository
-
-# Context pages
 about = About
 
-# Display selection
-all-displays = All Displays
+# Help dock
+tip-1 = Click a display to choose it. Ctrl-click to choose several. Click the empty canvas to choose all of them.
+tip-2 = Pick an image, a live wallpaper, or a color from the library to put it on the chosen displays.
+tip-3 = With several displays chosen, Placement can span one image across them. Drag its corners on the canvas to resize it.
+tip-4 = Nothing changes on your desktop until you press Apply. Revert throws the staged changes away.
+tip-5 = Scroll on the canvas to zoom and drag the background to pan. The fit button brings everything back into view.
+tip-6 = Right-click something on the canvas to bring it forward, send it back, or remove it.
+tip-next = Next tip
+tip-hide = Hide tips
 
-# Multi-monitor wallpaper
-extend-apply = Apply
-extend-hint = Drag to move, scroll to resize. Use side buttons to change layer order.
-extend-no-layers = Click a wallpaper below to add it to the preview.
-add-images = Add images
-add-folder = Add folder
-live-hint = Right-click a display to apply this to all screens or just one.
-live-no-items = Pick a color or animation below to preview it on your displays.
-clear-all = Clear All
-unlock-layer = Unlock
-
-# Button tooltips
-tip-layer-up = Move layer up
-tip-layer-down = Move layer down
-tip-center = Center layer on the displays
-tip-lock = Lock to a display
-tip-unlock = Unlock layer
-tip-delete = Delete layer
-tip-clear-all = Remove all layers
-tip-fit = Fit all displays in view
-
-# Canvas context menu
-ctx-bring-forward = Bring Forward
-ctx-send-back = Send Back
-ctx-remove = Remove
-
-# Bezel settings
-bezels = Bezels
-bezel-top = Top
-bezel-bottom = Bottom
-bezel-left = Left
-bezel-right = Right
-
-# Wallpaper placement popup
-wp-customize = Customize in preview
-wp-duplicate-all = Duplicate on all screens
-wp-span-all = Span across all screens
-wp-show-on = Show on
-wp-remove-source = Remove from grid
-apply-all = Apply on all screens
+# Context menus
+put-on-all = Put on all displays
+put-on = Put on { $display }
+span-all = Span across all displays
+ctx-select = Select
+ctx-add-selection = Add to selection
+ctx-duplicate-all = Duplicate on all displays
+ctx-span-all = Span across all displays
+ctx-clear-display = Clear display
+ctx-fit = Fit to all displays

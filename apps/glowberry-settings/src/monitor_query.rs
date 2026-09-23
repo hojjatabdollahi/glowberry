@@ -23,7 +23,6 @@ pub struct MonitorGeometry {
     pub logical_size: (u32, u32),
     pub physical_size: (u32, u32),
     pub scale: f64,
-    pub bezel: glowberry_config::extend::Bezel,
     /// Monitor model name from EDID (e.g. "LG HDR 4K"), if reported.
     pub model: Option<String>,
     /// Stable EDID-derived identity (make|model|serial), if reported. Same
@@ -32,12 +31,6 @@ pub struct MonitorGeometry {
 }
 
 impl MonitorGeometry {
-    /// Stable per-monitor key (EDID identity, else connector name). Used for
-    /// bezels and as the config key for per-output wallpapers.
-    pub fn identity(&self) -> String {
-        self.edid.clone().unwrap_or_else(|| self.name.clone())
-    }
-
     /// Human-friendly label: the monitor model with the current connector in
     /// parentheses (e.g. "LG HDR 4K (DP-6)"); just the connector if no model.
     pub fn display_label(&self) -> String {
@@ -198,7 +191,6 @@ pub async fn query_monitors() -> Result<Vec<MonitorGeometry>, MonitorQueryError>
             logical_size: (logical_w, logical_h),
             physical_size: (phys_w, phys_h),
             scale,
-            bezel: glowberry_config::extend::Bezel::default(),
             model,
             edid,
         });

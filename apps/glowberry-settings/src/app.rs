@@ -1,38 +1,42 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Main application state and logic for GlowBerry Settings
+//! Main application state and logic for GlowBerry Settings.
+//!
+//! The window is display-first: the canvas at the top shows the connected
+//! displays with whatever is staged on them, the library below holds images,
+//! live wallpapers and colors, and the drawer on the right shows the settings
+//! for the selected display(s). Picking from the library puts that content on
+//! the selected displays (all of them when none is selected). Nothing reaches
+//! the daemon until Apply.
 
 use crate::fl;
+use crate::monitor_query::MonitorGeometry;
 use crate::shader_analysis::{self, Complexity};
 use crate::shader_params::{ParamType, ParamValue, ParsedShader};
-use cosmetics::widgets::scrub_spin::scrub_spin;
 use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::Subscription;
 use cosmic::iced::widget::image::Handle as ImageHandle;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{
-    self, button, container, dropdown, menu, segmented_button, settings, slider, text, toggler,
+    self, button, container, dropdown, segmented_button, segmented_control, settings, slider, text,
+    toggler,
 };
 use cosmic::{ApplicationExt, Element};
-use cosmic_config::{ConfigGet, ConfigSet, CosmicConfigEntry};
+use cosmic_config::{ConfigGet, ConfigSet};
 use glowberry_config::extend::ExtendConfig;
 use glowberry_config::power_saving::{OnBatteryAction, PowerSavingConfig};
 use glowberry_config::state::State;
 use glowberry_config::{
-    Color, Config, Context as ConfigContext, Entry, Gradient, OutputProfile, Source,
+    Color, Config, Context as ConfigContext, Entry, Gradient, OutputProfile, ScalingMode, Source,
 };
 use image::{ImageBuffer, Rgba};
 use slotmap::{DefaultKey, SecondaryMap, SlotMap};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-/// Wrapper for output name to store in segmented button data
-#[derive(Clone, Debug)]
-struct OutputName(String);
 
 mod wallpaper_subscription;
 use wallpaper_subscription::WallpaperEvent;
@@ -40,14 +44,22 @@ use wallpaper_subscription::WallpaperEvent;
 /// Application ID for GlowBerry Settings
 pub const APP_ID: &str = "io.github.hojjatabdollahi.glowberry-settings";
 
-const SIMULATED_WIDTH: u16 = 300;
-const SIMULATED_HEIGHT: u16 = 169;
+/// Library thumbnail size.
+const THUMB_WIDTH: u32 = 158;
+const THUMB_HEIGHT: u32 = 105;
 
 /// Resolution of live-animated shader preview frames. Kept modest so software
 /// GPUs (llvmpipe) can sustain a smooth frame rate; the image is scaled up to
-/// fill each monitor rect in the canvas.
+/// fill each display rect in the canvas.
 const LIVE_PREVIEW_WIDTH: u32 = 320;
 const LIVE_PREVIEW_HEIGHT: u32 = 180;
+
+/// Number of usage tips in the help dock (`tip-1` .. `tip-N` in the strings).
+const TIP_COUNT: usize = 6;
+
+/// Intrinsic size of a live item on the canvas. The preview frame is stretched
+/// to cover the display, so only the aspect matters.
+const LIVE_ITEM_SIZE: (u32, u32) = (1920, 1080);
 
 /// Persistent offscreen renderer for the live shader preview. Reused across
 /// frames so we create the wgpu device once (rebuilt only when the shader
@@ -60,7 +72,7 @@ struct LivePreview {
     source: String,
 }
 
-/// Context page for the settings drawer
+/// Context drawer page
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ContextPage {
     #[default]
@@ -79,17 +91,12 @@ pub struct GlowBerrySettings {
     /// About information
     about: widget::about::About,
 
-    /// Model for selecting between display outputs
-    outputs: segmented_button::SingleSelectModel,
-    /// The display that is currently being configured (None means "all")
-    active_output: Option<String>,
-    /// Whether to show the tab bar (more than one display)
-    show_tab_bar: bool,
+    /// Library filter: all, images, live, colors
+    library_filter: segmented_button::SingleSelectModel,
+    /// Library search text
+    library_query: String,
 
-    /// Category dropdown model
-    categories: dropdown::multi::Model<String, Category>,
-
-    /// Wallpaper selection context
+    /// Loaded wallpaper images and the last picked item (drives the live preview)
     selection: SelectionContext,
 
     /// Available system shaders
@@ -104,15 +111,8 @@ pub struct GlowBerrySettings {
     selected_shader_render_scale: usize,
     /// Render quality options
     render_scale_options: Vec<String>,
-
-    /// Fit options (Zoom, Fit) — used by color/shader modes
-    #[allow(dead_code)]
+    /// Image fit options (Zoom to fill, Fit inside, Stretch)
     fit_options: Vec<String>,
-    #[allow(dead_code)]
-    selected_fit: usize,
-
-    /// Cached display preview image
-    cached_display_handle: Option<ImageHandle>,
 
     /// Current wallpaper folder
     current_folder: PathBuf,
@@ -126,20 +126,18 @@ pub struct GlowBerrySettings {
     /// Whether GlowBerry is currently set as the default background service
     glowberry_is_default: bool,
 
-    /// Current shader parameter values (shader_index -> param_name -> value)
+    /// Current shader parameter values (shader_index -> param_name -> value).
+    // ponytail: parameters are per shader, not per display; two displays running
+    // the same shader share one set of values. Move them onto the layer's
+    // Source if per-display tuning is ever wanted (the config already allows it).
     shader_param_values: HashMap<usize, HashMap<String, ParamValue>>,
-
-    /// Whether shader details section is expanded
-    shader_details_expanded: bool,
 
     /// Power saving configuration
     power_saving: PowerSavingConfig,
-
     /// On battery action options for dropdown
     on_battery_action_options: Vec<String>,
     /// Selected on battery action index
     selected_on_battery_action: usize,
-
     /// Low battery threshold options for dropdown
     low_battery_threshold_options: Vec<String>,
     /// Selected low battery threshold index
@@ -148,27 +146,46 @@ pub struct GlowBerrySettings {
     /// Window background opacity (0.0 = transparent, 1.0 = opaque)
     window_opacity: f32,
 
-    /// Extend-on-all-screens state
+    /// Saved free (spanning) image layers
     extend_config: ExtendConfig,
-    /// Monitor geometry (loaded when extend editor opens)
-    monitor_geometry: Vec<crate::monitor_query::MonitorGeometry>,
-    /// Which layer's context menu is showing in the canvas, and where
-    layer_context_menu: Option<(DefaultKey, (f32, f32))>,
-    /// Image layers on the virtual desktop canvas
+    /// Connected displays
+    monitor_geometry: Vec<MonitorGeometry>,
+    /// Displays the next pick applies to (connector names). Empty means all.
+    selected_displays: Vec<String>,
+    /// Placement for images when several displays are selected
+    placement_model: segmented_button::SingleSelectModel,
+    /// Logical window size, for collapsing the inspector on narrow windows
+    /// and scrolling the whole content on short ones
+    window_width: f32,
+    window_height: f32,
+    /// Whether the inspector is shown while the window is narrow
+    inspector_open: bool,
+    /// Which usage tip the help dock shows
+    tip_index: usize,
+    /// The help dock was closed; remembered in config
+    tips_hidden: bool,
+
+    /// The canvas context menu that is open, and where
+    canvas_menu: Option<(CanvasMenu, (f32, f32))>,
+    /// The library card whose context menu is open
+    card_menu: Option<Item>,
+    /// Layers on the virtual desktop canvas: locked ones fill one display,
+    /// free ones are images spanning wherever the user puts them.
     extend_layers: SlotMap<DefaultKey, ExtendLayerState>,
-    /// For canvas items that represent a color (color mode): the color to fill.
+    /// Color of a locked color item
     extend_layer_colors: SecondaryMap<DefaultKey, Color>,
-    /// For canvas items that represent a color or live shader: the config source
-    /// to write when applying to a display, instead of an image path.
+    /// Config source written for a locked item on Apply
     extend_layer_sources: SecondaryMap<DefaultKey, Source>,
-    /// Currently selected layer
+    /// Fit mode of a locked image item
+    extend_layer_fit: SecondaryMap<DefaultKey, ScalingMode>,
+    /// Currently selected free layer
     extend_selected_layer: Option<DefaultKey>,
     /// Next z-index to assign
     extend_next_z: usize,
     /// Request the canvas to fit all content in view
     extend_fit_view_requested: bool,
 
-    /// Persistent renderer for the live shader preview in the monitor canvas.
+    /// Persistent renderer for the live shader preview in the canvas.
     live_preview: Arc<Mutex<LivePreview>>,
     /// True while a live preview frame is being rendered off-thread, so ticks
     /// don't pile up faster than the GPU can render them.
@@ -201,9 +218,12 @@ pub struct ShaderInfo {
     pub name: String,
     /// Parsed shader with metadata and parameters
     pub parsed: Option<ParsedShader>,
+    /// Estimated GPU load at default parameters
+    pub load: Option<Complexity>,
 }
 
-/// What is currently selected
+/// The last picked library item. Drives the live preview and the shader
+/// parameter editor.
 #[derive(Clone, Debug, PartialEq)]
 enum Choice {
     Wallpaper(DefaultKey),
@@ -217,7 +237,7 @@ impl Default for Choice {
     }
 }
 
-/// Selection context containing wallpapers, colors, and state
+/// Loaded wallpapers and the active choice
 #[derive(Clone, Debug, Default)]
 struct SelectionContext {
     active: Choice,
@@ -226,49 +246,100 @@ struct SelectionContext {
     selection_handles: SecondaryMap<DefaultKey, ImageHandle>,
 }
 
-/// Category options for the dropdown
-#[derive(Clone, Debug, PartialEq)]
-pub enum Category {
-    Wallpapers,
+/// Which kinds the library grid shows
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibraryFilter {
+    All,
+    Images,
+    Live,
     Colors,
-    Shaders,
+}
+
+/// How an image lands on several selected displays
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// The same image, filling each display
+    Each,
+    /// One image spanning across the displays
+    Span,
+}
+
+/// What a display currently shows on the canvas.
+#[derive(Clone, Debug, PartialEq)]
+enum Shown {
+    Nothing,
+    /// A locked image filling the display, or part of the free layer `span`
+    /// stretched across several displays.
+    Image {
+        path: PathBuf,
+        span: Option<DefaultKey>,
+    },
+    Color(Color),
+    Shader(usize),
 }
 
 /// Application messages
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Message {
-    /// Category changed (from dropdown)
-    ChangeCategory(Category),
-    /// Category toggle changed (from header toggle, index: 0=wallpapers, 1=colors, 2=shaders)
-    CategoryToggle(usize),
-    /// Wallpaper selected
-    Select(DefaultKey),
-    /// Color selected
-    ColorSelect(Color),
-    /// Apply a grid color (index) to all displays
-    ColorApplyAll(usize),
-    /// Apply a grid color (index) to one display (monitor index)
-    ColorShowOn(usize, usize),
-    /// Shader selected
-    ShaderSelect(usize),
-    /// Apply a grid shader (index) to all displays
-    ShaderApplyAll(usize),
-    /// Apply a grid shader (index) to one display (monitor index)
-    ShaderShowOn(usize, usize),
-    /// Shader thumbnail loaded
-    ShaderThumbnail(usize, Option<ImageHandle>),
+    /// Library filter changed
+    LibraryFilter(segmented_button::Entity),
+    /// Library search text changed
+    LibrarySearch(String),
+    /// Put an image on the selected displays
+    PickImage(DefaultKey),
+    /// Put a color (index into `DEFAULT_COLORS`) on the selected displays
+    PickColor(usize),
+    /// Put a live wallpaper on the selected displays
+    PickShader(usize),
+    /// A library card's context menu entry was chosen
+    Card(CardAction),
+    /// A library card was right-clicked
+    CardMenuOpen(Item),
+    /// The library card menu was dismissed
+    CardMenuClose,
+
+    /// A display was clicked in the canvas (connector, add to selection)
+    DisplaySelected(String, bool),
+    /// Right-click on a display in the canvas (connector, x, y)
+    DisplayRightClick(String, f32, f32),
+    /// Remove whatever is on a display
+    DisplayClear(String),
+    /// Put what a display shows on every display
+    DisplayDuplicateAll(String),
+    /// Span the image a display shows across every display
+    DisplaySpanAll(String),
+    /// Empty canvas was clicked: back to all displays
+    CanvasBackgroundClicked,
+    /// Select every display
+    SelectAllDisplays,
+    /// Show or hide the inspector on a narrow window
+    ToggleInspector,
+    /// Show the next usage tip in the help dock
+    NextTip,
+    /// Close the help dock for good
+    HideTips,
+    /// Placement changed (same on each / span across)
+    SetPlacement(segmented_button::Entity),
+    /// Image fit changed for the selected displays
+    SetImageFit(usize),
+
+    /// Shader thumbnails finished rendering
     ShaderThumbnailsLoaded(Vec<(usize, Option<ImageHandle>)>),
-    /// Render quality (resolution scale) changed
-    ShaderRenderScale(usize),
     /// Frame tick driving the live shader preview animation.
     PreviewTick,
     /// A live preview frame finished rendering (shader index, frame image).
     PreviewFrame(usize, Option<ImageHandle>),
     /// Frame rate changed
     ShaderFrameRate(usize),
-    /// Fit mode changed
-    Fit(usize),
+    /// Render quality (resolution scale) changed
+    ShaderRenderScale(usize),
+    /// Shader parameter changed (shader_index, param_name, value)
+    ShaderParamChanged(usize, String, ParamValue),
+    /// Shader parameter slider released
+    ShaderParamReleased,
+    /// Reset shader parameters to defaults
+    ResetShaderParams(usize),
+
     /// Wallpaper event from subscription
     WallpaperEvent(WallpaperEvent),
     /// Open a file picker to add image files to the grid
@@ -277,16 +348,11 @@ pub enum Message {
     AddWallpaperFolder,
     /// Paths chosen from a picker were added as wallpaper sources
     WallpaperSourcesPicked(Vec<PathBuf>),
-    /// Remove a user-added wallpaper source by index
-    RemoveWallpaperSource(usize),
+
     /// Toggle context drawer page
     ToggleContextPage(ContextPage),
     /// Open URL (for about page links)
     OpenUrl(String),
-    /// Same wallpaper on all displays (used by colors/shaders)
-    SameWallpaper(bool),
-    /// Display output changed (for per-display mode)
-    OutputChanged(segmented_button::Entity),
     /// Prefer low power GPU toggle
     PreferLowPower(bool),
     /// Config or state changed externally (from daemon or another instance)
@@ -295,23 +361,11 @@ pub enum Message {
     SetGlowBerryDefault(bool),
     /// Result of setting GlowBerry as default
     SetGlowBerryDefaultResult(Result<bool, String>),
-    /// Shader parameter changed (shader_index, param_name, value) - updates UI only
-    ShaderParamChanged(usize, String, ParamValue),
-    /// Shader parameter slider released - applies to config
-    ShaderParamReleased,
-    /// Toggle shader details section
-    ToggleShaderDetails,
-    /// Reset shader parameters to defaults
-    ResetShaderParams(usize),
 
     // Power saving messages
-    /// Change on battery action
     SetOnBatteryAction(usize),
-    /// Toggle pause on low battery
     SetPauseOnLowBattery(bool),
-    /// Change low battery threshold
     SetLowBatteryThreshold(usize),
-    /// Toggle pause when lid closed
     SetPauseOnLidClosed(bool),
 
     /// Window opacity slider changed (live preview)
@@ -319,22 +373,15 @@ pub enum Message {
     /// Window opacity slider released (save to config)
     WindowOpacityReleased,
 
-    /// Bezel changed for a monitor (monitor_index, top, bottom, left, right)
-    SetBezel(usize, f64, f64, f64, f64),
-    /// Bezel slider released — save to config
-    BezelReleased,
-
     /// Monitor geometry loaded from cosmic-randr
-    MonitorsLoaded(Vec<crate::monitor_query::MonitorGeometry>),
-    /// Add a wallpaper as a new layer (wallpaper key from selection)
-    ExtendAddLayer(DefaultKey),
+    MonitorsLoaded(Vec<MonitorGeometry>),
     /// Remove a layer
     ExtendRemoveLayer(DefaultKey),
     /// Layer moved in the editor
     ExtendLayerMoved(DefaultKey, f64, f64),
     /// Layer scaled in the editor
     ExtendLayerScaled(DefaultKey, f64),
-    /// Layer selected/deselected
+    /// Free layer selected/deselected
     ExtendLayerSelected(Option<DefaultKey>),
     /// Move selected layer up in z-order
     ExtendLayerUp,
@@ -342,108 +389,60 @@ pub enum Message {
     ExtendLayerDown,
     /// Center the selected layer on the virtual desktop
     ExtendCenter,
-    /// Apply extend configuration (composite and save)
-    ApplyExtend,
-    /// Extend compositing completed
-    ExtendApplied(Result<Vec<(String, PathBuf)>, String>),
+    /// Fit a free layer over all displays
+    ExtendLayerFit(DefaultKey),
+    /// Reset canvas camera to fit all content
+    ExtendFitView,
     /// Clear all layers
     ExtendClearAll,
-    /// Toggle lock on a layer
-    ExtendToggleLock(DefaultKey),
-
-    /// Wallpaper clicked — show placement popup
-    WallpaperClicked(DefaultKey),
-    /// Close wallpaper popup
-    WallpaperPopupClose,
-    /// Add wallpaper as layer in the canvas
-    WallpaperCustomize(DefaultKey),
-    /// Set wallpaper on all screens (duplicate)
-    WallpaperDuplicateAll(DefaultKey),
-    /// Span wallpaper across all screens (add auto-scaled layer)
-    WallpaperSpanAll(DefaultKey),
-    /// Set wallpaper on a specific screen
-    WallpaperShowOn(DefaultKey, String),
-    /// Set wallpaper on a screen by monitor index
-    WallpaperShowOnIdx(DefaultKey, usize),
     /// Right-click on a layer in the canvas (key, x, y relative to widget)
     ExtendLayerRightClick(DefaultKey, f32, f32),
     /// Close the canvas layer context menu
     ExtendLayerMenuClose,
-    /// Duplicate a layer's image on all screens
-    LayerDuplicateAll(DefaultKey),
-    /// Set a layer's image on a specific screen
-    LayerShowOn(DefaultKey, String),
-    /// Reset canvas camera to fit all content
-    ExtendFitView,
     /// Bring a specific layer forward (z+1)
     ExtendLayerBringForward(DefaultKey),
     /// Send a specific layer back (z-1)
     ExtendLayerSendBack(DefaultKey),
+
+    /// Write the staged canvas to the daemon's config
+    Apply,
+    /// Spanning images were composited per display
+    Applied(Result<Vec<(String, PathBuf)>, String>),
+    /// Throw away staged changes and show what is applied
+    Revert,
 }
 
-/// Context menu actions for wallpaper thumbnails
+/// A library item, as a copyable handle for menus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WallpaperAction {
-    Customize(DefaultKey),
-    DuplicateAll(DefaultKey),
+pub enum Item {
+    Image(DefaultKey),
+    Color(usize),
+    Shader(usize),
+}
+
+/// Context menu actions on library cards
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardAction {
+    /// Put the item on every display
+    PutOnAll(Item),
+    /// Put the item on one display (index into `monitor_geometry`)
+    PutOn(Item, usize),
+    /// Span an image across every display
     SpanAll(DefaultKey),
-    ShowOn(DefaultKey, usize),
-    /// Remove a user-added wallpaper source (by index).
+    /// Remove a user-added source (index into `wallpaper_sources`).
     RemoveSource(usize),
 }
 
-impl menu::Action for WallpaperAction {
-    type Message = Message;
-    fn message(&self) -> Message {
-        match self {
-            Self::Customize(k) => Message::WallpaperCustomize(*k),
-            Self::DuplicateAll(k) => Message::WallpaperDuplicateAll(*k),
-            Self::SpanAll(k) => Message::WallpaperSpanAll(*k),
-            Self::ShowOn(k, idx) => Message::WallpaperShowOnIdx(*k, *idx),
-            Self::RemoveSource(idx) => Message::RemoveWallpaperSource(*idx),
-        }
-    }
+/// What the canvas context menu is about
+#[derive(Clone, Debug)]
+enum CanvasMenu {
+    /// A free (spanning) image layer
+    Layer(DefaultKey),
+    /// A display, including the locked item on it
+    Display(String),
 }
 
-/// Right-click actions for a color swatch in the grid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ColorAction {
-    /// Apply this color (by index into `DEFAULT_COLORS`) to all displays.
-    All(usize),
-    /// Apply this color to a specific display (monitor index).
-    ShowOn(usize, usize),
-}
-
-impl menu::Action for ColorAction {
-    type Message = Message;
-    fn message(&self) -> Message {
-        match self {
-            Self::All(c) => Message::ColorApplyAll(*c),
-            Self::ShowOn(c, m) => Message::ColorShowOn(*c, *m),
-        }
-    }
-}
-
-/// Right-click actions for a shader thumbnail in the grid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ShaderAction {
-    /// Apply this shader (by index) to all displays.
-    All(usize),
-    /// Apply this shader to a specific display (monitor index).
-    ShowOn(usize, usize),
-}
-
-impl menu::Action for ShaderAction {
-    type Message = Message;
-    fn message(&self) -> Message {
-        match self {
-            Self::All(s) => Message::ShaderApplyAll(*s),
-            Self::ShowOn(s, m) => Message::ShaderShowOn(*s, *m),
-        }
-    }
-}
-
-/// Default colors available in the color picker
+/// Default colors shown in the library
 pub const DEFAULT_COLORS: &[Color] = &[
     Color::Single([0.580, 0.922, 0.922]),
     Color::Single([0.000, 0.286, 0.427]),
@@ -496,9 +495,16 @@ impl cosmic::Application for GlowBerrySettings {
         &mut self.core
     }
 
+    fn on_window_resize(&mut self, _id: cosmic::iced::window::Id, width: f32, height: f32) {
+        self.window_width = width;
+        self.window_height = height;
+    }
+
     fn init(mut core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
-        // Disable the default content container so we can apply our own background with opacity
+        // We paint our own background and panel, so drop libcosmic's content
+        // container and the padding it leaves around the content and footer.
         core.window.content_container = false;
+        core.window.border_padding = Some(0);
 
         // Load configuration
         let config_context = glowberry_config::context().ok();
@@ -507,28 +513,31 @@ impl cosmic::Application for GlowBerrySettings {
             .and_then(|ctx| Config::load(ctx).ok())
             .unwrap_or_default();
 
-        // Set up category dropdown
-        let mut categories = dropdown::multi::model();
-        categories.insert(dropdown::multi::list(
-            None,
-            vec![(fl!("category-wallpapers"), Category::Wallpapers)],
-        ));
-        categories.insert(dropdown::multi::list(
-            None,
-            vec![(fl!("category-colors"), Category::Colors)],
-        ));
-        categories.insert(dropdown::multi::list(
-            None,
-            vec![(fl!("category-shaders"), Category::Shaders)],
-        ));
-        categories.selected = Some(Category::Wallpapers);
+        let library_filter = segmented_button::Model::builder()
+            .insert(|b| {
+                b.text(fl!("filter-all"))
+                    .data(LibraryFilter::All)
+                    .activate()
+            })
+            .insert(|b| b.text(fl!("filter-images")).data(LibraryFilter::Images))
+            .insert(|b| b.text(fl!("filter-live")).data(LibraryFilter::Live))
+            .insert(|b| b.text(fl!("filter-colors")).data(LibraryFilter::Colors))
+            .build();
+
+        let placement_model = segmented_button::Model::builder()
+            .insert(|b| {
+                b.text(fl!("placement-each"))
+                    .data(Placement::Each)
+                    .activate()
+            })
+            .insert(|b| b.text(fl!("placement-span")).data(Placement::Span))
+            .build();
 
         // Default wallpaper folder - search XDG data directories
         let current_folder = find_wallpaper_folder();
 
-        // Pre-discover shaders so they're ready when user clicks "Live Wallpapers"
         let available_shaders = discover_shaders();
-        let placeholder = create_shader_placeholder(158, 105);
+        let placeholder = create_shader_placeholder(THUMB_WIDTH, THUMB_HEIGHT);
         let shader_thumbnails = vec![placeholder; available_shaders.len()];
 
         // About information
@@ -551,10 +560,8 @@ impl cosmic::Application for GlowBerrySettings {
             config_context,
             context_page: ContextPage::default(),
             about,
-            outputs: segmented_button::SingleSelectModel::default(),
-            active_output: None,
-            show_tab_bar: false,
-            categories,
+            library_filter,
+            library_query: String::new(),
             selection: SelectionContext::default(),
             available_shaders,
             shader_thumbnails,
@@ -566,15 +573,12 @@ impl cosmic::Application for GlowBerrySettings {
                 fl!("quality-half"),
                 fl!("quality-quarter"),
             ],
-            fit_options: vec![fl!("fit-fill"), fl!("fit-fit")],
-            selected_fit: 0,
-            cached_display_handle: None,
+            fit_options: vec![fl!("fit-zoom"), fl!("fit-inside"), fl!("fit-stretch")],
             current_folder,
             wallpaper_sources: Vec::new(), // Will be set below from config
             prefer_low_power: true,        // Will be set below
             glowberry_is_default: is_glowberry_default(),
             shader_param_values: HashMap::new(),
-            shader_details_expanded: false,
             power_saving: PowerSavingConfig::default(),
             on_battery_action_options: vec![
                 fl!("action-nothing"),
@@ -594,11 +598,19 @@ impl cosmic::Application for GlowBerrySettings {
             window_opacity: 1.0,               // Will be set below from config
             extend_config: ExtendConfig::default(),
             monitor_geometry: Vec::new(),
-
-            layer_context_menu: None,
+            selected_displays: Vec::new(),
+            placement_model,
+            window_width: 0.0,
+            window_height: 0.0,
+            inspector_open: false,
+            tip_index: 0,
+            tips_hidden: false,
+            canvas_menu: None,
+            card_menu: None,
             extend_layers: SlotMap::new(),
             extend_layer_colors: SecondaryMap::new(),
             extend_layer_sources: SecondaryMap::new(),
+            extend_layer_fit: SecondaryMap::new(),
             extend_selected_layer: None,
             extend_next_z: 0,
             extend_fit_view_requested: false,
@@ -618,6 +630,7 @@ impl cosmic::Application for GlowBerrySettings {
             app.power_saving = ctx.power_saving_config();
             app.window_opacity = ctx.window_opacity();
             app.extend_config = ctx.extend_config();
+            app.tips_hidden = ctx.0.get::<bool>("tips-hidden").unwrap_or(false);
 
             // Set dropdown indices based on loaded config
             app.selected_on_battery_action = match app.power_saving.on_battery_action {
@@ -636,11 +649,6 @@ impl cosmic::Application for GlowBerrySettings {
             };
         }
 
-        // Populate outputs from config first - these are the outputs that have been configured
-        // The daemon adds outputs to config as it discovers them via Wayland
-        app.populate_outputs_from_config();
-
-        // Initialize selection from config (needs outputs to be populated first for per-display mode)
         app.init_from_config();
 
         // Set the window title and start loading shader thumbnails
@@ -656,7 +664,7 @@ impl cosmic::Application for GlowBerrySettings {
             Task::none()
         };
 
-        // Load monitor geometry for the multi-monitor canvas
+        // Load monitor geometry for the canvas
         let monitor_task = Task::perform(crate::monitor_query::query_monitors(), |result| {
             cosmic::Action::App(Message::MonitorsLoaded(result.unwrap_or_default()))
         });
@@ -729,149 +737,141 @@ impl cosmic::Application for GlowBerrySettings {
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         // Clear one-shot flags
         self.extend_fit_view_requested = false;
+        if matches!(message, Message::Card(_)) {
+            self.card_menu = None;
+        }
 
         match message {
-            Message::CategoryToggle(index) => {
-                let category = match index {
-                    0 => Category::Wallpapers,
-                    1 => Category::Colors,
-                    _ => Category::Shaders,
-                };
-                return self.update(Message::ChangeCategory(category));
+            Message::LibraryFilter(entity) => self.library_filter.activate(entity),
+            Message::LibrarySearch(query) => self.library_query = query,
+
+            Message::PickImage(key) => {
+                let targets = self.target_monitors();
+                let placement = self.placement();
+                self.pick_image(key, &targets, placement);
             }
-
-            Message::ChangeCategory(category) => {
-                self.layer_context_menu = None;
-                let changed = self.categories.selected.as_ref() != Some(&category);
-                self.categories.selected = Some(category.clone());
-
-                if changed {
-                    // Load this page's saved working state so switching tabs
-                    // isn't a fresh start.
-                    self.load_category_canvas(&category);
+            Message::PickColor(idx) => {
+                let targets = self.target_monitors();
+                self.pick(Item::Color(idx), &targets, Placement::Each);
+            }
+            Message::PickShader(idx) => {
+                let targets = self.target_monitors();
+                self.pick_shader(idx, &targets);
+            }
+            Message::CardMenuOpen(item) => {
+                self.canvas_menu = None;
+                self.card_menu = Some(item);
+            }
+            Message::CardMenuClose => self.card_menu = None,
+            Message::Card(action) => match action {
+                CardAction::PutOnAll(item) => {
+                    let all = self.monitor_geometry.clone();
+                    self.pick(item, &all, Placement::Each);
                 }
-
-                if category == Category::Shaders {
-                    // Load shaders if needed
-                    if self.available_shaders.is_empty() {
-                        self.available_shaders = discover_shaders();
-                        let placeholder = create_shader_placeholder(158, 105);
-                        self.shader_thumbnails = vec![placeholder; self.available_shaders.len()];
+                CardAction::PutOn(item, i) => {
+                    if let Some(m) = self.monitor_geometry.get(i).cloned() {
+                        self.pick(item, &[m], Placement::Each);
                     }
-                    // Always try to load real thumbnails when switching to shaders
-                    if !self.available_shaders.is_empty() {
-                        return self.load_shader_thumbnails();
-                    }
                 }
-            }
-
-            Message::Select(id) => {
-                self.selection.active = Choice::Wallpaper(id);
-                self.cache_display_image();
-                self.apply_selection();
-            }
-
-            Message::ColorSelect(color) => {
-                self.selection.active = Choice::Color(color.clone());
-                self.cached_display_handle = None;
-                // Remember this as the color page's saved selection.
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.0.set("saved-color", color.clone());
+                CardAction::SpanAll(key) => {
+                    let all = self.monitor_geometry.clone();
+                    self.pick_image(key, &all, Placement::Span);
                 }
-                // Stage on the canvas; the user applies via the right-click menu.
-                if let Some(source) = self.build_active_source() {
-                    self.fill_monitors_locked(PathBuf::new(), None, (0, 0), Some(color), source);
-                }
-            }
-
-            Message::ShaderSelect(idx) => {
-                if idx < self.available_shaders.len() {
-                    self.selection.active = Choice::Shader(idx);
-                    self.cached_display_handle = None;
-                    let handle = self.shader_thumbnails.get(idx).cloned();
-                    if let Some(source) = self.build_active_source() {
-                        // Remember this as the live page's saved selection.
+                CardAction::RemoveSource(idx) => {
+                    if idx < self.wallpaper_sources.len() {
+                        self.wallpaper_sources.remove(idx);
                         if let Some(ctx) = &self.config_context {
-                            let _ = ctx.0.set("saved-shader", source.clone());
+                            let _ = ctx
+                                .0
+                                .set("wallpaper-sources", self.wallpaper_sources.clone());
                         }
-                        self.fill_monitors_locked(
-                            PathBuf::new(),
-                            handle,
-                            (1920, 1080),
-                            None,
-                            source,
-                        );
                     }
+                }
+            },
+
+            Message::DisplayRightClick(name, x, y) => {
+                self.canvas_menu = Some((CanvasMenu::Display(name), (x, y)));
+            }
+
+            Message::DisplayClear(name) => {
+                self.canvas_menu = None;
+                self.remove_locked_on(&name);
+                self.renormalize_z_indices();
+            }
+
+            Message::DisplayDuplicateAll(name) => {
+                self.canvas_menu = None;
+                self.spread_display(&name, Placement::Each);
+            }
+
+            Message::DisplaySpanAll(name) => {
+                self.canvas_menu = None;
+                self.spread_display(&name, Placement::Span);
+            }
+
+            Message::ExtendLayerFit(key) => {
+                self.canvas_menu = None;
+                if let Some(mut layer) = self.extend_layers.get(key).cloned() {
+                    fit_layer_to(&mut layer, &self.monitor_geometry);
+                    self.extend_layers[key] = layer;
                 }
             }
 
-            Message::ColorApplyAll(color_idx) => {
-                let Some(color) = DEFAULT_COLORS.get(color_idx).cloned() else {
-                    return Task::none();
-                };
-                self.selection.active = Choice::Color(color.clone());
-                self.cached_display_handle = None;
+            Message::DisplaySelected(name, additive) => {
+                self.canvas_menu = None;
+                if additive {
+                    if let Some(pos) = self.selected_displays.iter().position(|n| *n == name) {
+                        self.selected_displays.remove(pos);
+                    } else {
+                        self.selected_displays.push(name);
+                    }
+                } else {
+                    self.selected_displays = vec![name];
+                }
+                self.sync_choice_to_targets();
+            }
+
+            Message::CanvasBackgroundClicked => {
+                self.extend_selected_layer = None;
+                self.canvas_menu = None;
+                self.selected_displays.clear();
+                self.sync_choice_to_targets();
+            }
+
+            Message::ToggleInspector => self.inspector_open = !self.inspector_open,
+            Message::NextTip => self.tip_index = (self.tip_index + 1) % TIP_COUNT,
+            Message::HideTips => {
+                self.tips_hidden = true;
                 if let Some(ctx) = &self.config_context {
-                    let _ = ctx.0.set("saved-color", color.clone());
+                    let _ = ctx.0.set("tips-hidden", true);
                 }
-                self.apply_content_to_all(Some(color.clone()), Source::Color(color), None, (0, 0));
             }
 
-            Message::ColorShowOn(color_idx, monitor_idx) => {
-                let Some(color) = DEFAULT_COLORS.get(color_idx).cloned() else {
-                    return Task::none();
-                };
-                self.selection.active = Choice::Color(color.clone());
-                self.cached_display_handle = None;
-                if let Some(ctx) = &self.config_context {
-                    let _ = ctx.0.set("saved-color", color.clone());
-                }
-                self.apply_content_to_output(
-                    Some(color.clone()),
-                    Source::Color(color),
-                    None,
-                    (0, 0),
-                    monitor_idx,
-                );
+            Message::SelectAllDisplays => {
+                self.selected_displays.clear();
+                self.sync_choice_to_targets();
             }
 
-            Message::ShaderApplyAll(idx) => {
-                if idx < self.available_shaders.len() {
-                    self.selection.active = Choice::Shader(idx);
-                    self.cached_display_handle = None;
-                    let handle = self.shader_thumbnails.get(idx).cloned();
-                    if let Some(source) = self.build_active_source() {
-                        if let Some(ctx) = &self.config_context {
-                            let _ = ctx.0.set("saved-shader", source.clone());
-                        }
-                        self.apply_content_to_all(None, source, handle, (1920, 1080));
+            Message::SetPlacement(entity) => {
+                self.placement_model.activate(entity);
+                // Re-place the image the selected displays already share.
+                let targets = self.target_monitors();
+                if let Some(Shown::Image { path, .. }) = self.shared_shown(&targets)
+                    && let Some((key, _)) = self.selection.paths.iter().find(|(_, p)| **p == path)
+                {
+                    let placement = self.placement();
+                    self.pick_image(key, &targets, placement);
+                }
+            }
+
+            Message::SetImageFit(idx) => {
+                let mode = fit_mode(idx);
+                for m in self.target_monitors() {
+                    if let Some(k) = self.locked_layer_on(&m.name)
+                        && matches!(self.extend_layer_sources.get(k), Some(Source::Path(_)))
+                    {
+                        self.extend_layer_fit.insert(k, mode.clone());
                     }
-                }
-            }
-
-            Message::ShaderShowOn(idx, monitor_idx) => {
-                if idx < self.available_shaders.len() {
-                    self.selection.active = Choice::Shader(idx);
-                    self.cached_display_handle = None;
-                    let handle = self.shader_thumbnails.get(idx).cloned();
-                    if let Some(source) = self.build_active_source() {
-                        if let Some(ctx) = &self.config_context {
-                            let _ = ctx.0.set("saved-shader", source.clone());
-                        }
-                        self.apply_content_to_output(
-                            None,
-                            source,
-                            handle,
-                            (1920, 1080),
-                            monitor_idx,
-                        );
-                    }
-                }
-            }
-
-            Message::ShaderThumbnail(idx, handle) => {
-                if let Some(handle) = handle {
-                    self.set_shader_thumbnail(idx, handle);
                 }
             }
 
@@ -937,8 +937,7 @@ impl cosmic::Application for GlowBerrySettings {
             Message::PreviewFrame(idx, handle) => {
                 self.live_preview_in_flight = false;
                 // Ignore stale frames if the selection changed while rendering.
-                // Only update the monitor-canvas layers — not the fixed-size
-                // grid thumbnail, which must stay 158x105.
+                // Only update the canvas layers, not the fixed-size grid thumbnail.
                 if let Some(handle) = handle
                     && self.selection.active == Choice::Shader(idx)
                 {
@@ -946,28 +945,24 @@ impl cosmic::Application for GlowBerrySettings {
                 }
             }
 
-            Message::ShaderFrameRate(idx) => {
-                // Preview-only until Apply: writing the config here would make
-                // the daemon rebuild the wallpaper immediately, and the staged
-                // canvas source would clobber it again on Apply.
-                self.selected_shader_frame_rate = idx;
+            // Frame rate, quality and parameters are preview-only until Apply:
+            // writing the config here would make the daemon rebuild the
+            // wallpaper on every change.
+            Message::ShaderFrameRate(idx) => self.selected_shader_frame_rate = idx,
+            Message::ShaderRenderScale(idx) => self.selected_shader_render_scale = idx,
+            Message::ShaderParamChanged(shader_idx, param_name, value) => {
+                self.shader_param_values
+                    .entry(shader_idx)
+                    .or_default()
+                    .insert(param_name, value);
             }
-
-            Message::ShaderRenderScale(idx) => {
-                // Preview-only until Apply, same as frame rate.
-                self.selected_shader_render_scale = idx;
-            }
-
-            Message::Fit(idx) => {
-                self.selected_fit = idx;
-                self.cache_display_image();
-                self.apply_selection();
+            Message::ShaderParamReleased => {}
+            Message::ResetShaderParams(shader_idx) => {
+                self.shader_param_values.remove(&shader_idx);
             }
 
             Message::WallpaperEvent(event) => match event {
                 WallpaperEvent::Loading => {
-                    // Only reset the wallpaper-related data, preserve the active selection
-                    // (which may be a Color or Shader from config)
                     self.selection.paths.clear();
                     self.selection.display_images.clear();
                     self.selection.selection_handles.clear();
@@ -977,6 +972,15 @@ impl cosmic::Application for GlowBerrySettings {
                     display,
                     selection,
                 } => {
+                    // Staged layers restored from config get their picture once
+                    // the library has loaded it.
+                    let handle =
+                        ImageHandle::from_rgba(display.width(), display.height(), display.to_vec());
+                    for layer in self.extend_layers.values_mut() {
+                        if layer.image_handle.is_none() && layer.source_path == path {
+                            layer.image_handle = Some(handle.clone());
+                        }
+                    }
                     let key = self.selection.paths.insert(path);
                     self.selection.display_images.insert(key, display);
                     self.selection.selection_handles.insert(
@@ -989,38 +993,16 @@ impl cosmic::Application for GlowBerrySettings {
                     );
                 }
                 WallpaperEvent::Loaded => {
-                    // Get the correct entry based on same_on_all and active_output
-                    let source = if self.config.same_on_all {
-                        Some(self.config.default_background.source.clone())
-                    } else if let Some(ref output_name) = self.active_output {
-                        self.entry_for_output(output_name).map(|e| e.source.clone())
-                    } else {
-                        Some(self.config.default_background.source.clone())
-                    };
-
-                    // Only select a wallpaper if config source is a Path
-                    // Don't override if user has a Color or Shader selected
-                    if let Some(Source::Path(config_path)) = source {
-                        // Find the wallpaper that matches the config path
-                        if let Some((key, _)) = self
+                    // Point the active choice at the applied image, if any.
+                    if let Some(Source::Path(config_path)) =
+                        self.applied_source(&self.first_connector())
+                        && let Some((key, _)) = self
                             .selection
                             .paths
                             .iter()
                             .find(|(_, p)| **p == config_path)
-                        {
-                            self.selection.active = Choice::Wallpaper(key);
-                            self.categories.selected = Some(Category::Wallpapers);
-                        } else {
-                            // Config path not found in loaded wallpapers, pick first one
-                            if let Some((key, _)) = self.selection.paths.iter().next() {
-                                self.selection.active = Choice::Wallpaper(key);
-                            }
-                        }
-                    }
-
-                    // Only cache display image if a wallpaper is selected
-                    if matches!(self.selection.active, Choice::Wallpaper(_)) {
-                        self.cache_display_image();
+                    {
+                        self.selection.active = Choice::Wallpaper(key);
                     }
                 }
             },
@@ -1067,59 +1049,24 @@ impl cosmic::Application for GlowBerrySettings {
                         changed = true;
                     }
                 }
-                if changed {
-                    if let Some(ctx) = &self.config_context {
-                        let _ = ctx
-                            .0
-                            .set("wallpaper-sources", self.wallpaper_sources.clone());
-                    }
-                    // Surface the result on the wallpaper page.
-                    self.categories.selected = Some(Category::Wallpapers);
+                if changed && let Some(ctx) = &self.config_context {
+                    let _ = ctx
+                        .0
+                        .set("wallpaper-sources", self.wallpaper_sources.clone());
                 }
             }
 
-            Message::RemoveWallpaperSource(idx) => {
-                if idx < self.wallpaper_sources.len() {
-                    self.wallpaper_sources.remove(idx);
-                    if let Some(ctx) = &self.config_context {
-                        let _ = ctx
-                            .0
-                            .set("wallpaper-sources", self.wallpaper_sources.clone());
-                    }
-                }
-            }
-
-            Message::ToggleContextPage(context_page) => {
-                if self.context_page == context_page {
-                    // Toggle visibility if same page
+            Message::ToggleContextPage(page) => {
+                if self.context_page == page {
                     self.set_show_context(!self.core.window.show_context);
                 } else {
-                    // Switch to new page and show drawer
+                    self.context_page = page;
                     self.set_show_context(true);
                 }
-                self.context_page = context_page;
             }
 
             Message::OpenUrl(url) => {
                 let _ = open::that_detached(&url);
-            }
-
-            Message::SameWallpaper(value) => {
-                self.set_same_on_all(value);
-                self.apply_selection();
-            }
-
-            Message::OutputChanged(entity) => {
-                self.outputs.activate(entity);
-                if let Some(name) = self.outputs.data::<OutputName>(entity).map(|n| n.0.clone()) {
-                    self.active_output = Some(name.clone());
-
-                    // Load the wallpaper for this specific output if it exists
-                    if let Some(source) = self.entry_for_output(&name).map(|e| e.source.clone()) {
-                        self.select_entry_source(&source);
-                    }
-                }
-                self.cache_display_image();
             }
 
             Message::PreferLowPower(value) => {
@@ -1130,7 +1077,6 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::ConfigOrStateChanged(maybe_config) => {
-                // Update config if provided and different
                 if let Some(config) = maybe_config
                     && self.config != config
                 {
@@ -1142,19 +1088,11 @@ impl cosmic::Application for GlowBerrySettings {
                     self.config = config;
                     self.restage_on_monitors = true;
 
-                    // Update prefer_low_power from config
                     if let Some(ctx) = &self.config_context {
                         self.prefer_low_power = ctx.prefer_low_power();
                     }
-
-                    // Re-cache display image if needed
-                    if matches!(self.selection.active, Choice::Wallpaper(_)) {
-                        self.cache_display_image();
-                    }
                 }
 
-                // Always refresh connected outputs (state may have changed)
-                self.populate_outputs_from_config();
                 // Outputs or their arrangement may have changed; refresh the canvas.
                 return Task::perform(crate::monitor_query::query_monitors(), |result| {
                     cosmic::Action::App(Message::MonitorsLoaded(result.unwrap_or_default()))
@@ -1162,65 +1100,30 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::SetGlowBerryDefault(enable) => {
-                // Run the enable/disable command asynchronously with pkexec
                 return Task::perform(
                     async move { set_glowberry_default(enable).await },
                     |result| cosmic::Action::App(Message::SetGlowBerryDefaultResult(result)),
                 );
             }
 
-            Message::SetGlowBerryDefaultResult(result) => {
-                match result {
-                    Ok(is_default) => {
-                        self.glowberry_is_default = is_default;
-                        tracing::info!(
-                            "GlowBerry is now {}",
-                            if is_default { "enabled" } else { "disabled" }
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to set GlowBerry default: {}", e);
-                        // Refresh the actual state
-                        self.glowberry_is_default = is_glowberry_default();
-                    }
+            Message::SetGlowBerryDefaultResult(result) => match result {
+                Ok(is_default) => {
+                    self.glowberry_is_default = is_default;
+                    tracing::info!(
+                        "GlowBerry is now {}",
+                        if is_default { "enabled" } else { "disabled" }
+                    );
                 }
-            }
-
-            Message::ShaderParamChanged(shader_idx, param_name, value) => {
-                // Store the new value in memory only (don't write to config yet)
-                self.shader_param_values
-                    .entry(shader_idx)
-                    .or_default()
-                    .insert(param_name, value);
-                // UI will update to show new value, but config is not written
-            }
-
-            Message::ShaderParamReleased => {
-                // Parameter edits are preview-only: the in-app monitor preview
-                // reflects them (the preview tick reads `shader_param_values`),
-                // but we deliberately do NOT write the live wallpaper config
-                // here. Writing on every slider release would make the daemon
-                // reload and rebuild all wallpaper surfaces, flickering the real
-                // desktop. Edits are committed only when the user clicks Apply.
-            }
-
-            Message::ToggleShaderDetails => {
-                self.shader_details_expanded = !self.shader_details_expanded;
-            }
-
-            Message::ResetShaderParams(shader_idx) => {
-                // Remove all custom parameter values for this shader. The live
-                // preview picks up the defaults on its next tick; like slider
-                // edits, this stays preview-only and is not written to the live
-                // wallpaper config until the user clicks Apply.
-                self.shader_param_values.remove(&shader_idx);
-            }
+                Err(e) => {
+                    tracing::error!("Failed to set GlowBerry default: {}", e);
+                    self.glowberry_is_default = is_glowberry_default();
+                }
+            },
 
             // Power saving messages
             Message::SetOnBatteryAction(idx) => {
                 self.selected_on_battery_action = idx;
                 let action = match idx {
-                    0 => OnBatteryAction::Nothing,
                     1 => OnBatteryAction::Pause,
                     2 => OnBatteryAction::ReduceTo15Fps,
                     3 => OnBatteryAction::ReduceTo10Fps,
@@ -1244,7 +1147,6 @@ impl cosmic::Application for GlowBerrySettings {
                 self.selected_low_battery_threshold = idx;
                 let threshold = match idx {
                     0 => 10,
-                    1 => 20,
                     2 => 30,
                     3 => 50,
                     _ => 20,
@@ -1263,142 +1165,65 @@ impl cosmic::Application for GlowBerrySettings {
             }
 
             Message::SetWindowOpacity(value) => {
-                // Update the opacity value for live preview
                 self.window_opacity = value.clamp(0.0, 1.0);
             }
 
-            Message::SetBezel(idx, top, bottom, left, right) => {
-                if let Some(mon) = self.monitor_geometry.get_mut(idx) {
-                    mon.bezel = glowberry_config::extend::Bezel {
-                        top,
-                        bottom,
-                        left,
-                        right,
-                    };
-                }
-            }
-
-            Message::BezelReleased => {
-                if let Some(ctx) = &self.config_context {
-                    let mut bezels = glowberry_config::extend::ExtendConfig::load_bezels(ctx);
-                    for mon in &self.monitor_geometry {
-                        bezels.insert(mon.identity(), mon.bezel.clone());
-                    }
-                    let _ = glowberry_config::extend::ExtendConfig::save_bezels(ctx, &bezels);
-                }
-            }
-
             Message::WindowOpacityReleased => {
-                // Save the opacity value to config when slider is released
                 if let Some(ctx) = &self.config_context {
                     let _ = ctx.set_window_opacity(self.window_opacity);
                 }
             }
 
-            Message::MonitorsLoaded(mut monitors) => {
-                // Apply saved bezel config per monitor
-                if let Some(ctx) = &self.config_context {
-                    let bezels = glowberry_config::extend::ExtendConfig::load_bezels(ctx);
-                    for mon in &mut monitors {
-                        if let Some(bezel) = bezels.get(&mon.identity()) {
-                            mon.bezel = bezel.clone();
-                        }
-                    }
-                }
+            Message::MonitorsLoaded(monitors) => {
                 if monitors.is_empty() && !self.monitor_geometry.is_empty() {
                     // cosmic-randr failed; keep what we have rather than wiping the canvas.
                     return Task::none();
                 }
-                let names = |m: &[crate::monitor_query::MonitorGeometry]| {
+                let names = |m: &[MonitorGeometry]| {
                     let mut v: Vec<&str> = m.iter().map(|m| m.name.as_str()).collect();
                     v.sort_unstable();
                     v.iter().map(ToString::to_string).collect::<Vec<_>>()
                 };
                 let set_changed = names(&self.monitor_geometry) != names(&monitors);
                 self.monitor_geometry = monitors;
-                // Stage the saved content for this display set on first load and
+                let connected = self.monitor_geometry.clone();
+                self.selected_displays
+                    .retain(|n| connected.iter().any(|m| m.name == *n));
+                // Stage the applied content for this display set on first load and
                 // whenever the set of connected outputs changes. A pure
-                // rearrangement only moves the monitors under the existing layers.
+                // rearrangement only moves the displays under the existing layers.
                 if self.extend_layers.is_empty() || set_changed || self.restage_on_monitors {
                     self.restage_on_monitors = false;
                     // Identity-keyed entries can only be resolved once the
-                    // monitors are known, so redo the initial page selection.
+                    // monitors are known.
                     self.init_from_config();
-                    let monitor_names = self.display_keys();
+                    let keys = self.display_keys();
                     if let Some(ctx) = &self.config_context {
-                        let layers = glowberry_config::extend::ExtendConfig::load_for_displays(
-                            ctx,
-                            &monitor_names,
-                        );
+                        let layers = ExtendConfig::load_for_displays(ctx, &keys);
                         if !layers.is_empty() {
                             self.extend_config.layers = layers;
                         }
                     }
-                    let cat = self
-                        .categories
-                        .selected
-                        .clone()
-                        .unwrap_or(Category::Wallpapers);
-                    self.load_category_canvas(&cat);
+                    self.restage_from_config();
                     self.extend_fit_view_requested = true;
-                    // Render shader thumbnails so the per-output live preview
-                    // shows the actual shaders, not placeholders.
-                    if cat == Category::Shaders && !self.available_shaders.is_empty() {
-                        return self.load_shader_thumbnails();
-                    }
                 }
-            }
-
-            Message::ExtendAddLayer(wp_key) => {
-                let Some(path) = self.selection.paths.get(wp_key).cloned() else {
-                    return Task::none();
-                };
-                let image_handle = self
-                    .selection
-                    .display_images
-                    .get(wp_key)
-                    .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
-                let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
-
-                let z = self.extend_next_z;
-                self.extend_next_z += 1;
-
-                let mut layer = ExtendLayerState {
-                    source_path: path,
-                    image_handle,
-                    image_size,
-                    offset: (0.0, 0.0),
-                    scale: 1.0,
-                    z_index: z,
-                    locked: false,
-                    target_output: None,
-                };
-                self.auto_center_layer(&mut layer);
-                let key = self.extend_layers.insert(layer);
-                self.extend_selected_layer = Some(key);
             }
 
             Message::ExtendRemoveLayer(key) => {
-                self.layer_context_menu = None;
-                self.extend_layers.remove(key);
-                self.extend_layer_colors.remove(key);
-                self.extend_layer_sources.remove(key);
-                if self.extend_selected_layer == Some(key) {
-                    self.extend_selected_layer = None;
-                }
+                self.canvas_menu = None;
+                self.remove_layer(key);
                 self.renormalize_z_indices();
-                self.persist_canvas_per_output();
             }
 
             Message::ExtendLayerMoved(key, x, y) => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 if let Some(layer) = self.extend_layers.get_mut(key) {
                     layer.offset = (x, y);
                 }
             }
 
             Message::ExtendLayerScaled(key, scale) => {
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
                 if let Some(layer) = self.extend_layers.get_mut(key) {
                     layer.scale = scale;
                 }
@@ -1406,164 +1231,66 @@ impl cosmic::Application for GlowBerrySettings {
 
             Message::ExtendLayerSelected(maybe_key) => {
                 self.extend_selected_layer = maybe_key;
-                self.layer_context_menu = None;
+                self.canvas_menu = None;
             }
 
             Message::ExtendLayerUp => {
-                if let Some(sel_key) = self.extend_selected_layer {
-                    let sel_z = self.extend_layers[sel_key].z_index;
-                    if let Some((swap_key, _)) = self
-                        .extend_layers
-                        .iter()
-                        .filter(|(k, l)| *k != sel_key && l.z_index > sel_z)
-                        .min_by_key(|(_, l)| l.z_index)
-                    {
-                        let swap_z = self.extend_layers[swap_key].z_index;
-                        self.extend_layers[sel_key].z_index = swap_z;
-                        self.extend_layers[swap_key].z_index = sel_z;
-                    }
+                if let Some(key) = self.extend_selected_layer {
+                    self.swap_z(key, true);
                 }
             }
 
             Message::ExtendLayerDown => {
-                if let Some(sel_key) = self.extend_selected_layer {
-                    let sel_z = self.extend_layers[sel_key].z_index;
-                    if let Some((swap_key, _)) = self
-                        .extend_layers
-                        .iter()
-                        .filter(|(k, l)| *k != sel_key && l.z_index < sel_z)
-                        .max_by_key(|(_, l)| l.z_index)
-                    {
-                        let swap_z = self.extend_layers[swap_key].z_index;
-                        self.extend_layers[sel_key].z_index = swap_z;
-                        self.extend_layers[swap_key].z_index = sel_z;
-                    }
+                if let Some(key) = self.extend_selected_layer {
+                    self.swap_z(key, false);
                 }
             }
 
             Message::ExtendCenter => {
-                if let Some(sel_key) = self.extend_selected_layer {
-                    let mut layer = self.extend_layers[sel_key].clone();
-                    self.auto_center_layer(&mut layer);
-                    self.extend_layers[sel_key] = layer;
+                if let Some(key) = self.extend_selected_layer {
+                    let mut layer = self.extend_layers[key].clone();
+                    fit_layer_to(&mut layer, &self.monitor_geometry);
+                    self.extend_layers[key] = layer;
                 }
             }
 
-            Message::ApplyExtend => {
-                if self.extend_layers.is_empty() {
-                    return Task::none();
-                }
-
-                // Ensure per-output mode is active so the daemon loads per-output wallpapers
-                self.set_same_on_all(false);
-
-                // 1. Save locked layers directly as per-output wallpapers. Color
-                // and live items carry a source override (color/shader); images
-                // fall back to their path.
-                let mut locked_monitors: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                let mut locked_entries: Vec<(String, Source)> = Vec::new();
-                for (key, layer) in self.extend_layers.iter() {
-                    if layer.locked
-                        && let Some(ref output) = layer.target_output
-                    {
-                        let source = self
-                            .extend_layer_sources
-                            .get(key)
-                            .cloned()
-                            .unwrap_or_else(|| Source::Path(layer.source_path.clone()));
-                        // The cached source was captured at selection time, before
-                        // any parameter edits. Rebuild shader sources from the
-                        // current values so custom parameters aren't reset to
-                        // defaults on apply.
-                        let source = self.refresh_shader_source(source);
-                        locked_entries.push((output.clone(), source));
-                        locked_monitors.insert(output.clone());
-                    }
-                }
-                for (output, source) in locked_entries {
-                    let entry = Entry::new(self.output_key(&output), source);
-                    self.set_entry(entry);
-                }
-
-                // 2. Composite unlocked layers for monitors not covered by locked layers
-                let unlocked_layers: Vec<glowberry_lib::extend_crop::LayerInfo> = self
-                    .extend_layers
-                    .values()
-                    .filter(|l| !l.locked)
-                    .map(|l| glowberry_lib::extend_crop::LayerInfo {
-                        source_path: l.source_path.clone(),
-                        offset: l.offset,
-                        img_scale: l.scale,
-                        z_index: l.z_index,
-                    })
-                    .collect();
-
-                let monitors_to_composite: Vec<glowberry_lib::extend_crop::MonitorInfo> = self
-                    .monitor_geometry
-                    .iter()
-                    .filter(|m| !locked_monitors.contains(&m.name))
-                    .map(|m| glowberry_lib::extend_crop::MonitorInfo {
-                        name: m.name.clone(),
-                        position: m.position,
-                        logical_size: m.logical_size,
-                        physical_size: m.physical_size,
-                        scale: m.scale,
-                    })
-                    .collect();
-
-                // Persist the multi-monitor image layout only when applying from
-                // the wallpaper page. On the color/live pages the canvas holds
-                // color/shader items (no image layers), so saving here would wipe
-                // the wallpaper page's saved layout.
-                if matches!(self.categories.selected, Some(Category::Wallpapers)) {
-                    self.extend_config.layers = self
-                        .extend_layers
-                        .values()
-                        .filter(|l| !l.source_path.as_os_str().is_empty())
-                        .map(|l| glowberry_config::extend::ExtendLayer {
-                            source_path: l.source_path.clone(),
-                            img_offset_x: l.offset.0,
-                            img_offset_y: l.offset.1,
-                            img_scale: l.scale,
-                            z_index: l.z_index,
-                            locked: l.locked,
-                            target_output: l.target_output.as_deref().map(|c| self.output_key(c)),
-                        })
-                        .collect();
-                    if let Some(ctx) = &self.config_context {
-                        let _ = ctx.save_extend_config(&self.extend_config);
-                        let monitor_names = self.display_keys();
-                        let _ = glowberry_config::extend::ExtendConfig::save_for_displays(
-                            ctx,
-                            &monitor_names,
-                            &self.extend_config.layers,
-                        );
-                    }
-                }
-
-                if unlocked_layers.is_empty() || monitors_to_composite.is_empty() {
-                    // Nothing to composite — locked layers already saved
-                    return Task::none();
-                }
-
-                let mut layer_infos = unlocked_layers;
-                let cache_dir = glowberry_lib::extend_crop::cache_dir();
-
-                return Task::perform(
-                    async move {
-                        glowberry_lib::extend_crop::composite_for_monitors(
-                            &mut layer_infos,
-                            &monitors_to_composite,
-                            &cache_dir,
-                        )
-                        .map_err(|e| e.to_string())
-                    },
-                    |result| cosmic::Action::App(Message::ExtendApplied(result)),
-                );
+            Message::ExtendFitView => {
+                self.extend_fit_view_requested = true;
             }
 
-            Message::ExtendApplied(result) => match result {
+            Message::ExtendClearAll => {
+                self.extend_layers.clear();
+                self.extend_layer_colors.clear();
+                self.extend_layer_sources.clear();
+                self.extend_layer_fit.clear();
+                self.extend_selected_layer = None;
+                self.extend_next_z = 0;
+            }
+
+            Message::ExtendLayerRightClick(key, x, y) => {
+                if self.extend_layers.get(key).is_some_and(|l| !l.locked) {
+                    self.extend_selected_layer = Some(key);
+                }
+                self.canvas_menu = Some((CanvasMenu::Layer(key), (x, y)));
+            }
+
+            Message::ExtendLayerMenuClose => {
+                self.canvas_menu = None;
+            }
+
+            Message::ExtendLayerBringForward(key) => {
+                self.canvas_menu = None;
+                self.swap_z(key, true);
+            }
+
+            Message::ExtendLayerSendBack(key) => {
+                self.canvas_menu = None;
+                self.swap_z(key, false);
+            }
+
+            Message::Apply => return self.apply(),
+
+            Message::Applied(result) => match result {
                 Ok(crops) => {
                     for (output_name, cached_path) in crops {
                         let entry =
@@ -1577,319 +1304,10 @@ impl cosmic::Application for GlowBerrySettings {
                 }
             },
 
-            Message::ExtendClearAll => {
-                self.extend_layers.clear();
-                self.extend_layer_colors.clear();
-                self.extend_layer_sources.clear();
-                self.extend_selected_layer = None;
-                self.extend_next_z = 0;
-            }
-
-            Message::ExtendToggleLock(key) => {
-                if let Some(layer) = self.extend_layers.get_mut(key) {
-                    layer.locked = !layer.locked;
-                    if !layer.locked {
-                        layer.target_output = None;
-                    }
-                }
-            }
-
-            Message::WallpaperClicked(_key) => {}
-
-            Message::WallpaperPopupClose => {}
-
-            Message::WallpaperCustomize(key) => {
-                let Some(path) = self.selection.paths.get(key).cloned() else {
-                    return Task::none();
-                };
-                let image_handle = self
-                    .selection
-                    .display_images
-                    .get(key)
-                    .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
-                let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
-                let z = self.extend_next_z;
-                self.extend_next_z += 1;
-                let mut layer = ExtendLayerState {
-                    source_path: path,
-                    image_handle,
-                    image_size,
-                    offset: (0.0, 0.0),
-                    scale: 1.0,
-                    z_index: z,
-                    locked: false,
-                    target_output: None,
-                };
-                self.auto_center_layer(&mut layer);
-                let lkey = self.extend_layers.insert(layer);
-                self.extend_selected_layer = Some(lkey);
-            }
-
-            Message::WallpaperDuplicateAll(key) => {
-                let Some(path) = self.selection.paths.get(key).cloned() else {
-                    return Task::none();
-                };
-
-                // Apply to config: set wallpaper on all screens
-                self.set_same_on_all(true);
-                let entry = Entry::new("all".to_string(), Source::Path(path.clone()));
-                self.set_entry(entry);
-
-                // Clear existing layers and add one per monitor to show in preview
-                self.extend_layers.clear();
-                self.extend_selected_layer = None;
-                self.extend_next_z = 0;
-
-                let image_handle = self
-                    .selection
-                    .display_images
-                    .get(key)
-                    .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
-                let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
-
-                for monitor in &self.monitor_geometry {
-                    let mon_w = monitor.logical_size.0 as f64;
-                    let mon_h = monitor.logical_size.1 as f64;
-                    let img_w = image_size.0 as f64;
-                    let img_h = image_size.1 as f64;
-                    // Scale to cover each monitor (zoom mode)
-                    let scale = (mon_w / img_w).max(mon_h / img_h);
-                    let offset_x = monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0;
-                    let offset_y = monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0;
-
-                    let z = self.extend_next_z;
-                    self.extend_next_z += 1;
-                    self.extend_layers.insert(ExtendLayerState {
-                        source_path: path.clone(),
-                        image_handle: image_handle.clone(),
-                        image_size,
-                        offset: (offset_x, offset_y),
-                        scale,
-                        z_index: z,
-                        locked: true,
-                        target_output: Some(monitor.name.clone()),
-                    });
-                }
-            }
-
-            Message::WallpaperSpanAll(key) => {
-                let Some(path) = self.selection.paths.get(key).cloned() else {
-                    return Task::none();
-                };
-                let image_handle = self
-                    .selection
-                    .display_images
-                    .get(key)
-                    .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
-                let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
-                let z = self.extend_next_z;
-                self.extend_next_z += 1;
-                let mut layer = ExtendLayerState {
-                    source_path: path,
-                    image_handle,
-                    image_size,
-                    offset: (0.0, 0.0),
-                    scale: 1.0,
-                    z_index: z,
-                    locked: false,
-                    target_output: None,
-                };
-                self.auto_center_layer(&mut layer);
-                let lkey = self.extend_layers.insert(layer);
-                self.extend_selected_layer = Some(lkey);
-            }
-
-            Message::WallpaperShowOn(key, screen_name) => {
-                let Some(path) = self.selection.paths.get(key).cloned() else {
-                    return Task::none();
-                };
-
-                // Ensure per-output mode
-                self.set_same_on_all(false);
-
-                // Write config directly
-                let entry = Entry::new(self.output_key(&screen_name), Source::Path(path.clone()));
-                self.set_entry(entry);
-
-                // Add locked layer to preview on the target monitor
-                if let Some(monitor) = self.monitor_geometry.iter().find(|m| m.name == screen_name)
-                {
-                    let image_handle =
-                        self.selection.display_images.get(key).map(|img| {
-                            ImageHandle::from_rgba(img.width(), img.height(), img.to_vec())
-                        });
-                    let image_size = image::image_dimensions(&path).unwrap_or((800, 600));
-                    let mon_w = monitor.logical_size.0 as f64;
-                    let mon_h = monitor.logical_size.1 as f64;
-                    let img_w = image_size.0 as f64;
-                    let img_h = image_size.1 as f64;
-                    let scale = (mon_w / img_w).max(mon_h / img_h);
-                    let offset_x = monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0;
-                    let offset_y = monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0;
-
-                    let z = self.extend_next_z;
-                    self.extend_next_z += 1;
-                    self.extend_layers.insert(ExtendLayerState {
-                        source_path: path,
-                        image_handle,
-                        image_size,
-                        offset: (offset_x, offset_y),
-                        scale,
-                        z_index: z,
-                        locked: true,
-                        target_output: Some(screen_name),
-                    });
-                }
-            }
-
-            Message::WallpaperShowOnIdx(key, idx) => {
-                if let Some(monitor) = self.monitor_geometry.get(idx) {
-                    let name = monitor.name.clone();
-                    return self.update(Message::WallpaperShowOn(key, name));
-                }
-            }
-
-            Message::LayerDuplicateAll(layer_key) => {
-                self.layer_context_menu = None;
-                let Some(layer) = self.extend_layers.get(layer_key) else {
-                    return Task::none();
-                };
-                let path = layer.source_path.clone();
-                let image_handle = layer.image_handle.clone();
-                let image_size = layer.image_size;
-                let color = self.extend_layer_colors.get(layer_key).cloned();
-                let source = self
-                    .extend_layer_sources
-                    .get(layer_key)
-                    .cloned()
-                    .unwrap_or_else(|| Source::Path(path.clone()));
-
-                // Apply the content to all displays.
-                self.set_same_on_all(true);
-                let entry = Entry::new("all".to_string(), source.clone());
-                self.set_entry(entry);
-
-                // Replace layers with locked per-monitor items.
-                self.fill_monitors_locked(path, image_handle, image_size, color, source);
-            }
-
-            Message::LayerShowOn(layer_key, screen_name) => {
-                self.layer_context_menu = None;
-                let Some(layer) = self.extend_layers.get(layer_key) else {
-                    return Task::none();
-                };
-                let path = layer.source_path.clone();
-                let image_handle = layer.image_handle.clone();
-                let image_size = layer.image_size;
-                let color = self.extend_layer_colors.get(layer_key).cloned();
-                let source = self
-                    .extend_layer_sources
-                    .get(layer_key)
-                    .cloned()
-                    .unwrap_or_else(|| Source::Path(path.clone()));
-
-                // Ensure per-output mode
-                self.set_same_on_all(false);
-                let entry = Entry::new(self.output_key(&screen_name), source.clone());
-                self.set_entry(entry);
-
-                // Add a locked item on the target monitor, removing any existing
-                // one for that output first so it isn't duplicated.
-                let existing: Vec<DefaultKey> = self
-                    .extend_layers
-                    .iter()
-                    .filter(|(_, l)| l.target_output.as_deref() == Some(screen_name.as_str()))
-                    .map(|(k, _)| k)
-                    .collect();
-                for k in existing {
-                    self.extend_layers.remove(k);
-                    self.extend_layer_colors.remove(k);
-                    self.extend_layer_sources.remove(k);
-                }
-                if let Some(monitor) = self.monitor_geometry.iter().find(|m| m.name == screen_name)
-                {
-                    let mon_w = monitor.logical_size.0 as f64;
-                    let mon_h = monitor.logical_size.1 as f64;
-                    let (size, scale, offset) = if color.is_some() {
-                        (
-                            monitor.logical_size,
-                            1.0,
-                            (monitor.position.0 as f64, monitor.position.1 as f64),
-                        )
-                    } else {
-                        let img_w = image_size.0.max(1) as f64;
-                        let img_h = image_size.1.max(1) as f64;
-                        let scale = (mon_w / img_w).max(mon_h / img_h);
-                        (
-                            image_size,
-                            scale,
-                            (
-                                monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0,
-                                monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0,
-                            ),
-                        )
-                    };
-                    let z = self.extend_next_z;
-                    self.extend_next_z += 1;
-                    let key = self.extend_layers.insert(ExtendLayerState {
-                        source_path: path,
-                        image_handle,
-                        image_size: size,
-                        offset,
-                        scale,
-                        z_index: z,
-                        locked: true,
-                        target_output: Some(screen_name),
-                    });
-                    if let Some(c) = &color {
-                        self.extend_layer_colors.insert(key, c.clone());
-                    }
-                    self.extend_layer_sources.insert(key, source);
-                }
-                self.persist_canvas_per_output();
-            }
-
-            Message::ExtendFitView => {
+            Message::Revert => {
+                self.init_from_config();
+                self.restage_from_config();
                 self.extend_fit_view_requested = true;
-            }
-
-            Message::ExtendLayerRightClick(key, x, y) => {
-                self.extend_selected_layer = Some(key);
-                self.layer_context_menu = Some((key, (x, y)));
-            }
-
-            Message::ExtendLayerMenuClose => {
-                self.layer_context_menu = None;
-            }
-
-            Message::ExtendLayerBringForward(key) => {
-                self.layer_context_menu = None;
-                let sel_z = self.extend_layers[key].z_index;
-                if let Some((swap_key, _)) = self
-                    .extend_layers
-                    .iter()
-                    .filter(|(k, l)| *k != key && l.z_index > sel_z)
-                    .min_by_key(|(_, l)| l.z_index)
-                {
-                    let swap_z = self.extend_layers[swap_key].z_index;
-                    self.extend_layers[key].z_index = swap_z;
-                    self.extend_layers[swap_key].z_index = sel_z;
-                }
-            }
-
-            Message::ExtendLayerSendBack(key) => {
-                self.layer_context_menu = None;
-                let sel_z = self.extend_layers[key].z_index;
-                if let Some((swap_key, _)) = self
-                    .extend_layers
-                    .iter()
-                    .filter(|(k, l)| *k != key && l.z_index < sel_z)
-                    .max_by_key(|(_, l)| l.z_index)
-                {
-                    let swap_z = self.extend_layers[swap_key].z_index;
-                    self.extend_layers[key].z_index = swap_z;
-                    self.extend_layers[swap_key].z_index = sel_z;
-                }
             }
         }
 
@@ -1897,104 +1315,142 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let mut children: Vec<Element<'_, Message>> = Vec::with_capacity(6);
+        let condensed = self.condensed();
 
-        let is_wallpaper_mode = matches!(self.categories.selected, Some(Category::Wallpapers));
-
-        // 1. Preview area (always slot 1) — the multi-monitor canvas in every
-        // mode (wallpaper, color, live).
-        children.push(self.view_multi_monitor_canvas());
-
-        // 2. Settings list (always slot 2 — empty for wallpapers)
-        if is_wallpaper_mode {
-            children.push(widget::Space::new().into());
+        // Height left for the canvas and the library once the header bar,
+        // footer and padding are taken. Unknown until the first resize.
+        let content_h = if self.window_height > 0.0 {
+            (self.window_height - 46.0 - 57.0 - 40.0).max(0.0)
         } else {
-            children.push(
-                container(self.view_settings_list())
-                    .width(Length::Fill)
-                    .align_x(Alignment::Center)
-                    .into(),
-            );
-        }
-
-        // Slot 3 (category selector moved to header toggle)
-        children.push(widget::Space::new().into());
-
-        // Selection grid
-        let grid = match self.categories.selected {
-            Some(Category::Wallpapers) => self.view_wallpaper_grid(),
-            Some(Category::Colors) => self.view_color_grid(),
-            Some(Category::Shaders) => self.view_shader_grid(),
-            None => widget::Space::new().into(),
+            600.0
         };
-        children.push(
-            container(grid)
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
-                .into(),
-        );
+        // The canvas takes 40% but never less than a legible minimum.
+        let canvas_h = (content_h * 0.4).max(160.0);
+        // Toolbar plus one row of cards is the least the library needs; below
+        // that the whole column scrolls instead of squeezing.
+        let toolbar_h = if condensed { 88.0 } else { 44.0 };
+        let fits = content_h >= canvas_h + 16.0 + toolbar_h + 12.0 + 170.0;
 
-        // Wrap everything in a scrollable container
-        let scrollable_content = widget::scrollable(
-            widget::column::with_children(children)
-                .spacing(22)
-                .padding(20)
+        let column = widget::column::with_children(vec![
+            container(self.view_canvas())
                 .width(Length::Fill)
-                .align_x(Alignment::Center),
+                .height(Length::Fixed(canvas_h))
+                .into(),
+            container(self.view_library(fits))
+                .width(Length::Fill)
+                .height(if fits { Length::Fill } else { Length::Shrink })
+                .into(),
+        ])
+        .spacing(16)
+        .padding(20)
+        .width(Length::Fill);
+        let main: Element<'_, Message> = if fits {
+            column.height(Length::Fill).into()
+        } else {
+            widget::scrollable(column)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
+
+        let panel = container(
+            widget::column::with_children(vec![
+                text::title4(self.inspector_title()).into(),
+                widget::scrollable(self.view_inspector())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+            ])
+            .spacing(12)
+            .padding(20),
         )
-        .width(Length::Fill)
+        .width(if condensed {
+            Length::Fill
+        } else {
+            Length::Fixed(360.0)
+        })
         .height(Length::Fill);
 
-        // Apply custom background with opacity
-        let opacity = self.window_opacity;
-        container(scrollable_content)
+        // On a narrow window the inspector is toggled from the header and
+        // takes the whole window, like the nav bar does.
+        let content: Element<'_, Message> = if condensed && self.inspector_open {
+            panel.into()
+        } else if condensed {
+            main
+        } else {
+            widget::row::with_children(vec![
+                main,
+                widget::divider::vertical::default().into(),
+                panel.into(),
+            ])
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(cosmic::theme::Container::custom(move |theme| {
-                let cosmic = theme.cosmic();
-                let mut bg_color: cosmic::iced::Color =
-                    cosmic.background(theme.transparent).base.into();
-                bg_color.a = opacity;
-                cosmic::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(bg_color)),
-                    icon_color: Some(cosmic.background(theme.transparent).on.into()),
-                    text_color: Some(cosmic.background(theme.transparent).on.into()),
-                    border: cosmic::iced::Border::default(),
-                    shadow: cosmic::iced::Shadow::default(),
-                    snap: false,
-                }
-            }))
+            .into()
+        };
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .class(self.window_bg())
             .into()
     }
 
-    fn header_center(&self) -> Vec<Element<'_, Self::Message>> {
-        let selected = match self.categories.selected {
-            Some(Category::Wallpapers) => 0,
-            Some(Category::Colors) => 1,
-            Some(Category::Shaders) => 2,
-            None => 0,
+    fn footer(&self) -> Option<Element<'_, Self::Message>> {
+        let dirty = self.dirty_displays();
+        let status = if self.extend_layers.is_empty() {
+            fl!("hint-empty")
+        } else if dirty.is_empty() {
+            fl!("status-applied")
+        } else {
+            fl!("status-changed", n = (dirty.len() as u64))
         };
-        vec![
-            cosmetics::widgets::toggle::toggle3(
-                "preferences-desktop-wallpaper-symbolic",
-                "applications-graphics-symbolic",
-                "applications-multimedia-symbolic",
-                selected,
-            )
-            .on_select(Message::CategoryToggle)
+
+        let mut revert = button::text(fl!("revert"));
+        let mut apply = button::text(fl!("apply")).class(cosmic::theme::Button::Suggested);
+        if !dirty.is_empty() {
+            revert = revert.on_press(Message::Revert);
+            apply = apply.on_press(Message::Apply);
+        }
+
+        let bar = widget::row::with_children(vec![
+            text::body(status).into(),
+            widget::Space::new().width(Length::Fill).into(),
+            revert.into(),
+            apply.into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        Some(
+            container(widget::column::with_children(vec![
+                widget::divider::horizontal::default().into(),
+                container(bar).padding([12, 20]).into(),
+            ]))
+            .width(Length::Fill)
+            .class(self.window_bg())
             .into(),
-        ]
+        )
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
-        vec![
+        let mut items: Vec<Element<'_, Self::Message>> = Vec::with_capacity(3);
+        if self.condensed() {
+            items.push(
+                widget::nav_bar_toggle()
+                    .active(self.inspector_open)
+                    .on_toggle(Message::ToggleInspector)
+                    .into(),
+            );
+        }
+        items.extend([
             widget::button::icon(widget::icon::from_name("preferences-system-symbolic"))
                 .on_press(Message::ToggleContextPage(ContextPage::Settings))
                 .into(),
             widget::button::icon(widget::icon::from_name("help-about-symbolic"))
                 .on_press(Message::ToggleContextPage(ContextPage::About))
                 .into(),
-        ]
+        ]);
+        items
     }
 
     fn context_drawer(&self) -> Option<ContextDrawer<'_, Self::Message>> {
@@ -2017,8 +1473,8 @@ impl cosmic::Application for GlowBerrySettings {
     }
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
-        // Return transparent background for the window surface
-        // The actual background with opacity is applied via our custom container in view()
+        // Transparent window surface; the content paints its own background
+        // with the configured opacity.
         let theme = cosmic::theme::active();
         let cosmic_theme = theme.cosmic();
 
@@ -2030,282 +1486,777 @@ impl cosmic::Application for GlowBerrySettings {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Display targeting and staging
+// ---------------------------------------------------------------------------
+
 impl GlowBerrySettings {
-    /// Build the settings drawer content
-    fn settings_drawer_view(&self) -> Element<'_, Message> {
-        // Build power saving section
-        let mut power_saving_section = widget::settings::section().title(fl!("power-saving"));
+    /// Too narrow for the canvas, the library and the inspector side by side.
+    fn condensed(&self) -> bool {
+        self.window_width > 0.0 && self.window_width < 960.0
+    }
 
-        // On battery power action
-        power_saving_section = power_saving_section.add(settings::item(
-            fl!("on-battery"),
-            dropdown(
-                &self.on_battery_action_options,
-                Some(self.selected_on_battery_action),
-                Message::SetOnBatteryAction,
-            ),
-        ));
+    fn placement(&self) -> Placement {
+        self.placement_model
+            .active_data::<Placement>()
+            .copied()
+            .unwrap_or(Placement::Each)
+    }
 
-        // Pause on low battery (with conditional threshold dropdown)
-        {
-            let toggle_row = settings::item(
-                fl!("pause-low-battery"),
-                toggler(self.power_saving.pause_on_low_battery)
-                    .on_toggle(Message::SetPauseOnLowBattery),
+    /// The displays the next pick lands on: the selected ones, or all.
+    fn target_monitors(&self) -> Vec<MonitorGeometry> {
+        let selected: Vec<MonitorGeometry> = self
+            .monitor_geometry
+            .iter()
+            .filter(|m| self.selected_displays.contains(&m.name))
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            self.monitor_geometry.clone()
+        } else {
+            selected
+        }
+    }
+
+    /// Connector of the first display, for choosing what the preview follows.
+    fn first_connector(&self) -> String {
+        self.monitor_geometry
+            .first()
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| "all".to_string())
+    }
+
+    fn next_z(&mut self) -> usize {
+        let z = self.extend_next_z;
+        self.extend_next_z += 1;
+        z
+    }
+
+    /// Put a library item on `targets`.
+    fn pick(&mut self, item: Item, targets: &[MonitorGeometry], placement: Placement) {
+        match item {
+            Item::Image(key) => self.pick_image(key, targets, placement),
+            Item::Color(idx) => {
+                if let Some(color) = DEFAULT_COLORS.get(idx).cloned() {
+                    self.pick_color(color, targets);
+                }
+            }
+            Item::Shader(idx) => self.pick_shader(idx, targets),
+        }
+    }
+
+    fn pick_image(&mut self, key: DefaultKey, targets: &[MonitorGeometry], placement: Placement) {
+        let Some(path) = self.selection.paths.get(key).cloned() else {
+            return;
+        };
+        if targets.is_empty() {
+            return;
+        }
+        let handle = self
+            .selection
+            .display_images
+            .get(key)
+            .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
+        let size = image::image_dimensions(&path).unwrap_or((800, 600));
+        self.selection.active = Choice::Wallpaper(key);
+
+        for m in targets {
+            self.remove_locked_on(&m.name);
+        }
+        if placement == Placement::Span {
+            let z = self.next_z();
+            let mut layer = ExtendLayerState {
+                source_path: path,
+                image_handle: handle,
+                image_size: size,
+                offset: (0.0, 0.0),
+                scale: 1.0,
+                z_index: z,
+                locked: false,
+                target_output: None,
+            };
+            fit_layer_to(&mut layer, targets);
+            let k = self.extend_layers.insert(layer);
+            self.extend_selected_layer = Some(k);
+        } else {
+            for m in targets {
+                self.insert_locked_item(
+                    m,
+                    None,
+                    Source::Path(path.clone()),
+                    handle.clone(),
+                    size,
+                    path.clone(),
+                );
+            }
+            self.extend_selected_layer = None;
+        }
+        self.after_pick();
+    }
+
+    fn pick_color(&mut self, color: Color, targets: &[MonitorGeometry]) {
+        self.selection.active = Choice::Color(color.clone());
+        for m in targets {
+            self.remove_locked_on(&m.name);
+            self.insert_locked_item(
+                m,
+                Some(color.clone()),
+                Source::Color(color.clone()),
+                None,
+                (0, 0),
+                PathBuf::new(),
             );
+        }
+        self.extend_selected_layer = None;
+        self.after_pick();
+    }
 
-            if self.power_saving.pause_on_low_battery {
-                let dropdown_row = settings::item(
-                    fl!("low-battery-threshold"),
-                    dropdown(
-                        &self.low_battery_threshold_options,
-                        Some(self.selected_low_battery_threshold),
-                        Message::SetLowBatteryThreshold,
-                    ),
-                );
+    fn pick_shader(&mut self, idx: usize, targets: &[MonitorGeometry]) {
+        if idx >= self.available_shaders.len() {
+            return;
+        }
+        self.selection.active = Choice::Shader(idx);
+        let Some(source) = self.build_active_source() else {
+            return;
+        };
+        let handle = self.shader_thumbnails.get(idx).cloned();
+        for m in targets {
+            self.remove_locked_on(&m.name);
+            self.insert_locked_item(
+                m,
+                None,
+                source.clone(),
+                handle.clone(),
+                LIVE_ITEM_SIZE,
+                PathBuf::new(),
+            );
+        }
+        self.extend_selected_layer = None;
+        self.after_pick();
+    }
 
-                power_saving_section = power_saving_section.add(
-                    widget::column::with_children(vec![toggle_row.into(), dropdown_row.into()])
-                        .spacing(8),
-                );
-            } else {
-                power_saving_section = power_saving_section.add(toggle_row);
+    /// Put what one display shows on every display, side by side or spanned.
+    fn spread_display(&mut self, connector: &str, placement: Placement) {
+        let Some(m) = self
+            .monitor_geometry
+            .iter()
+            .find(|m| m.name == connector)
+            .cloned()
+        else {
+            return;
+        };
+        let all = self.monitor_geometry.clone();
+        match self.shown_on(&m) {
+            Shown::Image { path, .. } => {
+                let key = self
+                    .selection
+                    .paths
+                    .iter()
+                    .find(|(_, p)| **p == path)
+                    .map(|(k, _)| k);
+                if let Some(key) = key {
+                    self.pick_image(key, &all, placement);
+                }
+            }
+            Shown::Color(c) => self.pick_color(c, &all),
+            Shown::Shader(idx) => self.pick_shader(idx, &all),
+            Shown::Nothing => {}
+        }
+    }
+
+    fn after_pick(&mut self) {
+        self.prune_hidden_free_layers();
+        self.renormalize_z_indices();
+        self.canvas_menu = None;
+    }
+
+    /// Insert one locked item filling `monitor` (colors fill exactly;
+    /// images/shaders cover-fit). Records its color/source.
+    fn insert_locked_item(
+        &mut self,
+        monitor: &MonitorGeometry,
+        color: Option<Color>,
+        source: Source,
+        image_handle: Option<ImageHandle>,
+        image_size: (u32, u32),
+        source_path: PathBuf,
+    ) -> DefaultKey {
+        let mon_w = monitor.logical_size.0 as f64;
+        let mon_h = monitor.logical_size.1 as f64;
+        let (size, scale, offset) = if color.is_some() {
+            (
+                monitor.logical_size,
+                1.0,
+                (monitor.position.0 as f64, monitor.position.1 as f64),
+            )
+        } else {
+            let img_w = image_size.0.max(1) as f64;
+            let img_h = image_size.1.max(1) as f64;
+            let scale = (mon_w / img_w).max(mon_h / img_h);
+            (
+                image_size,
+                scale,
+                (
+                    monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0,
+                    monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0,
+                ),
+            )
+        };
+        let z = self.next_z();
+        let key = self.extend_layers.insert(ExtendLayerState {
+            source_path,
+            image_handle,
+            image_size: size,
+            offset,
+            scale,
+            z_index: z,
+            locked: true,
+            target_output: Some(monitor.name.clone()),
+        });
+        if let Some(c) = &color {
+            self.extend_layer_colors.insert(key, c.clone());
+        }
+        self.extend_layer_sources.insert(key, source);
+        key
+    }
+
+    fn remove_layer(&mut self, key: DefaultKey) {
+        self.extend_layers.remove(key);
+        self.extend_layer_colors.remove(key);
+        self.extend_layer_sources.remove(key);
+        self.extend_layer_fit.remove(key);
+        if self.extend_selected_layer == Some(key) {
+            self.extend_selected_layer = None;
+        }
+    }
+
+    /// Remove the locked item on a display, if any.
+    fn remove_locked_on(&mut self, connector: &str) {
+        let keys: Vec<DefaultKey> = self
+            .extend_layers
+            .iter()
+            .filter(|(_, l)| l.locked && l.target_output.as_deref() == Some(connector))
+            .map(|(k, _)| k)
+            .collect();
+        for k in keys {
+            self.remove_layer(k);
+        }
+    }
+
+    /// Drop free layers that no display can see any more: every display they
+    /// cover has a locked item or a higher free layer on top.
+    fn prune_hidden_free_layers(&mut self) {
+        let free: Vec<(DefaultKey, usize)> = self
+            .extend_layers
+            .iter()
+            .filter(|(_, l)| !l.locked)
+            .map(|(k, l)| (k, l.z_index))
+            .collect();
+        for (key, z) in free {
+            let covered: Vec<MonitorGeometry> = self
+                .monitor_geometry
+                .iter()
+                .filter(|m| layer_covers(&self.extend_layers[key], m))
+                .cloned()
+                .collect();
+            if covered.is_empty() {
+                continue;
+            }
+            let hidden = covered.iter().all(|m| {
+                self.locked_layer_on(&m.name).is_some()
+                    || self.extend_layers.iter().any(|(k2, l2)| {
+                        k2 != key && !l2.locked && l2.z_index > z && layer_covers(l2, m)
+                    })
+            });
+            if hidden {
+                self.remove_layer(key);
+            }
+        }
+    }
+
+    /// The locked item filling a display, if any.
+    fn locked_layer_on(&self, connector: &str) -> Option<DefaultKey> {
+        self.extend_layers
+            .iter()
+            .find(|(_, l)| l.locked && l.target_output.as_deref() == Some(connector))
+            .map(|(k, _)| k)
+    }
+
+    /// The topmost free layer covering a display's center, if any.
+    fn free_layer_on(&self, monitor: &MonitorGeometry) -> Option<DefaultKey> {
+        self.extend_layers
+            .iter()
+            .filter(|(_, l)| !l.locked && layer_covers(l, monitor))
+            .max_by_key(|(_, l)| l.z_index)
+            .map(|(k, _)| k)
+    }
+
+    fn shown_on(&self, monitor: &MonitorGeometry) -> Shown {
+        if let Some(k) = self.locked_layer_on(&monitor.name) {
+            if let Some(c) = self.extend_layer_colors.get(k) {
+                return Shown::Color(c.clone());
+            }
+            return match self.extend_layer_sources.get(k) {
+                Some(src @ Source::Shader(_)) => self
+                    .shader_idx_for_source(src)
+                    .map_or(Shown::Nothing, Shown::Shader),
+                Some(Source::Path(p)) => Shown::Image {
+                    path: p.clone(),
+                    span: None,
+                },
+                _ => Shown::Nothing,
+            };
+        }
+        if let Some(k) = self.free_layer_on(monitor) {
+            return Shown::Image {
+                path: self.extend_layers[k].source_path.clone(),
+                span: Some(k),
+            };
+        }
+        Shown::Nothing
+    }
+
+    /// What all `targets` show, or `None` when they differ.
+    fn shared_shown(&self, targets: &[MonitorGeometry]) -> Option<Shown> {
+        let mut iter = targets.iter().map(|m| self.shown_on(m));
+        let first = iter.next()?;
+        iter.all(|s| s == first).then_some(first)
+    }
+
+    /// Point the live preview and the parameter editor at what the selected
+    /// displays show.
+    fn sync_choice_to_targets(&mut self) {
+        let targets = self.target_monitors();
+        match self.shared_shown(&targets) {
+            Some(Shown::Shader(idx)) => {
+                self.selection.active = Choice::Shader(idx);
+                let staged = targets
+                    .first()
+                    .and_then(|m| self.locked_layer_on(&m.name))
+                    .and_then(|k| self.extend_layer_sources.get(k).cloned());
+                if let Some(Source::Shader(ss)) = staged {
+                    self.sync_shader_dropdowns(&ss);
+                }
+            }
+            Some(Shown::Color(c)) => self.selection.active = Choice::Color(c),
+            Some(Shown::Image { path, .. }) => {
+                let key = self
+                    .selection
+                    .paths
+                    .iter()
+                    .find(|(_, p)| **p == path)
+                    .map(|(k, _)| k);
+                if let Some(key) = key {
+                    self.selection.active = Choice::Wallpaper(key);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Displays where a library item is staged, as a short badge label.
+    fn staged_badge(&self, is_item: impl Fn(&Shown) -> bool) -> Option<String> {
+        let on: Vec<&str> = self
+            .monitor_geometry
+            .iter()
+            .filter(|m| is_item(&self.shown_on(m)))
+            .map(|m| m.name.as_str())
+            .collect();
+        let total = self.monitor_geometry.len();
+        match on.len() {
+            0 => None,
+            1 => Some(on[0].to_string()),
+            n if n == total => Some(fl!("badge-all")),
+            n => Some(fl!("badge-some", n = (n as u64), total = (total as u64))),
+        }
+    }
+
+    /// Move a free layer one step up (`forward`) or down in z-order.
+    fn swap_z(&mut self, key: DefaultKey, forward: bool) {
+        let Some(sel_z) = self.extend_layers.get(key).map(|l| l.z_index) else {
+            return;
+        };
+        let candidates = self
+            .extend_layers
+            .iter()
+            .filter(|(k, l)| *k != key && !l.locked)
+            .filter(|(_, l)| {
+                if forward {
+                    l.z_index > sel_z
+                } else {
+                    l.z_index < sel_z
+                }
+            })
+            .map(|(k, l)| (k, l.z_index));
+        let swap = if forward {
+            candidates.min_by_key(|(_, z)| *z)
+        } else {
+            candidates.max_by_key(|(_, z)| *z)
+        };
+        if let Some((swap_key, swap_z)) = swap {
+            self.extend_layers[key].z_index = swap_z;
+            self.extend_layers[swap_key].z_index = sel_z;
+        }
+    }
+
+    fn renormalize_z_indices(&mut self) {
+        let mut sorted: Vec<(DefaultKey, usize)> = self
+            .extend_layers
+            .iter()
+            .map(|(k, l)| (k, l.z_index))
+            .collect();
+        sorted.sort_by_key(|(_, z)| *z);
+        for (i, (key, _)) in sorted.into_iter().enumerate() {
+            self.extend_layers[key].z_index = i;
+        }
+        self.extend_next_z = self.extend_layers.len();
+    }
+
+    // ------------------------------------------------------------------
+    // Applied state, dirty tracking, apply and revert
+    // ------------------------------------------------------------------
+
+    /// The entry currently applied to a connector, honouring same-on-all.
+    fn applied_entry(&self, connector: &str) -> Option<&Entry> {
+        if self.config.same_on_all {
+            Some(&self.config.default_background)
+        } else {
+            self.entry_for_output(connector)
+        }
+    }
+
+    /// The source currently applied to a connector, honouring same-on-all.
+    fn applied_source(&self, connector: &str) -> Option<Source> {
+        self.applied_entry(connector).map(|e| e.source.clone())
+    }
+
+    /// Free layers as comparable rows: (path, x, y, scale in 1/1000ths, z).
+    fn free_layers_snapshot(&self) -> Vec<(PathBuf, i64, i64, i64, usize)> {
+        let mut rows: Vec<_> = self
+            .extend_layers
+            .values()
+            .filter(|l| !l.locked)
+            .map(|l| {
+                (
+                    l.source_path.clone(),
+                    l.offset.0.round() as i64,
+                    l.offset.1.round() as i64,
+                    (l.scale * 1000.0).round() as i64,
+                    l.z_index,
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn saved_free_layers_snapshot(&self) -> Vec<(PathBuf, i64, i64, i64, usize)> {
+        let mut rows: Vec<_> = self
+            .extend_config
+            .layers
+            .iter()
+            .filter(|l| !l.locked)
+            .map(|l| {
+                (
+                    l.source_path.clone(),
+                    l.img_offset_x.round() as i64,
+                    l.img_offset_y.round() as i64,
+                    (l.img_scale * 1000.0).round() as i64,
+                    l.z_index,
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// The config source a locked item would be written as right now.
+    fn staged_source(&self, key: DefaultKey) -> Source {
+        let source = self
+            .extend_layer_sources
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Source::Path(self.extend_layers[key].source_path.clone()));
+        self.refresh_shader_source(source)
+    }
+
+    /// Displays whose staged content differs from what is applied.
+    fn dirty_displays(&self) -> Vec<String> {
+        let free_dirty = self.free_layers_snapshot() != self.saved_free_layers_snapshot();
+        let cache = glowberry_lib::extend_crop::cache_dir();
+        self.monitor_geometry
+            .iter()
+            .filter(|m| {
+                if let Some(k) = self.locked_layer_on(&m.name) {
+                    let staged = self.staged_source(k);
+                    let fit = self.extend_layer_fit.get(k).cloned().unwrap_or_default();
+                    match self.applied_entry(&m.name) {
+                        Some(e) => e.source != staged || e.scaling_mode != fit,
+                        None => true,
+                    }
+                } else if self.free_layer_on(m).is_some() {
+                    let applied_is_crop = matches!(
+                        self.applied_source(&m.name),
+                        Some(Source::Path(p)) if p.starts_with(&cache)
+                    );
+                    free_dirty || !applied_is_crop
+                } else {
+                    false
+                }
+            })
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    /// Write the staged canvas to config: locked items become per-display
+    /// entries (or one `all` entry when every display shows the same thing),
+    /// free layers are saved and composited per display.
+    fn apply(&mut self) -> Task<Message> {
+        let monitors = self.monitor_geometry.clone();
+        if monitors.is_empty() {
+            return Task::none();
+        }
+
+        let mut locked: Vec<(String, Source, ScalingMode)> = Vec::new();
+        for m in &monitors {
+            if let Some(k) = self.locked_layer_on(&m.name) {
+                let source = self.staged_source(k);
+                let fit = self.extend_layer_fit.get(k).cloned().unwrap_or_default();
+                locked.push((m.name.clone(), source, fit));
             }
         }
 
-        // Pause when lid closed
-        power_saving_section = power_saving_section.add(settings::item(
-            fl!("pause-lid-closed"),
-            toggler(self.power_saving.pause_on_lid_closed).on_toggle(Message::SetPauseOnLidClosed),
-        ));
-
-        // Build background service section with optional PATH warning
-        let mut bg_service_section = widget::settings::section()
-            .title(fl!("background-service"))
-            .add(settings::item(
-                fl!("use-glowberry"),
-                toggler(self.glowberry_is_default).on_toggle(Message::SetGlowBerryDefault),
-            ));
-
-        // Add PATH order warning if incorrect
-        if !is_path_order_correct() {
-            bg_service_section =
-                bg_service_section.add(widget::text(fl!("path-order-warning")).size(12).class(
-                    cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.9, 0.6, 0.2)),
-                ));
-        }
-
-        // Build appearance section with window opacity slider
-        let appearance_section =
-            widget::settings::section()
-                .title(fl!("appearance"))
-                .add(settings::item(
-                    fl!("window-opacity"),
-                    widget::row::with_children(vec![
-                        slider(0.0..=1.0, self.window_opacity, Message::SetWindowOpacity)
-                            .on_release(Message::WindowOpacityReleased)
-                            .step(0.01)
-                            .width(Length::Fixed(150.0))
-                            .into(),
-                        widget::text(format!("{:.0}%", self.window_opacity * 100.0))
-                            .width(Length::Fixed(50.0))
-                            .into(),
-                    ])
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                ));
-
-        // Build bezel section (one group of sliders per monitor)
-        let mut bezel_section = widget::settings::section().title(fl!("bezels"));
-
-        for (idx, monitor) in self.monitor_geometry.iter().enumerate() {
-            let bz = &monitor.bezel;
-
-            bezel_section = bezel_section.add(widget::text::heading(monitor.display_label()));
-
-            let i = idx;
-            let top = bz.top;
-            let bottom = bz.bottom;
-            let left = bz.left;
-            let right = bz.right;
-
-            bezel_section = bezel_section.add(settings::item(
-                fl!("bezel-top"),
-                scrub_spin(0.0..=200.0, top)
-                    .step(1.0)
-                    .decimals(0)
-                    .width(Length::Fixed(150.0))
-                    .on_change(move |v| Message::SetBezel(i, v, bottom, left, right))
-                    .on_release(move |_| Message::BezelReleased),
-            ));
-
-            bezel_section = bezel_section.add(settings::item(
-                fl!("bezel-bottom"),
-                scrub_spin(0.0..=200.0, bottom)
-                    .step(1.0)
-                    .decimals(0)
-                    .width(Length::Fixed(150.0))
-                    .on_change(move |v| Message::SetBezel(i, top, v, left, right))
-                    .on_release(move |_| Message::BezelReleased),
-            ));
-
-            bezel_section = bezel_section.add(settings::item(
-                fl!("bezel-left"),
-                scrub_spin(0.0..=200.0, left)
-                    .step(1.0)
-                    .decimals(0)
-                    .width(Length::Fixed(150.0))
-                    .on_change(move |v| Message::SetBezel(i, top, bottom, v, right))
-                    .on_release(move |_| Message::BezelReleased),
-            ));
-
-            bezel_section = bezel_section.add(settings::item(
-                fl!("bezel-right"),
-                scrub_spin(0.0..=200.0, right)
-                    .step(1.0)
-                    .decimals(0)
-                    .width(Length::Fixed(150.0))
-                    .on_change(move |v| Message::SetBezel(i, top, bottom, left, v))
-                    .on_release(move |_| Message::BezelReleased),
-            ));
-        }
-
-        widget::settings::view_column(vec![
-            // Default background service section
-            bg_service_section.into(),
-            // Appearance section
-            appearance_section.into(),
-            // GPU settings section
-            widget::settings::section()
-                .title(fl!("performance"))
-                .add(settings::item(
-                    fl!("prefer-low-power"),
-                    toggler(self.prefer_low_power).on_toggle(Message::PreferLowPower),
-                ))
-                .into(),
-            // Power saving section
-            power_saving_section.into(),
-            // Bezel section
-            bezel_section.into(),
-        ])
-        .into()
-    }
-
-    fn init_from_config(&mut self) {
-        // Determine which entry reflects the applied wallpaper, so the window
-        // opens on the matching page (wallpaper / color / live).
-        let entry = if self.config.same_on_all {
-            &self.config.default_background
-        } else if let Some(ref output_name) = self.active_output {
-            // Try to find a per-output entry
-            self.entry_for_output(output_name)
-                .unwrap_or(&self.config.default_background)
-        } else if let Some(first) = self.config.backgrounds.first() {
-            // Per-output mode with no specific output selected: reflect what's
-            // actually applied (a per-output entry), not the stale "all" default.
-            first
+        // Same on all displays is derived, not a switch.
+        let all_same = locked.len() == monitors.len()
+            && locked
+                .iter()
+                .all(|(_, s, f)| (s, f) == (&locked[0].1, &locked[0].2));
+        if all_same {
+            let (_, source, fit) = locked[0].clone();
+            self.set_same_on_all(true);
+            self.set_entry(Entry::new("all".to_string(), source).scaling_mode(fit));
         } else {
-            &self.config.default_background
-        };
-
-        let source = entry.source.clone();
-        self.select_entry_source(&source);
-    }
-
-    fn cache_display_image(&mut self) {
-        self.cached_display_handle = None;
-
-        if let Choice::Wallpaper(id) = self.selection.active
-            && let Some(image) = self.selection.display_images.get(id)
-        {
-            self.cached_display_handle = Some(ImageHandle::from_rgba(
-                image.width(),
-                image.height(),
-                image.to_vec(),
-            ));
+            self.set_same_on_all(false);
+            for (connector, source, fit) in locked.iter().cloned() {
+                let key = self.output_key(&connector);
+                self.set_entry(Entry::new(key, source).scaling_mode(fit));
+            }
         }
+
+        // Free layers: remember them, and composite a crop for every display
+        // they cover that has no locked item.
+        self.extend_config.layers = self
+            .extend_layers
+            .values()
+            .filter(|l| !l.locked)
+            .map(|l| glowberry_config::extend::ExtendLayer {
+                source_path: l.source_path.clone(),
+                img_offset_x: l.offset.0,
+                img_offset_y: l.offset.1,
+                img_scale: l.scale,
+                z_index: l.z_index,
+                locked: false,
+                target_output: None,
+            })
+            .collect();
+        let keys = self.display_keys();
+        if let Some(ctx) = &self.config_context {
+            let _ = ctx.save_extend_config(&self.extend_config);
+            let _ = ExtendConfig::save_for_displays(ctx, &keys, &self.extend_config.layers);
+        }
+
+        let mut layer_infos: Vec<glowberry_lib::extend_crop::LayerInfo> = self
+            .extend_layers
+            .values()
+            .filter(|l| !l.locked)
+            .map(|l| glowberry_lib::extend_crop::LayerInfo {
+                source_path: l.source_path.clone(),
+                offset: l.offset,
+                img_scale: l.scale,
+                z_index: l.z_index,
+            })
+            .collect();
+        let to_composite: Vec<glowberry_lib::extend_crop::MonitorInfo> = monitors
+            .iter()
+            .filter(|m| self.locked_layer_on(&m.name).is_none() && self.free_layer_on(m).is_some())
+            .map(|m| glowberry_lib::extend_crop::MonitorInfo {
+                name: m.name.clone(),
+                position: m.position,
+                logical_size: m.logical_size,
+                physical_size: m.physical_size,
+                scale: m.scale,
+            })
+            .collect();
+        if layer_infos.is_empty() || to_composite.is_empty() {
+            return Task::none();
+        }
+        let cache_dir = glowberry_lib::extend_crop::cache_dir();
+        Task::perform(
+            async move {
+                glowberry_lib::extend_crop::composite_for_monitors(
+                    &mut layer_infos,
+                    &to_composite,
+                    &cache_dir,
+                )
+                .map_err(|e| e.to_string())
+            },
+            |result| cosmic::Action::App(Message::Applied(result)),
+        )
     }
 
-    /// Build the config `Source` for the current selection (image path, color,
+    /// Rebuild the canvas from what is applied: saved free layers plus one
+    /// locked item per display for its applied entry. Composited crops are
+    /// skipped since the free layers already cover those displays.
+    fn restage_from_config(&mut self) {
+        self.extend_layers.clear();
+        self.extend_layer_colors.clear();
+        self.extend_layer_sources.clear();
+        self.extend_layer_fit.clear();
+        self.extend_selected_layer = None;
+        self.canvas_menu = None;
+        self.extend_next_z = 0;
+
+        for saved in self.extend_config.layers.clone() {
+            if saved.locked {
+                continue;
+            }
+            let image_size = image::image_dimensions(&saved.source_path).unwrap_or((800, 600));
+            let image_handle = self.library_handle(&saved.source_path);
+            let z = self.next_z().max(saved.z_index);
+            self.extend_next_z = self.extend_next_z.max(z + 1);
+            self.extend_layers.insert(ExtendLayerState {
+                source_path: saved.source_path,
+                image_handle,
+                image_size,
+                offset: (saved.img_offset_x, saved.img_offset_y),
+                scale: saved.img_scale,
+                z_index: z,
+                locked: false,
+                target_output: None,
+            });
+        }
+
+        let cache = glowberry_lib::extend_crop::cache_dir();
+        for m in self.monitor_geometry.clone() {
+            let Some(entry) = self.applied_entry(&m.name).cloned() else {
+                continue;
+            };
+            let fit = entry.scaling_mode.clone();
+            match entry.source {
+                Source::Color(c) => {
+                    self.insert_locked_item(
+                        &m,
+                        Some(c.clone()),
+                        Source::Color(c),
+                        None,
+                        (0, 0),
+                        PathBuf::new(),
+                    );
+                }
+                src @ Source::Shader(_) => {
+                    let handle = self
+                        .shader_idx_for_source(&src)
+                        .and_then(|i| self.shader_thumbnails.get(i).cloned());
+                    self.insert_locked_item(&m, None, src, handle, LIVE_ITEM_SIZE, PathBuf::new());
+                }
+                Source::Path(p) if !p.starts_with(&cache) && p.is_file() => {
+                    let size = image::image_dimensions(&p).unwrap_or((800, 600));
+                    let handle = self.library_handle(&p);
+                    let k =
+                        self.insert_locked_item(&m, None, Source::Path(p.clone()), handle, size, p);
+                    self.extend_layer_fit.insert(k, fit);
+                }
+                _ => {}
+            }
+        }
+        self.renormalize_z_indices();
+    }
+
+    /// The library's display image for a path, if loaded. Layers without one
+    /// get it when the wallpaper subscription delivers it.
+    fn library_handle(&self, path: &Path) -> Option<ImageHandle> {
+        let (key, _) = self
+            .selection
+            .paths
+            .iter()
+            .find(|(_, p)| p.as_path() == path)?;
+        self.selection
+            .display_images
+            .get(key)
+            .map(|img| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()))
+    }
+
+    /// Point the active choice at the applied wallpaper so the live preview and
+    /// the parameter editor start from what the daemon is showing.
+    fn init_from_config(&mut self) {
+        let entry = if self.config.same_on_all {
+            self.config.default_background.clone()
+        } else if let Some(first) = self.config.backgrounds.first() {
+            first.clone()
+        } else {
+            self.config.default_background.clone()
+        };
+        self.select_entry_source(&entry.source);
+    }
+
+    /// Build the config `Source` for the active choice (image path, color,
     /// or live shader), or `None` if it can't be resolved.
     fn build_active_source(&self) -> Option<Source> {
         let source = match &self.selection.active {
-            Choice::Wallpaper(key) => {
-                if let Some(path) = self.selection.paths.get(*key) {
-                    Source::Path(path.clone())
-                } else {
-                    return None;
-                }
-            }
+            Choice::Wallpaper(key) => Source::Path(self.selection.paths.get(*key)?.clone()),
             Choice::Color(color) => Source::Color(color.clone()),
             Choice::Shader(idx) => {
-                if let Some(shader) = self.available_shaders.get(*idx) {
-                    let frame_rate = self.current_frame_rate();
-                    let render_scale = self.current_render_scale();
+                let shader = self.available_shaders.get(*idx)?;
+                let frame_rate = self.current_frame_rate();
+                let render_scale = self.current_render_scale();
 
-                    // Check if we have custom parameter values for this shader
-                    let (shader_content, source_path, params) = if let Some(parsed) = &shader.parsed
-                    {
-                        // Get current parameter values, falling back to defaults
-                        let values = self
-                            .shader_param_values
-                            .get(idx)
-                            .cloned()
-                            .unwrap_or_default();
-
-                        // Convert ParamValue HashMap to f64 HashMap for config storage
-                        let params: HashMap<String, f64> = values
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.as_f32() as f64))
-                            .collect();
-
-                        // Only generate custom source if we have any custom values
-                        if values.is_empty() {
-                            // No custom params, use path for efficiency
-                            (
-                                glowberry_config::ShaderContent::Path(shader.path.clone()),
-                                None,
-                                params,
-                            )
-                        } else {
-                            // Generate shader source with parameter values
-                            // Keep source_path so we can identify the shader later
-                            let generated_source = parsed.generate_source(&values);
-                            (
-                                glowberry_config::ShaderContent::Code(generated_source),
-                                Some(shader.path.clone()),
-                                params,
-                            )
-                        }
-                    } else {
-                        // No parsed shader, use path
+                let (shader_content, source_path, params) = if let Some(parsed) = &shader.parsed {
+                    let values = self
+                        .shader_param_values
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_default();
+                    let params: HashMap<String, f64> = values
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.as_f32() as f64))
+                        .collect();
+                    if values.is_empty() {
                         (
                             glowberry_config::ShaderContent::Path(shader.path.clone()),
                             None,
-                            HashMap::new(),
+                            params,
                         )
-                    };
-
-                    Source::Shader(glowberry_config::ShaderSource {
-                        shader: shader_content,
-                        source_path,
-                        params,
-                        background_image: None,
-                        language: glowberry_config::ShaderLanguage::Wgsl,
-                        frame_rate,
-                        render_scale,
-                    })
+                    } else {
+                        (
+                            glowberry_config::ShaderContent::Code(parsed.generate_source(&values)),
+                            Some(shader.path.clone()),
+                            params,
+                        )
+                    }
                 } else {
-                    return None;
-                }
+                    (
+                        glowberry_config::ShaderContent::Path(shader.path.clone()),
+                        None,
+                        HashMap::new(),
+                    )
+                };
+
+                Source::Shader(glowberry_config::ShaderSource {
+                    shader: shader_content,
+                    source_path,
+                    params,
+                    background_image: None,
+                    language: glowberry_config::ShaderLanguage::Wgsl,
+                    frame_rate,
+                    render_scale,
+                })
             }
         };
         Some(source)
     }
 
     /// Sync the frame-rate and render-quality dropdowns to a shader source's
-    /// stored settings. Called when restoring a selection from config, so the
-    /// UI shows (and Apply re-persists) what was actually saved.
+    /// stored settings.
     fn sync_shader_dropdowns(&mut self, ss: &glowberry_config::ShaderSource) {
         self.selected_shader_frame_rate = match ss.frame_rate {
             0..=22 => 0,
@@ -2341,26 +2292,20 @@ impl GlowBerrySettings {
 
     /// Rebuild a shader `Source` from the current in-memory settings.
     ///
-    /// Staged canvas sources in `extend_layer_sources` are captured at
-    /// selection time, before the user edits anything. Shader settings are
-    /// preview-only until "Apply", so this refreshes everything the UI shows —
-    /// frame rate, render quality, and parameter values (regenerating the
-    /// inline shader code, or falling back to a plain path when no custom
-    /// values exist). Non-shader sources are returned unchanged.
+    /// Staged sources are captured at pick time, before the user edits
+    /// anything. Shader settings are preview-only until Apply, so this
+    /// refreshes frame rate, render quality, and parameter values
+    /// (regenerating the inline shader code, or falling back to a plain path
+    /// when no custom values exist). Non-shader sources are returned unchanged.
     fn refresh_shader_source(&self, source: Source) -> Source {
         let Source::Shader(ss) = &source else {
             return source;
         };
 
         let mut ss = ss.clone();
-        // Always persist the current dropdown settings, even when the shader
-        // file can't be matched below (frame rate and quality don't depend on
-        // the shader's parameters).
         ss.frame_rate = self.current_frame_rate();
         ss.render_scale = self.current_render_scale();
 
-        // Identify which shader this is: prefer the preserved source_path, then
-        // fall back to the inline path variant.
         let path = ss.source_path.clone().or_else(|| {
             if let glowberry_config::ShaderContent::Path(p) = &ss.shader {
                 Some(p.clone())
@@ -2397,116 +2342,54 @@ impl GlowBerrySettings {
         Source::Shader(ss)
     }
 
-    fn apply_selection(&mut self) {
-        let Some(source) = self.build_active_source() else {
-            return;
-        };
-
-        // Determine the output name to use
-        let output = if self.config.same_on_all {
-            "all".to_string()
-        } else if let Some(ref name) = self.active_output {
-            self.output_key(name)
-        } else {
-            "all".to_string()
-        };
-
-        self.set_entry(Entry::new(output, source));
-    }
-
-    /// Select a source from entry (used when switching displays or on init)
+    /// Make the active choice match a config source (on init and revert).
     fn select_entry_source(&mut self, source: &Source) {
         match source {
             Source::Path(path) => {
-                // Find the wallpaper in our loaded wallpapers
-                if let Some((key, _)) = self.selection.paths.iter().find(|(_, p)| *p == path) {
+                let key = self
+                    .selection
+                    .paths
+                    .iter()
+                    .find(|(_, p)| *p == path)
+                    .map(|(k, _)| k);
+                if let Some(key) = key {
                     self.selection.active = Choice::Wallpaper(key);
                 }
-                // Always set category to wallpapers for path sources
-                // (the actual wallpaper will be selected when WallpaperEvent::Loaded fires if not found yet)
-                self.categories.selected = Some(Category::Wallpapers);
             }
             Source::Color(color) => {
                 self.selection.active = Choice::Color(color.clone());
-                self.categories.selected = Some(Category::Colors);
             }
             Source::Shader(shader_source) => {
-                // Determine which path to use for matching:
-                // - If source_path is set (customized shader), use that
-                // - Otherwise use the path from ShaderContent::Path
-                let match_path = shader_source.source_path.as_ref().or({
-                    if let glowberry_config::ShaderContent::Path(p) = &shader_source.shader {
-                        Some(p)
-                    } else {
-                        None
-                    }
-                });
-
-                let mut matched_idx = None;
-                if let Some(config_path) = match_path {
-                    // Try exact path match first
-                    if let Some(idx) = self
-                        .available_shaders
-                        .iter()
-                        .position(|s| &s.path == config_path)
-                    {
-                        self.selection.active = Choice::Shader(idx);
-                        matched_idx = Some(idx);
-                    } else {
-                        // Fall back to filename match (in case paths differ due to XDG_DATA_DIRS)
-                        if let Some(config_filename) = config_path.file_name()
-                            && let Some(idx) = self
-                                .available_shaders
-                                .iter()
-                                .position(|s| s.path.file_name() == Some(config_filename))
-                        {
-                            self.selection.active = Choice::Shader(idx);
-                            matched_idx = Some(idx);
-                        }
-                    }
-
-                    // If no shader found, select the first one if available
-                    if matched_idx.is_none() && !self.available_shaders.is_empty() {
-                        self.selection.active = Choice::Shader(0);
-                        matched_idx = Some(0);
-                    }
-                } else if !self.available_shaders.is_empty() {
-                    // Inline shader content with no source_path - just select first shader
-                    self.selection.active = Choice::Shader(0);
-                    matched_idx = Some(0);
-                }
+                let Some(idx) = self
+                    .shader_idx_for_source(source)
+                    .or_else(|| (!self.available_shaders.is_empty()).then_some(0))
+                else {
+                    return;
+                };
+                self.selection.active = Choice::Shader(idx);
 
                 // Load parameter values from config
-                if let Some(idx) = matched_idx
-                    && !shader_source.params.is_empty()
+                if !shader_source.params.is_empty()
+                    && let Some(parsed) = self.available_shaders[idx].parsed.as_ref()
                 {
-                    // Convert f64 values back to ParamValue based on shader's param definitions
                     let mut param_values: HashMap<String, ParamValue> = HashMap::new();
-
-                    if let Some(shader_info) = self.available_shaders.get(idx)
-                        && let Some(parsed) = &shader_info.parsed
-                    {
-                        for param in &parsed.params {
-                            if let Some(&value) = shader_source.params.get(&param.name) {
-                                let param_value = match param.param_type {
-                                    ParamType::F32 => ParamValue::F32(value as f32),
-                                    ParamType::I32 => ParamValue::I32(value as i32),
-                                };
-                                param_values.insert(param.name.clone(), param_value);
-                            }
+                    for param in &parsed.params {
+                        if let Some(&value) = shader_source.params.get(&param.name) {
+                            let param_value = match param.param_type {
+                                ParamType::F32 => ParamValue::F32(value as f32),
+                                ParamType::I32 => ParamValue::I32(value as i32),
+                            };
+                            param_values.insert(param.name.clone(), param_value);
                         }
                     }
-
                     if !param_values.is_empty() {
                         self.shader_param_values.insert(idx, param_values);
                     }
                 }
 
                 self.sync_shader_dropdowns(shader_source);
-                self.categories.selected = Some(Category::Shaders);
             }
         }
-        self.cache_display_image();
     }
 
     /// Config key for a connected output: its EDID identity when known and
@@ -2532,14 +2415,6 @@ impl GlowBerrySettings {
         } else {
             id.to_string()
         }
-    }
-
-    /// Connector name for a saved output key (identity or legacy connector).
-    fn connector_for_key(&self, key: &str) -> String {
-        self.monitor_geometry
-            .iter()
-            .find(|m| m.name == key || self.output_key(&m.name) == key)
-            .map_or_else(|| key.to_string(), |m| m.name.clone())
     }
 
     /// Output keys for the connected monitors, for extend profile lookup.
@@ -2603,295 +2478,12 @@ impl GlowBerrySettings {
         }
     }
 
-    /// The source currently applied to a connector, honouring same-on-all.
-    fn applied_source(&self, connector: &str) -> Option<Source> {
-        if self.config.same_on_all {
-            Some(self.config.default_background.source.clone())
-        } else {
-            self.entry_for_output(connector).map(|e| e.source.clone())
-        }
-    }
-
     /// Per-output entry for a connector: identity key first, then the legacy
     /// connector-named key.
     fn entry_for_output(&self, connector: &str) -> Option<&Entry> {
         self.config
             .entry(&self.output_key(connector))
             .or_else(|| self.config.entry(connector))
-    }
-
-    /// Populate the outputs tab bar from state (connected outputs)
-    /// The daemon updates the state with currently connected outputs
-    fn populate_outputs_from_config(&mut self) {
-        self.outputs.clear();
-
-        // Get connected outputs from state - these are the currently connected displays
-        let connected_outputs: Vec<String> = State::state()
-            .ok()
-            .and_then(|state_helper| State::get_entry(&state_helper).ok())
-            .map(|state| state.connected_outputs)
-            .unwrap_or_default();
-
-        // If no connected outputs in state, fall back to config outputs
-        // (This handles the case where daemon hasn't written state yet)
-        let output_names: Vec<String> = if connected_outputs.is_empty() {
-            self.config.outputs.iter().cloned().collect()
-        } else {
-            connected_outputs
-        };
-
-        self.show_tab_bar = output_names.len() > 1;
-
-        let mut first = None;
-        for name in output_names {
-            let is_internal = name == "eDP-1";
-
-            // Use the output name directly (e.g., "DP-1", "HDMI-A-1", "eDP-1")
-            let entity = self
-                .outputs
-                .insert()
-                .text(name.clone())
-                .data(OutputName(name));
-
-            if is_internal || first.is_none() {
-                first = Some(entity.id());
-            }
-        }
-
-        if let Some(id) = first {
-            self.outputs.activate(id);
-            if let Some(name) = self.outputs.data::<OutputName>(id) {
-                self.active_output = Some(name.0.clone());
-            }
-        }
-    }
-
-    fn auto_center_layer(&self, layer: &mut ExtendLayerState) {
-        if self.monitor_geometry.is_empty() || layer.image_size == (0, 0) {
-            return;
-        }
-
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut max_y = i32::MIN;
-        for m in &self.monitor_geometry {
-            min_x = min_x.min(m.position.0);
-            min_y = min_y.min(m.position.1);
-            max_x = max_x.max(m.position.0 + m.logical_size.0 as i32);
-            max_y = max_y.max(m.position.1 + m.logical_size.1 as i32);
-        }
-
-        let vd_w = (max_x - min_x) as f64;
-        let vd_h = (max_y - min_y) as f64;
-        let vd_cx = min_x as f64 + vd_w / 2.0;
-        let vd_cy = min_y as f64 + vd_h / 2.0;
-
-        let img_w = layer.image_size.0 as f64;
-        let img_h = layer.image_size.1 as f64;
-        let scale = (vd_w / img_w).max(vd_h / img_h);
-        layer.scale = scale;
-        layer.offset = (vd_cx - img_w * scale / 2.0, vd_cy - img_h * scale / 2.0);
-    }
-
-    fn renormalize_z_indices(&mut self) {
-        let mut sorted: Vec<(DefaultKey, usize)> = self
-            .extend_layers
-            .iter()
-            .map(|(k, l)| (k, l.z_index))
-            .collect();
-        sorted.sort_by_key(|(_, z)| *z);
-        for (i, (key, _)) in sorted.into_iter().enumerate() {
-            self.extend_layers[key].z_index = i;
-        }
-        self.extend_next_z = self.extend_layers.len();
-    }
-
-    /// Insert one locked, non-expandable canvas item filling `monitor` (colors
-    /// fill exactly; images/shaders cover-fit). Records its color/source.
-    fn insert_locked_item(
-        &mut self,
-        monitor: &crate::monitor_query::MonitorGeometry,
-        color: Option<Color>,
-        source: Source,
-        image_handle: Option<ImageHandle>,
-        image_size: (u32, u32),
-    ) -> DefaultKey {
-        let mon_w = monitor.logical_size.0 as f64;
-        let mon_h = monitor.logical_size.1 as f64;
-        let (size, scale, offset) = if color.is_some() {
-            (
-                monitor.logical_size,
-                1.0,
-                (monitor.position.0 as f64, monitor.position.1 as f64),
-            )
-        } else {
-            let img_w = image_size.0.max(1) as f64;
-            let img_h = image_size.1.max(1) as f64;
-            let scale = (mon_w / img_w).max(mon_h / img_h);
-            (
-                image_size,
-                scale,
-                (
-                    monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0,
-                    monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0,
-                ),
-            )
-        };
-        let z = self.extend_next_z;
-        self.extend_next_z += 1;
-        let key = self.extend_layers.insert(ExtendLayerState {
-            source_path: PathBuf::new(),
-            image_handle,
-            image_size: size,
-            offset,
-            scale,
-            z_index: z,
-            locked: true,
-            target_output: Some(monitor.name.clone()),
-        });
-        if let Some(c) = &color {
-            self.extend_layer_colors.insert(key, c.clone());
-        }
-        self.extend_layer_sources.insert(key, source);
-        key
-    }
-
-    /// Apply a color/live content to every display (same wallpaper everywhere)
-    /// and stage it on the canvas. Used by the grid right-click "apply to all".
-    fn apply_content_to_all(
-        &mut self,
-        color: Option<Color>,
-        source: Source,
-        image_handle: Option<ImageHandle>,
-        image_size: (u32, u32),
-    ) {
-        self.set_same_on_all(true);
-        self.set_entry(Entry::new("all".to_string(), source.clone()));
-        self.fill_monitors_locked(PathBuf::new(), image_handle, image_size, color, source);
-    }
-
-    /// Apply a color/live content to a single display, leaving the others as they
-    /// are. Used by the grid right-click "show on <display>".
-    fn apply_content_to_output(
-        &mut self,
-        color: Option<Color>,
-        source: Source,
-        image_handle: Option<ImageHandle>,
-        image_size: (u32, u32),
-        monitor_idx: usize,
-    ) {
-        let Some(monitor) = self.monitor_geometry.get(monitor_idx).cloned() else {
-            return;
-        };
-        self.set_same_on_all(false);
-        self.set_entry(Entry::new(self.output_key(&monitor.name), source.clone()));
-        // Replace any existing item for this output so it isn't duplicated.
-        let existing: Vec<DefaultKey> = self
-            .extend_layers
-            .iter()
-            .filter(|(_, l)| l.target_output.as_deref() == Some(monitor.name.as_str()))
-            .map(|(k, _)| k)
-            .collect();
-        for k in existing {
-            self.extend_layers.remove(k);
-            self.extend_layer_colors.remove(k);
-            self.extend_layer_sources.remove(k);
-        }
-        let key = self.insert_locked_item(&monitor, color, source, image_handle, image_size);
-        self.extend_selected_layer = Some(key);
-        self.extend_fit_view_requested = true;
-        self.persist_canvas_per_output();
-    }
-
-    /// Fill every connected monitor with a locked, non-expandable item showing
-    /// the given content. Used for color/live staging (empty `source_path`,
-    /// rendered via `color`/shader thumbnail) and for "apply to all". Each item
-    /// carries `source` so it can be written to config when applied.
-    fn fill_monitors_locked(
-        &mut self,
-        source_path: PathBuf,
-        image_handle: Option<ImageHandle>,
-        image_size: (u32, u32),
-        color: Option<Color>,
-        source: Source,
-    ) {
-        self.extend_layers.clear();
-        self.extend_layer_colors.clear();
-        self.extend_layer_sources.clear();
-        self.extend_selected_layer = None;
-        self.layer_context_menu = None;
-        self.extend_next_z = 0;
-        self.extend_fit_view_requested = true;
-
-        let monitors: Vec<crate::monitor_query::MonitorGeometry> = self.monitor_geometry.to_vec();
-        for monitor in &monitors {
-            let mon_w = monitor.logical_size.0 as f64;
-            let mon_h = monitor.logical_size.1 as f64;
-            // Colors fill the monitor exactly; images/shaders cover-fit it.
-            let (size, scale, offset) = if color.is_some() {
-                (
-                    monitor.logical_size,
-                    1.0,
-                    (monitor.position.0 as f64, monitor.position.1 as f64),
-                )
-            } else {
-                let img_w = image_size.0.max(1) as f64;
-                let img_h = image_size.1.max(1) as f64;
-                let scale = (mon_w / img_w).max(mon_h / img_h);
-                (
-                    image_size,
-                    scale,
-                    (
-                        monitor.position.0 as f64 + (mon_w - img_w * scale) / 2.0,
-                        monitor.position.1 as f64 + (mon_h - img_h * scale) / 2.0,
-                    ),
-                )
-            };
-            let z = self.extend_next_z;
-            self.extend_next_z += 1;
-            let key = self.extend_layers.insert(ExtendLayerState {
-                source_path: source_path.clone(),
-                image_handle: image_handle.clone(),
-                image_size: size,
-                offset,
-                scale,
-                z_index: z,
-                locked: true,
-                target_output: Some(monitor.name.clone()),
-            });
-            if let Some(c) = &color {
-                self.extend_layer_colors.insert(key, c.clone());
-            }
-            self.extend_layer_sources.insert(key, source.clone());
-        }
-        self.persist_canvas_per_output();
-    }
-
-    /// Load and stage the saved working content for a page so switching tabs (or
-    /// reopening the window) isn't a fresh start. A page whose type matches the
-    /// currently-applied wallpaper shows that; otherwise it shows the page's last
-    /// saved selection (`saved-color` / `saved-shader`).
-    fn load_category_canvas(&mut self, category: &Category) {
-        self.extend_layers.clear();
-        self.extend_layer_colors.clear();
-        self.extend_layer_sources.clear();
-        self.extend_selected_layer = None;
-        self.extend_next_z = 0;
-        self.extend_fit_view_requested = true;
-
-        match category {
-            Category::Wallpapers => self.restore_extend_layers_from_config(),
-            Category::Colors => self.restore_per_output_locked(true),
-            Category::Shaders => {
-                if self.available_shaders.is_empty() {
-                    self.available_shaders = discover_shaders();
-                    let placeholder = create_shader_placeholder(158, 105);
-                    self.shader_thumbnails = vec![placeholder; self.available_shaders.len()];
-                }
-                self.restore_per_output_locked(false);
-            }
-        }
     }
 
     /// Find the index of the shader matching a `Source::Shader`, so we can show
@@ -2918,173 +2510,6 @@ impl GlowBerrySettings {
             })
     }
 
-    /// Persist the current color/live canvas as this page's per-output state, so
-    /// each page remembers its own per-display assignments independently of which
-    /// one is currently applied. Called whenever the canvas changes.
-    fn persist_canvas_per_output(&mut self) {
-        let Some(ctx) = &self.config_context else {
-            return;
-        };
-        match &self.categories.selected {
-            Some(Category::Colors) => {
-                let map: Vec<(String, Color)> = self
-                    .extend_layers
-                    .iter()
-                    .filter_map(|(k, l)| {
-                        Some((
-                            self.output_key(l.target_output.as_deref()?),
-                            self.extend_layer_colors.get(k)?.clone(),
-                        ))
-                    })
-                    .collect();
-                let _ = ctx.0.set("saved-color-outputs", map);
-            }
-            Some(Category::Shaders) => {
-                let map: Vec<(String, Source)> = self
-                    .extend_layers
-                    .iter()
-                    .filter_map(|(k, l)| {
-                        let out = self.output_key(l.target_output.as_deref()?);
-                        let src = self.extend_layer_sources.get(k)?.clone();
-                        matches!(src, Source::Shader(_)).then_some((out, src))
-                    })
-                    .collect();
-                let _ = ctx.0.set("saved-shader-outputs", map);
-            }
-            _ => {}
-        }
-    }
-
-    /// Restore the color/live canvas so each display shows its own saved
-    /// per-output content. Lookup order per display: this page's saved
-    /// per-output map, then the page's single saved selection.
-    fn restore_per_output_locked(&mut self, want_color: bool) {
-        let monitors = self.monitor_geometry.to_vec();
-        let (color_map, shader_map, saved_color, saved_shader) = {
-            let ctx = self.config_context.as_ref();
-            (
-                ctx.and_then(|c| c.0.get::<Vec<(String, Color)>>("saved-color-outputs").ok())
-                    .unwrap_or_default(),
-                ctx.and_then(|c| {
-                    c.0.get::<Vec<(String, Source)>>("saved-shader-outputs")
-                        .ok()
-                })
-                .unwrap_or_default(),
-                ctx.and_then(|c| c.0.get::<Color>("saved-color").ok()),
-                ctx.and_then(|c| c.0.get::<Source>("saved-shader").ok()),
-            )
-        };
-
-        let mut first_active: Option<Choice> = None;
-        for monitor in &monitors {
-            let key = self.output_key(&monitor.name);
-            // What the daemon is showing on this display wins when it is of this
-            // page's type; otherwise fall back to the page's saved selection.
-            let applied = self.applied_source(&monitor.name);
-            if want_color {
-                let color = match applied {
-                    Some(Source::Color(c)) => Some(c),
-                    _ => color_map
-                        .iter()
-                        .find(|(o, _)| *o == key || o == &monitor.name)
-                        .map(|(_, c)| c.clone())
-                        .or_else(|| saved_color.clone()),
-                };
-                if let Some(color) = color {
-                    if first_active.is_none() {
-                        first_active = Some(Choice::Color(color.clone()));
-                    }
-                    self.insert_locked_item(
-                        monitor,
-                        Some(color.clone()),
-                        Source::Color(color),
-                        None,
-                        (0, 0),
-                    );
-                }
-            } else {
-                let src = match applied {
-                    Some(src @ Source::Shader(_)) => Some(src),
-                    _ => shader_map
-                        .iter()
-                        .find(|(o, _)| *o == key || o == &monitor.name)
-                        .map(|(_, s)| s.clone())
-                        .or_else(|| saved_shader.clone()),
-                };
-                if let Some(src) = src {
-                    let idx = self.shader_idx_for_source(&src);
-                    let handle = idx.and_then(|i| self.shader_thumbnails.get(i).cloned());
-                    if first_active.is_none()
-                        && let Some(i) = idx
-                    {
-                        first_active = Some(Choice::Shader(i));
-                        // Show the saved source's settings in the dropdowns;
-                        // Apply persists whatever the dropdowns show.
-                        if let Source::Shader(ss) = &src {
-                            self.sync_shader_dropdowns(ss);
-                        }
-                    }
-                    self.insert_locked_item(monitor, None, src, handle, (1920, 1080));
-                }
-            }
-        }
-
-        if let Some(active) = first_active {
-            self.selection.active = active;
-        }
-    }
-
-    fn restore_extend_layers_from_config(&mut self) {
-        self.extend_layers.clear();
-        self.extend_next_z = 0;
-        for config_layer in &self.extend_config.layers {
-            let image_handle = self
-                .selection
-                .display_images
-                .iter()
-                .find(|(_, _)| {
-                    // Try to match by path
-                    false
-                })
-                .map(|(_, img)| ImageHandle::from_rgba(img.width(), img.height(), img.to_vec()));
-            // Try to load the image handle from the path directly
-            let image_handle = image_handle.or_else(|| {
-                image::open(&config_layer.source_path).ok().map(|img| {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = (rgba.width(), rgba.height());
-                    // Resize to a reasonable thumbnail size
-                    let thumb = image::imageops::resize(
-                        &rgba,
-                        w.min(400),
-                        h.min(300),
-                        image::imageops::FilterType::Triangle,
-                    );
-                    ImageHandle::from_rgba(thumb.width(), thumb.height(), thumb.into_vec())
-                })
-            });
-            let image_size =
-                image::image_dimensions(&config_layer.source_path).unwrap_or((800, 600));
-
-            let z = config_layer.z_index;
-            self.extend_next_z = self.extend_next_z.max(z + 1);
-            let target_output = config_layer
-                .target_output
-                .as_deref()
-                .map(|k| self.connector_for_key(k));
-            self.extend_layers.insert(ExtendLayerState {
-                source_path: config_layer.source_path.clone(),
-                image_handle,
-                image_size,
-                offset: (config_layer.img_offset_x, config_layer.img_offset_y),
-                scale: config_layer.img_scale,
-                z_index: z,
-                locked: config_layer.locked,
-                target_output,
-            });
-        }
-    }
-
-    /// Load shader thumbnails
     /// Store a rendered shader thumbnail and propagate it to any staged canvas
     /// items showing that shader, so the per-output live preview updates too.
     fn set_shader_thumbnail(&mut self, idx: usize, handle: ImageHandle) {
@@ -3095,10 +2520,8 @@ impl GlowBerrySettings {
         self.update_shader_canvas_layers(idx, handle);
     }
 
-    /// Push a freshly-rendered frame into every staged monitor-canvas layer
-    /// showing the given shader, without touching the fixed-size grid
-    /// thumbnail (`shader_thumbnails`). Used for live preview frames, which are
-    /// higher-resolution than the grid tiles.
+    /// Push a freshly-rendered frame into every staged canvas layer showing the
+    /// given shader, without touching the fixed-size grid thumbnail.
     fn update_shader_canvas_layers(&mut self, idx: usize, handle: ImageHandle) {
         let to_update: Vec<DefaultKey> = self
             .extend_layers
@@ -3148,21 +2571,22 @@ impl GlowBerrySettings {
 
         // Render previews sequentially in a single blocking task. Each render
         // spins up its own wgpu instance/adapter/device; creating many of them
-        // concurrently (one Task per shader) can crash on software renderers
-        // (e.g. llvmpipe), so we serialize them into one task instead.
+        // concurrently can crash on software renderers (e.g. llvmpipe).
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
                     let mut thumbnails = Vec::with_capacity(shader_paths.len());
                     for (idx, path) in shader_paths.into_iter().enumerate() {
                         let handle = match crate::widgets::shader_preview::render_shader_preview(
-                            &path, 158, 105,
+                            &path,
+                            THUMB_WIDTH,
+                            THUMB_HEIGHT,
                         ) {
                             Ok((width, height, rgba)) => {
                                 Some(ImageHandle::from_rgba(width, height, rgba))
                             }
                             Err(e) => {
-                                tracing::debug!(?path, ?e, "Failed to render shader preview");
+                                tracing::warn!(?path, ?e, "shader thumbnail render failed");
                                 None
                             }
                         };
@@ -3176,280 +2600,34 @@ impl GlowBerrySettings {
             |thumbnails| cosmic::Action::App(Message::ShaderThumbnailsLoaded(thumbnails)),
         )
     }
+}
 
-    #[allow(dead_code)]
-    fn view_display_preview(&self) -> Element<'_, Message> {
-        let content: Element<'_, Message> = match &self.selection.active {
-            Choice::Wallpaper(key) => {
-                // First try the cached display handle, then fall back to thumbnail
-                if let Some(handle) = &self.cached_display_handle {
-                    widget::image(handle.clone())
-                        .width(Length::Fixed(SIMULATED_WIDTH as f32))
-                        .height(Length::Fixed(SIMULATED_HEIGHT as f32))
-                        .into()
-                } else if let Some(handle) = self.selection.selection_handles.get(*key) {
-                    // Use the selection thumbnail scaled up if display image not ready
-                    widget::image(handle.clone())
-                        .content_fit(cosmic::iced::ContentFit::Cover)
-                        .width(Length::Fixed(SIMULATED_WIDTH as f32))
-                        .height(Length::Fixed(SIMULATED_HEIGHT as f32))
-                        .into()
-                } else {
-                    // Show loading placeholder - wallpapers are still loading
-                    container(widget::text(fl!("loading-wallpapers")))
-                        .width(Length::Fixed(SIMULATED_WIDTH as f32))
-                        .height(Length::Fixed(SIMULATED_HEIGHT as f32))
-                        .align_x(Alignment::Center)
-                        .align_y(Alignment::Center)
-                        .into()
-                }
-            }
-            Choice::Color(color) => color_image(color.clone(), SIMULATED_WIDTH, SIMULATED_HEIGHT),
-            Choice::Shader(idx) => {
-                // For shaders, always show the thumbnail (placeholder or real)
-                if let Some(handle) = self.shader_thumbnails.get(*idx) {
-                    widget::image(handle.clone())
-                        .content_fit(cosmic::iced::ContentFit::Cover)
-                        .width(Length::Fixed(SIMULATED_WIDTH as f32))
-                        .height(Length::Fixed(SIMULATED_HEIGHT as f32))
-                        .into()
-                } else {
-                    // Shader index out of bounds - show placeholder
-                    shader_placeholder(SIMULATED_WIDTH, SIMULATED_HEIGHT)
-                }
-            }
-        };
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
 
+impl GlowBerrySettings {
+    /// Window background at the configured opacity.
+    fn window_bg(&self) -> cosmic::theme::Container<'static> {
         let opacity = self.window_opacity;
-        container(content)
-            .padding(8)
-            .class(cosmic::theme::Container::custom(move |theme| {
-                let cosmic = theme.cosmic();
-                let mut bg_color: cosmic::iced::Color =
-                    cosmic.background(theme.transparent).component.base.into();
-                bg_color.a = opacity;
-                cosmic::widget::container::Style {
-                    icon_color: Some(cosmic.background(theme.transparent).component.on.into()),
-                    text_color: Some(cosmic.background(theme.transparent).component.on.into()),
-                    background: Some(cosmic::iced::Background::Color(bg_color)),
-                    border: cosmic::iced::Border {
-                        radius: cosmic.corner_radii.radius_s.into(),
-                        ..Default::default()
-                    },
-                    shadow: cosmic::iced::Shadow::default(),
-                    snap: false,
-                }
-            }))
-            .width(Length::Shrink)
-            .into()
-    }
-
-    fn view_settings_list(&self) -> Element<'_, Message> {
-        let mut list = widget::list_column();
-
-        // Frame rate dropdown and shader parameters (only for shaders)
-        if let Choice::Shader(shader_idx) = self.selection.active {
-            // Frame rate is always visible
-            list = list.add(settings::item(
-                fl!("frame-rate"),
-                dropdown(
-                    &self.frame_rate_options,
-                    Some(self.selected_shader_frame_rate),
-                    Message::ShaderFrameRate,
-                ),
-            ));
-
-            list = list.add(settings::item(
-                fl!("render-quality"),
-                dropdown(
-                    &self.render_scale_options,
-                    Some(self.selected_shader_render_scale),
-                    Message::ShaderRenderScale,
-                ),
-            ));
-
-            // Show Details button (centered, pull-down style with chevron icon)
-            let (details_label, chevron_icon) = if self.shader_details_expanded {
-                (fl!("hide-details"), "go-up-symbolic")
-            } else {
-                (fl!("show-details"), "go-down-symbolic")
-            };
-
-            let details_button = widget::button::text(details_label)
-                .trailing_icon(widget::icon::from_name(chevron_icon).size(16))
-                .on_press(Message::ToggleShaderDetails);
-
-            list = list.add(
-                container(details_button)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Center),
-            );
-
-            // Collapsible details section
-            if self.shader_details_expanded
-                && let Some(shader_info) = self.available_shaders.get(shader_idx)
-                && let Some(parsed) = &shader_info.parsed
-            {
-                let metadata = &parsed.metadata;
-
-                // Author
-                if !metadata.author.is_empty() {
-                    list = list.add(settings::item(
-                        fl!("shader-author"),
-                        widget::text(&metadata.author),
-                    ));
-                }
-
-                // Source (as a clickable link if it looks like a URL)
-                if !metadata.source.is_empty() {
-                    let source_url = metadata.source.clone();
-                    let source_widget: Element<'_, Message> = if metadata.source.starts_with("http")
-                    {
-                        widget::button::link(source_url.clone())
-                            .on_press(Message::OpenUrl(source_url))
-                            .into()
-                    } else {
-                        widget::text(&metadata.source).into()
-                    };
-                    list = list.add(settings::item(fl!("shader-source"), source_widget));
-                }
-
-                // License
-                if !metadata.license.is_empty() {
-                    list = list.add(settings::item(
-                        fl!("shader-license"),
-                        widget::text(&metadata.license),
-                    ));
-                }
-
-                // Resource usage estimate using naga-based analysis
-                let param_values = self.shader_param_values.get(&shader_idx);
-                let iteration_multiplier =
-                    calculate_iteration_multiplier(&parsed.params, param_values);
-                let has_texture = parsed.source_body.contains("iTexture")
-                    || parsed.source_body.contains("textureSample");
-
-                let complexity = shader_analysis::analyze_glowberry_shader(
-                    &parsed.source_body,
-                    has_texture,
-                    Some(iteration_multiplier),
-                )
-                .map(|m| m.complexity())
-                .unwrap_or(Complexity::Medium); // Default to medium if parsing fails
-
-                let usage_label = match complexity {
-                    Complexity::Low => fl!("resource-low"),
-                    Complexity::Medium => fl!("resource-medium"),
-                    Complexity::High => fl!("resource-high"),
-                };
-                list = list.add(settings::item(
-                    fl!("shader-resource-usage"),
-                    widget::text(usage_label),
-                ));
-
-                // Shader parameters
-                for param in &parsed.params {
-                    let current_values = self.shader_param_values.get(&shader_idx);
-                    let current = current_values
-                        .and_then(|v| v.get(&param.name))
-                        .copied()
-                        .unwrap_or(param.default);
-
-                    let param_name = param.name.clone();
-                    let idx = shader_idx;
-
-                    match param.param_type {
-                        ParamType::F32 => {
-                            let min = param.min.as_f32();
-                            let max = param.max.as_f32();
-                            let step = param.step.as_f32();
-                            let value = current.as_f32();
-
-                            list = list.add(settings::item(
-                                &param.label,
-                                widget::row::with_children(vec![
-                                    slider(min..=max, value, move |v| {
-                                        Message::ShaderParamChanged(
-                                            idx,
-                                            param_name.clone(),
-                                            ParamValue::F32(v),
-                                        )
-                                    })
-                                    .on_release(Message::ShaderParamReleased)
-                                    .step(step)
-                                    .width(Length::Fixed(150.0))
-                                    .into(),
-                                    widget::text(format!("{:.2}", value))
-                                        .width(Length::Fixed(50.0))
-                                        .into(),
-                                ])
-                                .spacing(8)
-                                .align_y(Alignment::Center),
-                            ));
-                        }
-                        ParamType::I32 => {
-                            let min = param.min.as_i32() as f32;
-                            let max = param.max.as_i32() as f32;
-                            let step = param.step.as_i32() as f32;
-                            let value = current.as_i32() as f32;
-
-                            let param_name_clone = param_name.clone();
-                            list = list.add(settings::item(
-                                &param.label,
-                                widget::row::with_children(vec![
-                                    slider(min..=max, value, move |v| {
-                                        Message::ShaderParamChanged(
-                                            idx,
-                                            param_name_clone.clone(),
-                                            ParamValue::I32(v as i32),
-                                        )
-                                    })
-                                    .on_release(Message::ShaderParamReleased)
-                                    .step(step)
-                                    .width(Length::Fixed(150.0))
-                                    .into(),
-                                    widget::text(format!("{}", current.as_i32()))
-                                        .width(Length::Fixed(50.0))
-                                        .into(),
-                                ])
-                                .spacing(8)
-                                .align_y(Alignment::Center),
-                            ));
-                        }
-                    }
-                }
-
-                // Reset to defaults button
-                list = list.add(
-                    widget::button::destructive(fl!("reset-to-defaults"))
-                        .on_press(Message::ResetShaderParams(shader_idx)),
-                );
-            }
-        }
-
-        // Apply custom style with opacity to the list
-        let opacity = self.window_opacity;
-        list.style(cosmic::theme::Container::custom(move |theme| {
+        cosmic::theme::Container::custom(move |theme| {
             let cosmic = theme.cosmic();
-            let component = &cosmic.background(theme.transparent).component;
-            let mut bg_color: cosmic::iced::Color = component.base.into();
+            let mut bg_color: cosmic::iced::Color =
+                cosmic.background(theme.transparent).base.into();
             bg_color.a = opacity;
             cosmic::widget::container::Style {
-                icon_color: Some(component.on.into()),
-                text_color: Some(component.on.into()),
                 background: Some(cosmic::iced::Background::Color(bg_color)),
-                border: cosmic::iced::Border {
-                    radius: cosmic.corner_radii.radius_s.into(),
-                    ..Default::default()
-                },
+                icon_color: Some(cosmic.background(theme.transparent).on.into()),
+                text_color: Some(cosmic.background(theme.transparent).on.into()),
+                border: cosmic::iced::Border::default(),
                 shadow: cosmic::iced::Shadow::default(),
                 snap: false,
             }
-        }))
-        .into()
+        })
     }
 
-    fn view_multi_monitor_canvas(&self) -> Element<'_, Message> {
+    /// The canvas: connected displays with their staged content.
+    fn view_canvas(&self) -> Element<'_, Message> {
         use crate::widgets::extend_editor::{ExtendEditor, LayerView};
 
         let mut layer_views: Vec<LayerView<'_>> = self
@@ -3463,8 +2641,9 @@ impl GlowBerrySettings {
                 offset_y: layer.offset.1,
                 img_scale: layer.scale,
                 z_index: layer.z_index,
-                selected: self.extend_selected_layer == Some(key),
+                selected: !layer.locked && self.extend_selected_layer == Some(key),
                 locked: layer.locked,
+                target_output: layer.target_output.as_deref(),
                 color: self.extend_layer_colors.get(key),
             })
             .collect();
@@ -3473,193 +2652,223 @@ impl GlowBerrySettings {
         let editor = ExtendEditor::new(
             &self.monitor_geometry,
             layer_views,
+            &self.selected_displays,
             Message::ExtendLayerMoved,
             Message::ExtendLayerScaled,
             Message::ExtendLayerSelected,
         )
+        .on_display_click(Message::DisplaySelected)
+        .on_display_right_click(Message::DisplayRightClick)
+        .on_background_click(Message::CanvasBackgroundClicked)
         .on_right_click(Message::ExtendLayerRightClick)
         .fit_requested(self.extend_fit_view_requested);
 
-        // Side buttons (right of canvas) — z-order and center only
-        let mut side_buttons: Vec<Element<'_, Message>> = Vec::new();
+        let selected_free = self
+            .extend_selected_layer
+            .filter(|k| self.extend_layers.get(*k).is_some_and(|l| !l.locked));
 
-        if let Some(sel_key) = self.extend_selected_layer {
-            let is_locked = self.extend_layers.get(sel_key).is_some_and(|l| l.locked);
-
-            if !is_locked {
-                side_buttons.push(with_tip(
-                    widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                        .on_press(Message::ExtendLayerUp),
-                    fl!("tip-layer-up"),
-                ));
-                side_buttons.push(with_tip(
-                    widget::button::icon(widget::icon::from_name("go-down-symbolic"))
-                        .on_press(Message::ExtendLayerDown),
-                    fl!("tip-layer-down"),
-                ));
-                side_buttons.push(with_tip(
-                    widget::button::icon(widget::icon::from_name("format-justify-center-symbolic"))
-                        .on_press(Message::ExtendCenter),
-                    fl!("tip-center"),
-                ));
-            }
+        // Top-right: selection and z-order tools.
+        let mut top_right: Vec<Element<'_, Message>> = Vec::new();
+        if !self.selected_displays.is_empty() {
+            top_right.push(
+                button::text(fl!("select-all-displays"))
+                    .on_press(Message::SelectAllDisplays)
+                    .into(),
+            );
         }
-
-        let side_col = widget::column::with_children(side_buttons)
-            .spacing(4)
-            .align_x(Alignment::Center);
-
-        // In color/live modes items are always locked and can't be expanded; the
-        // lock/unlock and z-order controls don't apply.
-        let locked_content_mode = matches!(
-            self.categories.selected,
-            Some(Category::Colors | Category::Shaders)
-        );
-
-        // Tool buttons overlaid on bottom-left of canvas
-        let mut overlay_buttons: Vec<Element<'_, Message>> = Vec::new();
-
-        if let Some(sel_key) = self.extend_selected_layer {
-            let is_locked = self.extend_layers.get(sel_key).is_some_and(|l| l.locked);
-
-            if !locked_content_mode {
-                if is_locked {
-                    overlay_buttons.push(with_tip(
-                        widget::button::icon(widget::icon::from_name("changes-allow-symbolic"))
-                            .on_press(Message::ExtendToggleLock(sel_key)),
-                        fl!("tip-unlock"),
-                    ));
-                } else {
-                    overlay_buttons.push(with_tip(
-                        widget::button::icon(widget::icon::from_name("changes-prevent-symbolic"))
-                            .on_press(Message::ExtendToggleLock(sel_key)),
-                        fl!("tip-lock"),
-                    ));
-                }
-            }
-
-            overlay_buttons.push(with_tip(
-                widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
-                    .on_press(Message::ExtendRemoveLayer(sel_key))
-                    .class(cosmic::theme::Button::Destructive),
-                fl!("tip-delete"),
+        if selected_free.is_some() {
+            top_right.push(with_tip(
+                widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+                    .on_press(Message::ExtendLayerUp),
+                fl!("tip-layer-up"),
+            ));
+            top_right.push(with_tip(
+                widget::button::icon(widget::icon::from_name("go-down-symbolic"))
+                    .on_press(Message::ExtendLayerDown),
+                fl!("tip-layer-down"),
+            ));
+            top_right.push(with_tip(
+                widget::button::icon(widget::icon::from_name("format-justify-center-symbolic"))
+                    .on_press(Message::ExtendCenter),
+                fl!("tip-center"),
             ));
         }
 
-        // Only offer clear-all when nothing is selected, so it isn't mistaken
-        // for (and adjacent to) the per-item delete button.
-        if !self.extend_layers.is_empty() && self.extend_selected_layer.is_none() {
-            overlay_buttons.push(with_tip(
+        // Bottom-left: delete / clear / fit.
+        let mut bottom_left: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(key) = selected_free {
+            bottom_left.push(with_tip(
+                widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                    .on_press(Message::ExtendRemoveLayer(key))
+                    .class(cosmic::theme::Button::Destructive),
+                fl!("tip-delete"),
+            ));
+        } else if !self.extend_layers.is_empty() {
+            bottom_left.push(with_tip(
                 widget::button::icon(widget::icon::from_name("edit-clear-symbolic"))
                     .on_press(Message::ExtendClearAll)
                     .class(cosmic::theme::Button::Destructive),
                 fl!("tip-clear-all"),
             ));
         }
-
-        overlay_buttons.push(with_tip(
+        bottom_left.push(with_tip(
             widget::button::icon(widget::icon::from_name("zoom-fit-best-symbolic"))
                 .on_press(Message::ExtendFitView),
             fl!("tip-fit"),
         ));
 
-        let tool_col = widget::column::with_children(overlay_buttons).spacing(4);
-
-        let tool_overlay = container(tool_col)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Start)
-            .align_y(Alignment::End)
-            .padding(6);
-
-        // Z-order / center buttons overlaid on the top-right of the canvas.
-        let side_overlay = container(side_col)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::End)
-            .align_y(Alignment::Start)
-            .padding(6);
-
-        let canvas_container: Element<'_, Message> = cosmic::iced::widget::stack![
-            container(editor)
-                .width(Length::Fill)
-                .height(Length::Fixed(300.0)),
-            tool_overlay,
-            side_overlay
-        ]
-        .width(Length::Fill)
-        .height(Length::Fixed(300.0))
-        .into();
-
-        // Popover for layer right-click menu (always structurally present)
-        let mut canvas_popover = widget::popover(canvas_container);
-        if let Some((key, (cx, cy))) = self.layer_context_menu {
-            let mut menu_items: Vec<Element<'_, Message>> = Vec::new();
-
-            // Duplicate / show-on options (use Layer* messages that look up path from layer)
-            menu_items.push(
-                button::text(fl!("wp-duplicate-all"))
-                    .on_press(Message::LayerDuplicateAll(key))
+        let mut stack = cosmic::iced::widget::Stack::new()
+            .push(container(editor).width(Length::Fill).height(Length::Fill))
+            .push(
+                container(widget::column::with_children(bottom_left).spacing(4))
                     .width(Length::Fill)
-                    .into(),
-            );
-            for monitor in &self.monitor_geometry {
-                let name = monitor.name.clone();
-                menu_items.push(
-                    button::text(format!("{} {}", fl!("wp-show-on"), &name))
-                        .on_press(Message::LayerShowOn(key, name))
-                        .width(Length::Fill)
-                        .into(),
-                );
-            }
-
-            // Layer ordering and unlock don't apply to color/live items.
-            if !locked_content_mode {
-                menu_items.push(widget::divider::horizontal::light().into());
-                menu_items.push(
-                    button::text(fl!("ctx-bring-forward"))
-                        .on_press(Message::ExtendLayerBringForward(key))
-                        .width(Length::Fill)
-                        .into(),
-                );
-                menu_items.push(
-                    button::text(fl!("ctx-send-back"))
-                        .on_press(Message::ExtendLayerSendBack(key))
-                        .width(Length::Fill)
-                        .into(),
-                );
-            }
-
-            // Unlock / Remove
-            menu_items.push(widget::divider::horizontal::light().into());
-            if !locked_content_mode && self.extend_layers.get(key).is_some_and(|l| l.locked) {
-                menu_items.push(
-                    button::text(fl!("unlock-layer"))
-                        .on_press(Message::ExtendToggleLock(key))
-                        .width(Length::Fill)
-                        .into(),
-                );
-            }
-            menu_items.push(
-                button::text(fl!("ctx-remove"))
-                    .on_press(Message::ExtendRemoveLayer(key))
-                    .width(Length::Fill)
-                    .class(cosmic::theme::Button::Destructive)
-                    .into(),
-            );
-
-            let popup = container(
-                widget::column::with_children(menu_items)
-                    .spacing(2)
-                    .padding(8)
-                    .width(Length::Fixed(220.0)),
+                    .height(Length::Fill)
+                    .align_x(Alignment::Start)
+                    .align_y(Alignment::End)
+                    .padding(6),
             )
+            .push(
+                container(
+                    widget::row::with_children(top_right)
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::End)
+                .align_y(Alignment::Start)
+                .padding(6),
+            );
+        if self.tips_visible() {
+            stack = stack.push(
+                container(self.view_tips())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::End)
+                    .align_y(Alignment::End)
+                    .padding(10),
+            );
+        }
+        let canvas: Element<'_, Message> = stack.width(Length::Fill).height(Length::Fill).into();
+
+        // Context menu on a display or on a free layer.
+        let mut popover = widget::popover(canvas);
+        if let Some((menu, (cx, cy))) = &self.canvas_menu {
+            let entry = menu_entry;
+            let danger = menu_danger;
+            let many = self.monitor_geometry.len() > 1;
+            let mut items: Vec<Element<'_, Message>> = Vec::new();
+            match menu {
+                CanvasMenu::Layer(key) => {
+                    items.push(entry(
+                        fl!("ctx-bring-forward"),
+                        Message::ExtendLayerBringForward(*key),
+                    ));
+                    items.push(entry(
+                        fl!("ctx-send-back"),
+                        Message::ExtendLayerSendBack(*key),
+                    ));
+                    items.push(entry(fl!("ctx-fit"), Message::ExtendLayerFit(*key)));
+                    items.push(widget::divider::horizontal::light().into());
+                    items.push(danger(fl!("ctx-remove"), Message::ExtendRemoveLayer(*key)));
+                }
+                CanvasMenu::Display(name) => {
+                    let shown = self
+                        .monitor_geometry
+                        .iter()
+                        .find(|m| m.name == *name)
+                        .map_or(Shown::Nothing, |m| self.shown_on(m));
+                    items.push(entry(
+                        fl!("ctx-select"),
+                        Message::DisplaySelected(name.clone(), false),
+                    ));
+                    if many {
+                        items.push(entry(
+                            fl!("ctx-add-selection"),
+                            Message::DisplaySelected(name.clone(), true),
+                        ));
+                    }
+                    if many && shown != Shown::Nothing {
+                        items.push(widget::divider::horizontal::light().into());
+                        items.push(entry(
+                            fl!("ctx-duplicate-all"),
+                            Message::DisplayDuplicateAll(name.clone()),
+                        ));
+                        if matches!(shown, Shown::Image { .. }) {
+                            items.push(entry(
+                                fl!("ctx-span-all"),
+                                Message::DisplaySpanAll(name.clone()),
+                            ));
+                        }
+                    }
+                    if shown != Shown::Nothing {
+                        items.push(widget::divider::horizontal::light().into());
+                        items.push(danger(
+                            fl!("ctx-clear-display"),
+                            Message::DisplayClear(name.clone()),
+                        ));
+                    }
+                }
+            }
+
+            let popup = menu_popup(items);
+
+            popover = popover
+                .popup(popup)
+                .position(widget::popover::Position::Point(cosmic::iced::Point {
+                    x: *cx,
+                    y: *cy,
+                }))
+                .on_close(Message::ExtendLayerMenuClose);
+        }
+
+        popover.into()
+    }
+
+    /// The help dock has room only on a reasonably wide canvas.
+    fn tips_visible(&self) -> bool {
+        !self.tips_hidden && (self.window_width == 0.0 || self.window_width >= 720.0)
+    }
+
+    /// A translucent card in the canvas corner with one usage tip, a button
+    /// for the next one, and a close button.
+    fn view_tips(&self) -> Element<'_, Message> {
+        let tip = match self.tip_index % TIP_COUNT {
+            0 => fl!("tip-1"),
+            1 => fl!("tip-2"),
+            2 => fl!("tip-3"),
+            3 => fl!("tip-4"),
+            4 => fl!("tip-5"),
+            _ => fl!("tip-6"),
+        };
+        let row = widget::row::with_children(vec![
+            widget::icon::from_name("dialog-information-symbolic")
+                .size(16)
+                .into(),
+            text::body(tip).width(Length::Fixed(320.0)).into(),
+            with_tip(
+                widget::button::icon(widget::icon::from_name("go-next-symbolic"))
+                    .on_press(Message::NextTip),
+                fl!("tip-next"),
+            ),
+            with_tip(
+                widget::button::icon(widget::icon::from_name("window-close-symbolic"))
+                    .on_press(Message::HideTips),
+                fl!("tip-hide"),
+            ),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+        container(row)
+            .padding([8, 12])
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
-                cosmic::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(
-                        cosmic.background(theme.transparent).component.base.into(),
-                    )),
+                let mut bg: cosmic::iced::Color =
+                    cosmic.background(theme.transparent).component.base.into();
+                bg.a = 0.9;
+                container::Style {
+                    background: Some(cosmic::iced::Background::Color(bg)),
                     icon_color: Some(cosmic.background(theme.transparent).component.on.into()),
                     text_color: Some(cosmic.background(theme.transparent).component.on.into()),
                     border: cosmic::iced::Border {
@@ -3672,243 +2881,696 @@ impl GlowBerrySettings {
                             .into(),
                     },
                     shadow: cosmic::iced::Shadow {
-                        color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
-                        offset: cosmic::iced::Vector::new(0.0, 2.0),
-                        blur_radius: 8.0,
+                        color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                        offset: cosmic::iced::Vector::new(0.0, 4.0),
+                        blur_radius: 16.0,
                     },
                     snap: false,
                 }
-            }));
+            }))
+            .into()
+    }
 
-            canvas_popover = canvas_popover
-                .popup(popup)
-                .position(widget::popover::Position::Point(cosmic::iced::Point {
-                    x: cx,
-                    y: cy,
-                }))
-                .on_close(Message::ExtendLayerMenuClose);
+    /// Title of the inspector drawer: the selected display, or how many.
+    fn inspector_title(&self) -> String {
+        let targets = self.target_monitors();
+        match targets.as_slice() {
+            [one] => one.name.clone(),
+            _ if targets.len() == self.monitor_geometry.len() => fl!("all-displays"),
+            _ => fl!("n-displays", n = (targets.len() as u64)),
+        }
+    }
+
+    /// The inspector: the selected display(s), what they show, and its settings.
+    /// Free text and the content header sit flat on the panel; the settings
+    /// rows share one list container so the controls read as a group.
+    fn view_inspector(&self) -> Element<'_, Message> {
+        let targets = self.target_monitors();
+        let mut head: Vec<Element<'_, Message>> = Vec::new();
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+
+        if targets.is_empty() {
+            head.push(text::body(fl!("no-displays")).into());
+            return widget::column::with_children(head).into();
         }
 
-        // Canvas row: editor (buttons are overlaid inside the canvas).
-        let canvas_row: Element<'_, Message> = canvas_popover.into();
+        let subtitle = match targets.as_slice() {
+            [one] => one.display_label(),
+            _ => targets
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        head.push(text::body(subtitle).into());
 
-        // Bottom controls: clear all + apply
-        let mut bottom: Vec<Element<'_, Message>> = Vec::new();
+        let shared = self.shared_shown(&targets);
+        let show_placement = matches!(
+            shared,
+            None | Some(Shown::Nothing) | Some(Shown::Image { .. })
+        );
+        let placement = || -> Element<'_, Message> {
+            settings::flex_item(
+                fl!("placement"),
+                segmented_control::horizontal(&self.placement_model)
+                    .on_activate(Message::SetPlacement),
+            )
+            .into()
+        };
 
-        bottom.push(
-            button::text(fl!("extend-apply"))
-                .on_press(Message::ApplyExtend)
-                .class(cosmic::theme::Button::Suggested)
+        match shared {
+            None => {
+                head.push(text::body(fl!("mixed-content")).into());
+                for m in &targets {
+                    let what = self.describe_shown(&self.shown_on(m));
+                    rows.push(
+                        button::text(format!("{}: {what}", m.name))
+                            .on_press(Message::DisplaySelected(m.name.clone(), false))
+                            .width(Length::Fill)
+                            .into(),
+                    );
+                }
+                if show_placement {
+                    rows.push(placement());
+                }
+            }
+            Some(Shown::Nothing) => {
+                head.push(text::body(fl!("nothing-staged")).into());
+                if show_placement {
+                    rows.push(placement());
+                }
+            }
+            Some(Shown::Image { path, span }) => {
+                let name = image_name(&path);
+                let detail = match &span {
+                    Some(k) => {
+                        let covered: Vec<&str> = self
+                            .monitor_geometry
+                            .iter()
+                            .filter(|m| layer_covers(&self.extend_layers[*k], m))
+                            .map(|m| m.name.as_str())
+                            .collect();
+                        fl!("spanning", displays = covered.join(", "))
+                    }
+                    None => image::image_dimensions(&path)
+                        .map(|(w, h)| format!("{w} × {h}"))
+                        .unwrap_or_default(),
+                };
+                let thumb: Element<'_, Message> = match self
+                    .selection
+                    .paths
+                    .iter()
+                    .find(|(_, p)| **p == path)
+                    .and_then(|(k, _)| self.selection.selection_handles.get(k))
+                {
+                    Some(handle) => widget::image(handle.clone())
+                        .content_fit(cosmic::iced::ContentFit::Cover)
+                        .width(Length::Fixed(88.0))
+                        .height(Length::Fixed(50.0))
+                        .into(),
+                    None => widget::Space::new().width(88).height(50).into(),
+                };
+                head.push(content_header(thumb, name, detail));
+                if show_placement {
+                    rows.push(placement());
+                }
+                if span.is_none() {
+                    let fit_idx = targets
+                        .first()
+                        .and_then(|m| self.locked_layer_on(&m.name))
+                        .and_then(|k| self.extend_layer_fit.get(k))
+                        .map_or(0, fit_index);
+                    rows.push(
+                        settings::item(
+                            fl!("fit"),
+                            framed(dropdown(
+                                &self.fit_options,
+                                Some(fit_idx),
+                                Message::SetImageFit,
+                            )),
+                        )
+                        .into(),
+                    );
+                }
+            }
+            Some(Shown::Color(color)) => {
+                let name = color_name(&color);
+                let kind = match color {
+                    Color::Single(_) => fl!("solid-color"),
+                    Color::Gradient(_) => fl!("color-gradient"),
+                };
+                head.push(content_header(color_image(color, 88, 50), kind, name));
+            }
+            Some(Shown::Shader(idx)) => {
+                head.push(self.shader_header(idx));
+                self.shader_settings(&mut rows, idx);
+            }
+        }
+
+        if !rows.is_empty() {
+            let list = rows
+                .into_iter()
+                .fold(widget::list_column(), |list, row| list.add(row));
+            head.push(list.into());
+        }
+        widget::column::with_children(head)
+            .spacing(12)
+            .width(Length::Fill)
+            .into()
+    }
+
+    /// Thumbnail, name and author of a live wallpaper.
+    fn shader_header(&self, idx: usize) -> Element<'_, Message> {
+        let Some(info) = self.available_shaders.get(idx) else {
+            return widget::Space::new().into();
+        };
+        let author = info
+            .parsed
+            .as_ref()
+            .map(|p| &p.metadata)
+            .filter(|m| !m.author.is_empty())
+            .map(|m| fl!("adapted-by", author = m.author.clone()))
+            .unwrap_or_default();
+        let thumb: Element<'_, Message> = match self.shader_thumbnails.get(idx) {
+            Some(handle) => widget::image(handle.clone())
+                .content_fit(cosmic::iced::ContentFit::Cover)
+                .width(Length::Fixed(88.0))
+                .height(Length::Fixed(50.0))
                 .into(),
+            None => widget::Space::new().width(88).height(50).into(),
+        };
+        content_header(thumb, info.name.clone(), author)
+    }
+
+    /// Settings rows for a live wallpaper: how heavy it is and its knobs.
+    fn shader_settings<'a>(&'a self, rows: &mut Vec<Element<'a, Message>>, idx: usize) {
+        let Some(info) = self.available_shaders.get(idx) else {
+            return;
+        };
+        let meta = info.parsed.as_ref().map(|p| &p.metadata);
+
+        if let Some(load) = info.load {
+            rows.push(settings::item(fl!("gpu-load"), text::body(load_label(load))).into());
+        }
+        rows.push(
+            settings::item(
+                fl!("frame-rate"),
+                framed(dropdown(
+                    &self.frame_rate_options,
+                    Some(self.selected_shader_frame_rate),
+                    Message::ShaderFrameRate,
+                )),
+            )
+            .into(),
+        );
+        rows.push(
+            settings::item(
+                fl!("render-quality"),
+                framed(dropdown(
+                    &self.render_scale_options,
+                    Some(self.selected_shader_render_scale),
+                    Message::ShaderRenderScale,
+                )),
+            )
+            .into(),
         );
 
-        let bottom_row = widget::row::with_children(bottom)
-            .spacing(8)
-            .align_y(Alignment::Center);
+        if let Some(parsed) = &info.parsed {
+            let values = self.shader_param_values.get(&idx);
+            for param in &parsed.params {
+                let current = values
+                    .and_then(|v| v.get(&param.name))
+                    .copied()
+                    .unwrap_or(param.default);
+                let name = param.name.clone();
+                let (min, max, step, value, shown) = match param.param_type {
+                    ParamType::F32 => (
+                        param.min.as_f32(),
+                        param.max.as_f32(),
+                        param.step.as_f32(),
+                        current.as_f32(),
+                        format!("{:.2}", current.as_f32()),
+                    ),
+                    ParamType::I32 => (
+                        param.min.as_i32() as f32,
+                        param.max.as_i32() as f32,
+                        param.step.as_i32() as f32,
+                        current.as_i32() as f32,
+                        current.as_i32().to_string(),
+                    ),
+                };
+                let kind = param.param_type;
+                rows.push(
+                    // Label and value on one line, slider full width below:
+                    // a fixed-width slider beside the label does not fit the
+                    // panel and pushes every row to a different edge.
+                    widget::column::with_children(vec![
+                        widget::row::with_children(vec![
+                            text::body(param.label.clone()).width(Length::Fill).into(),
+                            text::body(shown).into(),
+                        ])
+                        .align_y(Alignment::Center)
+                        .into(),
+                        slider(min..=max, value, move |v| {
+                            let value = match kind {
+                                ParamType::F32 => ParamValue::F32(v),
+                                ParamType::I32 => ParamValue::I32(v as i32),
+                            };
+                            Message::ShaderParamChanged(idx, name.clone(), value)
+                        })
+                        .on_release(Message::ShaderParamReleased)
+                        .step(step)
+                        .width(Length::Fill)
+                        .into(),
+                    ])
+                    .spacing(6)
+                    .width(Length::Fill)
+                    .into(),
+                );
+            }
+            if !parsed.params.is_empty() {
+                rows.push(
+                    container(
+                        button::text(fl!("reset-to-defaults"))
+                            .on_press(Message::ResetShaderParams(idx)),
+                    )
+                    .width(Length::Fill)
+                    .align_x(Alignment::End)
+                    .into(),
+                );
+            }
+        }
 
-        // Hint text
-        let hint_text = match (self.extend_layers.is_empty(), locked_content_mode) {
-            (true, true) => fl!("live-no-items"),
-            (true, false) => fl!("extend-no-layers"),
-            (false, true) => fl!("live-hint"),
-            (false, false) => fl!("extend-hint"),
-        };
-        let hint: Element<'_, Message> = text::body(hint_text)
-            .align_x(Alignment::Center)
-            .width(Length::Fill)
-            .into();
+        if let Some(m) = meta {
+            if !m.license.is_empty() {
+                rows.push(settings::item(fl!("shader-license"), widget::text(&m.license)).into());
+            }
+            if !m.source.is_empty() {
+                let source: Element<'_, Message> = if m.source.starts_with("http") {
+                    widget::button::link(m.source.clone())
+                        .on_press(Message::OpenUrl(m.source.clone()))
+                        .into()
+                } else {
+                    widget::text(&m.source).into()
+                };
+                rows.push(settings::item(fl!("shader-source"), source).into());
+            }
+        }
+    }
 
-        widget::column::with_children(vec![
-            canvas_row,
-            hint,
-            container(bottom_row)
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
+    fn describe_shown(&self, shown: &Shown) -> String {
+        match shown {
+            Shown::Nothing => fl!("nothing-yet"),
+            Shown::Image { path, span } => {
+                let name = image_name(path);
+                if span.is_some() {
+                    fl!("spanned-image", name = name)
+                } else {
+                    name
+                }
+            }
+            Shown::Color(c) => color_name(c),
+            Shown::Shader(idx) => self
+                .available_shaders
+                .get(*idx)
+                .map(|s| s.name.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The library: one grid of images, live wallpapers, and colors, with a
+    /// kind filter and a name search above it.
+    fn view_library(&self, scroll_grid: bool) -> Element<'_, Message> {
+        let filter = self
+            .library_filter
+            .active_data::<LibraryFilter>()
+            .copied()
+            .unwrap_or(LibraryFilter::All);
+        let query = self.library_query.trim().to_lowercase();
+        let matches = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
+        let mut cards: Vec<Element<'_, Message>> = Vec::new();
+        if matches!(filter, LibraryFilter::All | LibraryFilter::Images) {
+            cards.extend(self.wallpaper_cards(&matches));
+        }
+        if matches!(filter, LibraryFilter::All | LibraryFilter::Live) {
+            cards.extend(self.shader_cards(&matches));
+        }
+        if matches!(filter, LibraryFilter::All | LibraryFilter::Colors) {
+            cards.extend(self.color_cards(&matches));
+        }
+
+        let filter_control = segmented_control::horizontal(&self.library_filter)
+            .on_activate(Message::LibraryFilter)
+            .width(Length::Shrink);
+        let search = widget::search_input(fl!("search-library"), &self.library_query)
+            .on_input(Message::LibrarySearch)
+            .on_clear(Message::LibrarySearch(String::new()));
+        let add_images = with_tip(
+            widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+                .on_press(Message::AddWallpaperImages),
+            fl!("add-images"),
+        );
+        let add_folder = with_tip(
+            widget::button::icon(widget::icon::from_name("folder-new-symbolic"))
+                .on_press(Message::AddWallpaperFolder),
+            fl!("add-folder"),
+        );
+        let toolbar: Element<'_, Message> = if self.condensed() {
+            // Not enough room for everything on one line: search goes below.
+            widget::column::with_children(vec![
+                filter_control.into(),
+                widget::row::with_children(vec![
+                    search.width(Length::Fill).into(),
+                    add_images,
+                    add_folder,
+                ])
+                .spacing(8)
+                .align_y(Alignment::Center)
                 .into(),
-        ])
-        .spacing(8)
-        .width(Length::Fill)
-        .into()
+            ])
+            .spacing(8)
+            .into()
+        } else {
+            widget::row::with_children(vec![
+                filter_control.into(),
+                search.width(Length::Fixed(260.0)).into(),
+                widget::Space::new().width(Length::Fill).into(),
+                add_images,
+                add_folder,
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
+        };
+
+        let grid: Element<'_, Message> = if cards.is_empty() {
+            let msg = if filter == LibraryFilter::Live && self.available_shaders.is_empty() {
+                fl!("no-shaders")
+            } else {
+                fl!("library-empty")
+            };
+            container(text::body(msg)).padding(24).into()
+        } else {
+            widget::flex_row(cards)
+                .column_spacing(12)
+                .row_spacing(16)
+                .into()
+        };
+        let grid: Element<'_, Message> = if scroll_grid {
+            widget::scrollable(container(grid).width(Length::Fill).padding([0, 12, 12, 0]))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            container(grid).width(Length::Fill).into()
+        };
+
+        widget::column::with_children(vec![toolbar, grid])
+            .spacing(12)
+            .width(Length::Fill)
+            .height(if scroll_grid {
+                Length::Fill
+            } else {
+                Length::Shrink
+            })
+            .into()
+    }
+
+    /// Wrap a library card so a right-click opens its menu: put the item on
+    /// all displays, on one of them, or (images) span it across all of them.
+    fn card_with_menu<'a>(
+        &'a self,
+        card: Element<'a, Message>,
+        item: Item,
+        remove_source: Option<usize>,
+    ) -> Element<'a, Message> {
+        let card = widget::mouse_area(card).on_right_press(Message::CardMenuOpen(item));
+        if self.card_menu != Some(item) {
+            return card.into();
+        }
+
+        let mut rows = vec![menu_entry(
+            fl!("put-on-all"),
+            Message::Card(CardAction::PutOnAll(item)),
+        )];
+        if self.monitor_geometry.len() > 1 {
+            for (i, m) in self.monitor_geometry.iter().enumerate() {
+                rows.push(menu_entry(
+                    fl!("put-on", display = m.name.clone()),
+                    Message::Card(CardAction::PutOn(item, i)),
+                ));
+            }
+            if let Item::Image(key) = item {
+                rows.push(menu_entry(
+                    fl!("span-all"),
+                    Message::Card(CardAction::SpanAll(key)),
+                ));
+            }
+        }
+        // User-added sources can be removed again; bundled ones can't.
+        if let Some(idx) = remove_source {
+            rows.push(widget::divider::horizontal::light().into());
+            rows.push(menu_danger(
+                fl!("wp-remove-source"),
+                Message::Card(CardAction::RemoveSource(idx)),
+            ));
+        }
+
+        widget::popover(card)
+            .popup(menu_popup(rows))
+            .position(widget::popover::Position::Point(cosmic::iced::Point {
+                x: THUMB_WIDTH as f32 / 2.0,
+                y: THUMB_HEIGHT as f32 / 2.0,
+            }))
+            .on_close(Message::CardMenuClose)
+            .into()
+    }
+
+    fn wallpaper_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
+        self.selection
+            .selection_handles
+            .iter()
+            .filter_map(|(id, handle)| {
+                let path = self.selection.paths.get(id)?;
+                let name = image_name(path);
+                if !matches(&name) {
+                    return None;
+                }
+                let thumb = widget::button::image(handle.clone()).on_press(Message::PickImage(id));
+                let on =
+                    self.staged_badge(|s| matches!(s, Shown::Image { path: p, .. } if p == path));
+                let card = library_card(card_thumb(thumb, None, on.map(accent_pill), None), name);
+
+                let remove = self.wallpaper_source_index_for(path);
+                Some(self.card_with_menu(card, Item::Image(id), remove))
+            })
+            .collect()
+    }
+
+    fn color_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
+        DEFAULT_COLORS
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, color)| {
+                let name = color_name(color);
+                if !matches(&name) {
+                    return None;
+                }
+                let swatch = button::custom_image_button(
+                    color_image(color.clone(), THUMB_WIDTH as u16, THUMB_HEIGHT as u16),
+                    None::<Message>,
+                )
+                .padding(0)
+                .class(button::ButtonClass::Image)
+                .on_press(Message::PickColor(idx));
+                let on = self.staged_badge(|s| matches!(s, Shown::Color(c) if c == color));
+                let card = library_card(card_thumb(swatch, None, on.map(accent_pill), None), name);
+                Some(self.card_with_menu(card, Item::Color(idx), None))
+            })
+            .collect()
+    }
+
+    fn shader_cards(&self, matches: &dyn Fn(&str) -> bool) -> Vec<Element<'_, Message>> {
+        self.shader_thumbnails
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, handle)| {
+                let info = self.available_shaders.get(idx)?;
+                if !matches(&info.name) {
+                    return None;
+                }
+                let thumb =
+                    widget::button::image(handle.clone()).on_press(Message::PickShader(idx));
+                let on = self.staged_badge(|s| matches!(s, Shown::Shader(i) if *i == idx));
+                let load = info
+                    .load
+                    .map(|l| dark_pill(fl!("gpu-pill", load = load_label(l))));
+                let card = library_card(
+                    card_thumb(thumb, Some(live_badge()), on.map(accent_pill), load),
+                    info.name.clone(),
+                );
+                Some(self.card_with_menu(card, Item::Shader(idx), None))
+            })
+            .collect()
     }
 
     /// Index of the user-added source a wallpaper path belongs to (the file
     /// itself, or a directory that contains it). `None` for bundled wallpapers.
-    fn wallpaper_source_index_for(&self, path: &std::path::Path) -> Option<usize> {
+    fn wallpaper_source_index_for(&self, path: &Path) -> Option<usize> {
         self.wallpaper_sources
             .iter()
-            .position(|src| src.as_path() == path || (src.is_dir() && path.starts_with(src)))
+            .position(|src| src == path || (src.is_dir() && path.starts_with(src)))
     }
 
-    fn view_wallpaper_grid(&self) -> Element<'_, Message> {
-        let buttons: Vec<Element<'_, Message>> = self
-            .selection
-            .selection_handles
-            .iter()
-            .map(|(id, handle)| {
-                // Left-click = add to canvas
-                let img_button: Element<'_, Message> = widget::button::image(handle.clone())
-                    .on_press(Message::WallpaperCustomize(id))
-                    .into();
+    /// Build the settings drawer content
+    fn settings_drawer_view(&self) -> Element<'_, Message> {
+        // Build power saving section
+        let mut power_saving_section = widget::settings::section().title(fl!("power-saving"));
 
-                // Right-click context menu
-                let mut ctx_items = vec![
-                    menu::Item::Button(fl!("wp-customize"), None, WallpaperAction::Customize(id)),
-                    menu::Item::Button(
-                        fl!("wp-duplicate-all"),
-                        None,
-                        WallpaperAction::DuplicateAll(id),
-                    ),
-                    menu::Item::Button(fl!("wp-span-all"), None, WallpaperAction::SpanAll(id)),
-                ];
-                for (idx, monitor) in self.monitor_geometry.iter().enumerate() {
-                    ctx_items.push(menu::Item::Button(
-                        format!("{} {}", fl!("wp-show-on"), &monitor.name),
-                        None,
-                        WallpaperAction::ShowOn(id, idx),
-                    ));
-                }
+        power_saving_section = power_saving_section.add(settings::item(
+            fl!("on-battery"),
+            framed(dropdown(
+                &self.on_battery_action_options,
+                Some(self.selected_on_battery_action),
+                Message::SetOnBatteryAction,
+            )),
+        ));
 
-                // Removing an added wallpaper: only offered for user-added
-                // sources, not the bundled ones.
-                if let Some(path) = self.selection.paths.get(id)
-                    && let Some(src_idx) = self.wallpaper_source_index_for(path)
-                {
-                    ctx_items.push(menu::Item::Divider);
-                    ctx_items.push(menu::Item::Button(
-                        fl!("wp-remove-source"),
-                        None,
-                        WallpaperAction::RemoveSource(src_idx),
-                    ));
-                }
+        {
+            let toggle_row = settings::item(
+                fl!("pause-low-battery"),
+                toggler(self.power_saving.pause_on_low_battery)
+                    .on_toggle(Message::SetPauseOnLowBattery),
+            );
 
-                widget::context_menu(img_button, Some(menu::items(&HashMap::new(), ctx_items)))
-                    .into()
-            })
-            .collect();
+            if self.power_saving.pause_on_low_battery {
+                let dropdown_row = settings::item(
+                    fl!("low-battery-threshold"),
+                    framed(dropdown(
+                        &self.low_battery_threshold_options,
+                        Some(self.selected_low_battery_threshold),
+                        Message::SetLowBatteryThreshold,
+                    )),
+                );
 
-        let grid = widget::flex_row(buttons).column_spacing(12).row_spacing(16);
-
-        // Toolbar: add images / add folder.
-        let toolbar = widget::row::with_children(vec![
-            button::text(fl!("add-images"))
-                .leading_icon(widget::icon::from_name("list-add-symbolic"))
-                .on_press(Message::AddWallpaperImages)
-                .into(),
-            button::text(fl!("add-folder"))
-                .leading_icon(widget::icon::from_name("folder-new-symbolic"))
-                .on_press(Message::AddWallpaperFolder)
-                .into(),
-        ])
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-        widget::column::with_children(vec![toolbar.into(), grid.into()])
-            .spacing(12)
-            .into()
-    }
-
-    fn view_color_grid(&self) -> Element<'_, Message> {
-        let selected = if let Choice::Color(ref c) = self.selection.active {
-            Some(c)
-        } else {
-            None
-        };
-
-        let buttons: Vec<Element<'_, Message>> = DEFAULT_COLORS
-            .iter()
-            .enumerate()
-            .map(|(idx, color)| {
-                let content = color_image(color.clone(), 70, 70);
-                let swatch: Element<'_, Message> =
-                    button::custom_image_button(content, None::<Message>)
-                        .padding(0)
-                        .selected(selected == Some(color))
-                        .class(button::ButtonClass::Image)
-                        .on_press(Message::ColorSelect(color.clone()))
-                        .into();
-
-                let mut ctx_items = vec![menu::Item::Button(
-                    fl!("apply-all"),
-                    None,
-                    ColorAction::All(idx),
-                )];
-                for (m, monitor) in self.monitor_geometry.iter().enumerate() {
-                    ctx_items.push(menu::Item::Button(
-                        format!("{} {}", fl!("wp-show-on"), &monitor.name),
-                        None,
-                        ColorAction::ShowOn(idx, m),
-                    ));
-                }
-                widget::context_menu(swatch, Some(menu::items(&HashMap::new(), ctx_items))).into()
-            })
-            .collect();
-
-        widget::flex_row(buttons)
-            .column_spacing(12)
-            .row_spacing(16)
-            .into()
-    }
-
-    fn view_shader_grid(&self) -> Element<'_, Message> {
-        let selected = if let Choice::Shader(idx) = self.selection.active {
-            Some(idx)
-        } else {
-            None
-        };
-
-        if self.available_shaders.is_empty() {
-            return widget::text(fl!("no-shaders")).into();
+                power_saving_section = power_saving_section.add(
+                    widget::column::with_children(vec![toggle_row.into(), dropdown_row.into()])
+                        .spacing(8),
+                );
+            } else {
+                power_saving_section = power_saving_section.add(toggle_row);
+            }
         }
 
-        let buttons: Vec<Element<'_, Message>> = self
-            .shader_thumbnails
-            .iter()
-            .enumerate()
-            .map(|(idx, handle)| {
-                let name = self
-                    .available_shaders
-                    .get(idx)
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("Unknown");
+        power_saving_section = power_saving_section.add(settings::item(
+            fl!("pause-lid-closed"),
+            toggler(self.power_saving.pause_on_lid_closed).on_toggle(Message::SetPauseOnLidClosed),
+        ));
 
-                let item: Element<'_, Message> = widget::column::with_children(vec![
-                    widget::button::image(handle.clone())
-                        .selected(selected == Some(idx))
-                        .on_press(Message::ShaderSelect(idx))
-                        .into(),
-                    widget::text::caption(name)
-                        .width(Length::Fixed(158.0))
-                        .align_x(Alignment::Center)
-                        .into(),
-                ])
-                .spacing(4)
-                .align_x(Alignment::Center)
-                .into();
+        power_saving_section = power_saving_section.add(settings::item(
+            fl!("prefer-low-power"),
+            toggler(self.prefer_low_power).on_toggle(Message::PreferLowPower),
+        ));
 
-                let mut ctx_items = vec![menu::Item::Button(
-                    fl!("apply-all"),
-                    None,
-                    ShaderAction::All(idx),
-                )];
-                for (m, monitor) in self.monitor_geometry.iter().enumerate() {
-                    ctx_items.push(menu::Item::Button(
-                        format!("{} {}", fl!("wp-show-on"), &monitor.name),
-                        None,
-                        ShaderAction::ShowOn(idx, m),
-                    ));
-                }
-                widget::context_menu(item, Some(menu::items(&HashMap::new(), ctx_items))).into()
-            })
-            .collect();
+        // Build background service section with optional PATH warning
+        let mut bg_service_section = widget::settings::section()
+            .title(fl!("background-service"))
+            .add(settings::item(
+                fl!("use-glowberry"),
+                toggler(self.glowberry_is_default).on_toggle(Message::SetGlowBerryDefault),
+            ));
 
-        widget::flex_row(buttons)
-            .column_spacing(12)
-            .row_spacing(16)
-            .into()
+        if !is_path_order_correct() {
+            bg_service_section =
+                bg_service_section.add(widget::text(fl!("path-order-warning")).size(12).class(
+                    cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.9, 0.6, 0.2)),
+                ));
+        }
+
+        // Build appearance section with window opacity slider
+        let appearance_section =
+            widget::settings::section()
+                .title(fl!("appearance"))
+                .add(settings::item(
+                    fl!("window-opacity"),
+                    widget::row::with_children(vec![
+                        slider(0.0..=1.0, self.window_opacity, Message::SetWindowOpacity)
+                            .on_release(Message::WindowOpacityReleased)
+                            .step(0.01)
+                            .width(Length::Fixed(150.0))
+                            .into(),
+                        widget::text(format!("{:.0}%", self.window_opacity * 100.0))
+                            .width(Length::Fixed(50.0))
+                            .into(),
+                    ])
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                ));
+
+        widget::settings::view_column(vec![
+            bg_service_section.into(),
+            appearance_section.into(),
+            power_saving_section.into(),
+        ])
+        .into()
     }
 }
 
-// Helper functions
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+/// A flat menu row, like a real menu.
+fn menu_entry<'a>(label: String, msg: Message) -> Element<'a, Message> {
+    button::custom(text::body(label))
+        .on_press(msg)
+        .width(Length::Fill)
+        .padding([8, 12])
+        .class(cosmic::theme::Button::MenuItem)
+        .into()
+}
+
+/// A menu row for a destructive action: only its label is tinted.
+fn menu_danger<'a>(label: String, msg: Message) -> Element<'a, Message> {
+    let red: cosmic::iced::Color = cosmic::theme::active().cosmic().destructive.base.into();
+    button::custom(text::body(label).class(cosmic::theme::Text::Color(red)))
+        .on_press(msg)
+        .width(Length::Fill)
+        .padding([8, 12])
+        .class(cosmic::theme::Button::MenuItem)
+        .into()
+}
+
+/// The floating card that holds menu rows.
+fn menu_popup<'a>(rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    container(
+        widget::column::with_children(rows)
+            .spacing(2)
+            .padding(8)
+            .width(Length::Fixed(220.0)),
+    )
+    .class(cosmic::theme::Container::custom(|theme| {
+        let cosmic = theme.cosmic();
+        let component = &cosmic.background(theme.transparent).component;
+        container::Style {
+            background: Some(cosmic::iced::Background::Color(component.base.into())),
+            icon_color: Some(component.on.into()),
+            text_color: Some(component.on.into()),
+            border: cosmic::iced::Border {
+                radius: cosmic.corner_radii.radius_m.into(),
+                width: 1.0,
+                color: component.divider.into(),
+            },
+            shadow: cosmic::iced::Shadow {
+                color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                offset: cosmic::iced::Vector::new(0.0, 2.0),
+                blur_radius: 8.0,
+            },
+            snap: false,
+        }
+    }))
+    .into()
+}
 
 /// Wrap a widget (typically an icon button) with a hover tooltip.
 fn with_tip<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Element<'a, Message> {
@@ -3918,6 +3580,231 @@ fn with_tip<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Elemen
         widget::tooltip::Position::Top,
     )
     .into()
+}
+
+/// Whether a free layer covers a display's center.
+fn layer_covers(layer: &ExtendLayerState, monitor: &MonitorGeometry) -> bool {
+    let cx = monitor.position.0 as f64 + monitor.logical_size.0 as f64 / 2.0;
+    let cy = monitor.position.1 as f64 + monitor.logical_size.1 as f64 / 2.0;
+    let w = layer.image_size.0 as f64 * layer.scale;
+    let h = layer.image_size.1 as f64 * layer.scale;
+    cx >= layer.offset.0
+        && cx <= layer.offset.0 + w
+        && cy >= layer.offset.1
+        && cy <= layer.offset.1 + h
+}
+
+/// Scale and place a free layer so it covers the bounding box of `monitors`.
+fn fit_layer_to(layer: &mut ExtendLayerState, monitors: &[MonitorGeometry]) {
+    if monitors.is_empty() || layer.image_size == (0, 0) {
+        return;
+    }
+    let min_x = monitors.iter().map(|m| m.position.0).min().unwrap_or(0) as f64;
+    let min_y = monitors.iter().map(|m| m.position.1).min().unwrap_or(0) as f64;
+    let max_x = monitors
+        .iter()
+        .map(|m| m.position.0 + m.logical_size.0 as i32)
+        .max()
+        .unwrap_or(0) as f64;
+    let max_y = monitors
+        .iter()
+        .map(|m| m.position.1 + m.logical_size.1 as i32)
+        .max()
+        .unwrap_or(0) as f64;
+
+    let vd_w = max_x - min_x;
+    let vd_h = max_y - min_y;
+    let img_w = layer.image_size.0 as f64;
+    let img_h = layer.image_size.1 as f64;
+    let scale = (vd_w / img_w).max(vd_h / img_h);
+    layer.scale = scale;
+    layer.offset = (
+        min_x + (vd_w - img_w * scale) / 2.0,
+        min_y + (vd_h - img_h * scale) / 2.0,
+    );
+}
+
+/// Fit dropdown index -> config scaling mode.
+fn fit_mode(idx: usize) -> ScalingMode {
+    match idx {
+        1 => ScalingMode::Fit([0.0, 0.0, 0.0]),
+        2 => ScalingMode::Stretch,
+        _ => ScalingMode::Zoom,
+    }
+}
+
+/// Config scaling mode -> fit dropdown index.
+fn fit_index(mode: &ScalingMode) -> usize {
+    match mode {
+        ScalingMode::Zoom => 0,
+        ScalingMode::Fit(_) => 1,
+        ScalingMode::Stretch => 2,
+    }
+}
+
+fn load_label(load: Complexity) -> String {
+    match load {
+        Complexity::Low => fl!("resource-low"),
+        Complexity::Medium => fl!("resource-medium"),
+        Complexity::High => fl!("resource-high"),
+    }
+}
+
+/// Human name for an image: its file stem with separators as spaces.
+fn image_name(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().replace(['_', '-'], " "))
+        .unwrap_or_default()
+}
+
+/// Display name for a color: its hex code, or "Gradient".
+fn color_name(color: &Color) -> String {
+    match color {
+        Color::Single([r, g, b]) => {
+            let c = |v: &f32| (v * 255.0).round() as u8;
+            format!("#{:02x}{:02x}{:02x}", c(r), c(g), c(b))
+        }
+        Color::Gradient(_) => fl!("color-gradient"),
+    }
+}
+
+/// A dropdown with a visible button background, so it reads as a control
+/// before it is hovered.
+fn framed<'a>(control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(control)
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            container::Style {
+                background: Some(cosmic::iced::Background::Color(cosmic.button.base.into())),
+                icon_color: Some(cosmic.button.on.into()),
+                text_color: Some(cosmic.button.on.into()),
+                border: cosmic::iced::Border {
+                    radius: cosmic.corner_radii.radius_s.into(),
+                    ..Default::default()
+                },
+                shadow: cosmic::iced::Shadow::default(),
+                snap: false,
+            }
+        }))
+        .into()
+}
+
+/// Thumbnail + name + one line of detail, for the top of the inspector.
+fn content_header<'a>(
+    thumb: Element<'a, Message>,
+    name: String,
+    detail: String,
+) -> Element<'a, Message> {
+    widget::row::with_children(vec![
+        thumb,
+        widget::column::with_children(vec![
+            text::heading(name).into(),
+            text::caption(detail).into(),
+        ])
+        .spacing(2)
+        .into(),
+    ])
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// A library grid cell: the thumbnail with its name underneath.
+fn library_card<'a>(
+    content: impl Into<Element<'a, Message>>,
+    name: String,
+) -> Element<'a, Message> {
+    widget::column::with_children(vec![
+        content.into(),
+        widget::text::caption(name)
+            .width(Length::Fixed(THUMB_WIDTH as f32))
+            .align_x(Alignment::Center)
+            .into(),
+    ])
+    .spacing(4)
+    .align_x(Alignment::Center)
+    .into()
+}
+
+/// A thumbnail with optional badges in its corners. Badges are inert, so
+/// clicks fall through to the thumbnail.
+fn card_thumb<'a>(
+    thumb: impl Into<Element<'a, Message>>,
+    top_left: Option<Element<'a, Message>>,
+    top_right: Option<Element<'a, Message>>,
+    bottom_right: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let corner = |badge: Element<'a, Message>, x: Alignment, y: Alignment| {
+        container(badge)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(x)
+            .align_y(y)
+            .padding(8)
+    };
+    let mut stack = cosmic::iced::widget::Stack::new().push(thumb.into());
+    if let Some(b) = top_left {
+        stack = stack.push(corner(b, Alignment::Start, Alignment::Start));
+    }
+    if let Some(b) = top_right {
+        stack = stack.push(corner(b, Alignment::End, Alignment::Start));
+    }
+    if let Some(b) = bottom_right {
+        stack = stack.push(corner(b, Alignment::End, Alignment::End));
+    }
+    stack.into()
+}
+
+fn pill_style(
+    bg: cosmic::iced::Color,
+    fg: cosmic::iced::Color,
+) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |_| container::Style {
+        background: Some(cosmic::iced::Background::Color(bg)),
+        icon_color: Some(fg),
+        text_color: Some(fg),
+        border: cosmic::iced::Border {
+            radius: 10.0.into(),
+            ..Default::default()
+        },
+        shadow: cosmic::iced::Shadow::default(),
+        snap: false,
+    })
+}
+
+/// Small play glyph marking a card as a live wallpaper.
+fn live_badge<'a>() -> Element<'a, Message> {
+    container(widget::icon::from_name("media-playback-start-symbolic").size(12))
+        .padding([3, 5])
+        .class(pill_style(
+            cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.55),
+            cosmic::iced::Color::WHITE,
+        ))
+        .into()
+}
+
+/// Translucent dark pill with a short caption (GPU load).
+fn dark_pill<'a>(label: String) -> Element<'a, Message> {
+    container(text::caption(label))
+        .padding([1, 7])
+        .class(pill_style(
+            cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.6),
+            cosmic::iced::Color::WHITE,
+        ))
+        .into()
+}
+
+/// Accent pill marking where an item is staged.
+fn accent_pill<'a>(label: String) -> Element<'a, Message> {
+    let theme = cosmic::theme::active();
+    let cosmic = theme.cosmic();
+    container(text::caption(label))
+        .padding([1, 7])
+        .class(pill_style(
+            cosmic.accent_color().into(),
+            cosmic.on_accent_color().into(),
+        ))
+        .into()
 }
 
 fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, M> {
@@ -3951,22 +3838,6 @@ fn color_image<'a, M: 'a>(color: Color, width: u16, height: u16) -> Element<'a, 
         .into()
 }
 
-fn shader_placeholder<'a, M: 'a>(width: u16, height: u16) -> Element<'a, M> {
-    use cosmic::iced::{Background, Degrees, Gradient, gradient::Linear};
-
-    container(widget::Space::new().width(width).height(height))
-        .class(cosmic::theme::Container::custom(|_| container::Style {
-            background: Some(Background::Gradient(Gradient::Linear(
-                Linear::new(Degrees(135.0))
-                    .add_stop(0.0, cosmic::iced::Color::from_rgb(0.08, 0.02, 0.15))
-                    .add_stop(0.5, cosmic::iced::Color::from_rgb(0.02, 0.08, 0.12))
-                    .add_stop(1.0, cosmic::iced::Color::from_rgb(0.05, 0.02, 0.1)),
-            ))),
-            ..Default::default()
-        }))
-        .into()
-}
-
 fn create_shader_placeholder(width: u32, height: u32) -> ImageHandle {
     let mut data = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
@@ -3978,37 +3849,6 @@ fn create_shader_placeholder(width: u32, height: u32) -> ImageHandle {
         }
     }
     ImageHandle::from_rgba(width, height, data)
-}
-
-/// Calculate iteration multiplier from shader parameters that control loops
-fn calculate_iteration_multiplier(
-    params: &[crate::shader_params::ShaderParam],
-    param_values: Option<&HashMap<String, ParamValue>>,
-) -> f32 {
-    let mut multiplier = 1.0f32;
-
-    for param in params {
-        let name_lower = param.name.to_lowercase();
-        let is_iteration_param = name_lower.contains("iteration")
-            || name_lower.contains("layers")
-            || name_lower.contains("steps")
-            || name_lower.contains("samples")
-            || (name_lower == "zoom" && param.param_type == ParamType::I32)
-            || name_lower.contains("num_")
-            || name_lower.contains("count");
-
-        if is_iteration_param {
-            let value = param_values
-                .and_then(|v| v.get(&param.name))
-                .unwrap_or(&param.default);
-
-            let iter_count = value.as_i32().max(1) as f32;
-            // Normalize: assume default of ~10 iterations is "normal"
-            multiplier *= (iter_count / 10.0).max(0.5);
-        }
-    }
-
-    multiplier
 }
 
 fn discover_shaders() -> Vec<ShaderInfo> {
@@ -4030,8 +3870,7 @@ fn discover_shaders() -> Vec<ShaderInfo> {
     shaders
 }
 
-fn collect_shader_file(path: &std::path::Path, shaders: &mut Vec<ShaderInfo>) {
-    // Try to parse the shader to get metadata
+fn collect_shader_file(path: &Path, shaders: &mut Vec<ShaderInfo>) {
     let parsed = ParsedShader::parse(path);
 
     // Use parsed name if available, otherwise derive from filename
@@ -4046,19 +3885,26 @@ fn collect_shader_file(path: &std::path::Path, shaders: &mut Vec<ShaderInfo>) {
                 .unwrap_or_else(|| "Unknown".to_string())
         });
 
+    // GPU load estimate at default parameters, from the shader's AST.
+    let load = parsed.as_ref().and_then(|p| {
+        let has_texture =
+            p.source_body.contains("iTexture") || p.source_body.contains("textureSample");
+        shader_analysis::analyze_glowberry_shader(&p.source_body, has_texture, None)
+            .ok()
+            .map(|m| m.complexity())
+    });
+
     shaders.push(ShaderInfo {
         path: path.to_path_buf(),
         name,
         parsed,
+        load,
     });
 }
 
 /// Find the wallpaper folder by searching XDG data directories.
 fn find_wallpaper_folder() -> PathBuf {
     let subdir = "backgrounds/cosmic";
-
-    // Use xdg crate to search all data directories
-    // (checks ~/.local/share, then XDG_DATA_DIRS / defaults)
     let xdg = xdg::BaseDirectories::new();
     xdg.find_data_file(subdir)
         .unwrap_or_else(|| PathBuf::from("/usr/share").join(subdir))
@@ -4117,6 +3963,7 @@ fn is_glowberry_default() -> bool {
     let symlink_path = dirs::home_dir()
         .map(|h| h.join(".local/bin/cosmic-bg"))
         .unwrap_or_default();
+
     match std::fs::read_link(symlink_path) {
         Ok(target) => target.to_string_lossy().contains("glowberry"),
         Err(_) => false,
