@@ -892,7 +892,8 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, Renderer> for ExtendEditor<'
             // window background color, drawn just outside each display with a
             // rounded inner edge, covers the corners of the content beneath.
             // All masks go first so a neighbour's band can't cover a border.
-            let bg: core::Color = cosmic_theme.bg_color().into();
+            // Same color the window body uses, translucent when blur is on.
+            let bg: core::Color = cosmic_theme.background(theme.transparent).base.into();
             for monitor in self.monitors.iter() {
                 let r = monitor_widget_rect(state, monitor, &bounds);
                 renderer.fill_quad(

@@ -2617,9 +2617,12 @@ impl GlowBerrySettings {
         let opacity = self.window_opacity;
         cosmic::theme::Container::custom(move |theme| {
             let cosmic = theme.cosmic();
+            // With blur on, the theme's background is already translucent (the
+            // header uses it too); the opacity setting scales it instead of
+            // replacing it, so the body stays frosted like the header.
             let mut bg_color: cosmic::iced::Color =
                 cosmic.background(theme.transparent).base.into();
-            bg_color.a = opacity;
+            bg_color.a *= opacity;
             cosmic::widget::container::Style {
                 background: Some(cosmic::iced::Background::Color(bg_color)),
                 icon_color: Some(cosmic.background(theme.transparent).on.into()),
@@ -2962,8 +2965,8 @@ impl GlowBerrySettings {
                         )
                         .on_press(Message::DisplaySelected(m.name.clone(), false))
                         .width(Length::Fill)
-                        .padding([6, 8])
-                        .class(cosmic::theme::Button::MenuItem)
+                        .padding(0)
+                        .class(cosmic::theme::Button::Transparent)
                         .into(),
                     );
                 }
@@ -3568,7 +3571,9 @@ fn menu_popup<'a>(rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
     )
     .class(cosmic::theme::Container::custom(|theme| {
         let cosmic = theme.cosmic();
-        let component = &cosmic.background(theme.transparent).component;
+        // Opaque: a popover inside the window can't blur what's behind it, so
+        // the frosted (translucent) colors would just show the grid through.
+        let component = &cosmic.background(false).component;
         container::Style {
             background: Some(cosmic::iced::Background::Color(component.base.into())),
             icon_color: Some(component.on.into()),
