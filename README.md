@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/6f32c315-d92e-4540-a30c-326900ca58cd
 
 GlowBerry repository hosting is graciously provided by [Cloudsmith](https://cloudsmith.com).
 
-For Pop!_OS / Ubuntu 24.04 (Noble):
+For Pop!_OS / Ubuntu 24.04 (Noble) and 26.04 (Resolute):
 
 ```sh
 # Add the Cloudsmith repository

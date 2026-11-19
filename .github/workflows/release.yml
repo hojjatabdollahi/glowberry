@@ -13,8 +13,17 @@ permissions:
 
 jobs:
   build-and-publish:
-    name: Build .deb, draft a pre-release, push to Cloudsmith
-    runs-on: ubuntu-24.04
+    name: Build .deb, draft a pre-release, push to Cloudsmith (${{ matrix.codename }})
+    # Build on each release so $auto picks up that release's library package names.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            codename: noble
+          - runner: ubuntu-26.04
+            codename: resolute
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
@@ -40,6 +49,8 @@ jobs:
 
       # Toolchain comes from rust-toolchain.toml via the runner's rustup.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.codename }}
 
       - name: Verify tag matches workspace version
         run: |
@@ -58,7 +69,8 @@ jobs:
         run: cargo build --release --locked --workspace
 
       - name: Build .deb package
-        run: SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo deb --no-build
+        run: SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo deb --no-build --deb-revision "1~${{ matrix.codename }}"
+        # ~codename keeps file names apart in the GitHub Release and sorts noble < resolute for upgrades
 
       - name: Locate .deb file
         id: deb
@@ -76,12 +88,12 @@ jobs:
           generate_release_notes: true
 
       - name: Install Cloudsmith CLI
-        run: pip install --upgrade cloudsmith-cli
+        run: pipx install cloudsmith-cli
 
       - name: Push .deb to Cloudsmith
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
           cloudsmith push deb \
-            "cosmetics/glowberry/pop/noble" \
+            "cosmetics/glowberry/pop/${{ matrix.codename }}" \
             "${{ steps.deb.outputs.path }}"
